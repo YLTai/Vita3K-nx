@@ -41,6 +41,10 @@ typedef struct LsfgNxCreateInfo {
 LsfgNxRuntime *lsfg_nx_create(const LsfgNxCreateInfo *info);
 void lsfg_nx_destroy(LsfgNxRuntime *runtime);
 
+/* Successful QueuePresentKHR calls, including both original and generated
+ * images. The caller must serialize this query with present and destroy. */
+uint64_t lsfg_nx_get_present_count(const LsfgNxRuntime *runtime);
+
 /*
  * Returns true when the bridge consumed the presentation and wrote result.
  * Runtime faults are reported as errors. They deliberately do not fall back to

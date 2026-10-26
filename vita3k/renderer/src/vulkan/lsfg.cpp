@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Vita3K team
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <renderer/presentation_rate.h>
 #include <renderer/vulkan/lsfg.h>
 #include <renderer/vulkan/state.h>
 
@@ -52,12 +53,14 @@ struct SessionState
   unsigned high_fps_slow_samples = 0;
   bool previous_requested = false;
   std::atomic_int rate_decision{-1};
+  PresentationRate output_rate;
 };
 
 SessionState s_state;
 
 void DestroyRuntimeLocked()
 {
+  s_state.output_rate.reset();
   if (!s_state.runtime)
     return;
 
@@ -266,6 +269,17 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
                           raw_present_info.swapchainCount == 1 && raw_present_info.pSwapchains &&
                           raw_present_info.pSwapchains[0] == s_state.swapchain;
 
+  const auto present_normally = [&]() {
+    const vk::Result result = PresentNormally(state, present_info);
+    if (compatible && !dialog_running &&
+        s_state.enabled.load(std::memory_order_acquire) &&
+        (result == vk::Result::eSuccess || result == vk::Result::eSuboptimalKHR))
+      s_state.output_rate.record(1);
+    else
+      s_state.output_rate.reset();
+    return result;
+  };
+
   if (compatible && dialog_running)
   {
     DestroyRuntimeLocked();
@@ -273,7 +287,7 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
     ResetRateTrackingLocked();
     if (enabled)
       s_state.status = "LSFG paused for system dialog";
-    return PresentNormally(state, present_info);
+    return present_normally();
   }
 
   std::uint64_t source_interval = 0;
@@ -305,7 +319,7 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
       if (s_state.available.load(std::memory_order_acquire))
         s_state.status = "Available; currently Off";
     }
-    return PresentNormally(state, present_info);
+    return present_normally();
   }
 
   if (s_state.rate_decision < 0 && s_state.source_samples >= 8)
@@ -320,7 +334,7 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
       s_state.high_fps_slow_samples = 0;
 
     if (s_state.high_fps_slow_samples < 16)
-      return PresentNormally(state, present_info);
+      return present_normally();
 
     s_state.rate_decision = 0;
     s_state.high_fps_slow_samples = 0;
@@ -329,7 +343,7 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
   if (s_state.rate_decision < 0)
   {
     s_state.status = "Measuring the game's native frame rate";
-    return PresentNormally(state, present_info);
+    return present_normally();
   }
 
   if (!s_state.runtime)
@@ -337,7 +351,7 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
     if (s_state.initialization_attempted || s_state.state != &state)
     {
       s_state.enabled.store(false, std::memory_order_release);
-      return PresentNormally(state, present_info);
+      return present_normally();
     }
     s_state.initialization_attempted = true;
 
@@ -367,12 +381,14 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
       s_state.available.store(false, std::memory_order_release);
       s_state.status = "LSFG initialization failed";
       // Creation did not consume the render-finished semaphore.
-      return PresentNormally(state, present_info);
+      return present_normally();
     }
+    s_state.output_rate.reset();
     s_state.status = "Frame generation On";
   }
 
   VkResult result = VK_ERROR_INITIALIZATION_FAILED;
+  const uint64_t presented_before = lsfg_nx_get_present_count(s_state.runtime);
   if (!lsfg_nx_present(s_state.runtime, queue, &raw_present_info, &result))
   {
     s_state.status = "LSFG rejected the active swapchain";
@@ -380,7 +396,7 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
     s_state.available.store(false, std::memory_order_release);
     DestroyRuntimeLocked();
     // The bridge did not consume this presentation.
-    return PresentNormally(state, present_info);
+    return present_normally();
   }
 
   if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
@@ -389,6 +405,10 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
     s_state.enabled.store(false, std::memory_order_release);
     s_state.available.store(false, std::memory_order_release);
     DestroyRuntimeLocked();
+  }
+  else
+  {
+    s_state.output_rate.record(lsfg_nx_get_present_count(s_state.runtime) - presented_before);
   }
   return static_cast<vk::Result>(result);
 }
@@ -418,6 +438,8 @@ bool request_enabled(bool enabled)
     return false;
   }
 
+  if (enabled != s_state.enabled.load(std::memory_order_acquire))
+    s_state.output_rate.reset();
   s_state.enabled.store(enabled, std::memory_order_release);
   s_state.status = enabled ? "Measuring the game's native frame rate" :
                              "Available; currently Off";
@@ -428,5 +450,14 @@ std::string get_status()
 {
   std::lock_guard lock{s_state.mutex};
   return s_state.status;
+}
+
+std::optional<uint32_t> get_output_fps()
+{
+  std::lock_guard lock{s_state.mutex};
+  if (!s_state.enabled.load(std::memory_order_acquire) ||
+      !s_state.available.load(std::memory_order_acquire))
+    return std::nullopt;
+  return s_state.output_rate.fps();
 }
 } // namespace renderer::vulkan::lsfg
