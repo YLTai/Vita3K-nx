@@ -135,6 +135,7 @@ void SwitchAudioAdapter::update_thread_func() {
     // audrenWaitFrame and only does a short update per audio frame, but late
     // updates are heard as dropouts. Keep it off the cores the emulator saturates.
     switch_pin_to_helper_core("audio thread", 43);
+    SwitchCpuProfileThread cpu_profile("switch-audio");
 
     while (running.load()) {
         audrenWaitFrame(); // blocks ~5 ms until the next renderer frame
