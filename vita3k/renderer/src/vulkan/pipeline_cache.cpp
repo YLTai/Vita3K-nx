@@ -904,6 +904,7 @@ vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(con
 
 void PipelineCache::compiler_thread(MemState &mem) {
     switch_allow_helper_core("shader compiler thread");
+    SwitchCpuProfileThread cpu_profile("shader-compiler");
     moodycamel::ConsumerToken consumer_token(pipeline_compile_queue);
 
     CompileRequest *queued_request;
