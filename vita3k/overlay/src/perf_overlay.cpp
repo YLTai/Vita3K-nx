@@ -62,19 +62,21 @@ void perf_overlay::set_position(screen_quadrant quadrant) {
 void perf_overlay::set_fps_data(uint32_t fps, uint32_t avg_fps, uint32_t min_fps,
     uint32_t max_fps, uint32_t ms_per_frame,
     const float *fps_values, uint32_t fps_values_count,
-    uint32_t fps_offset) {
+    uint32_t fps_offset, std::optional<uint32_t> output_fps) {
     const bool changed = (m_fps != fps || m_avg_fps != avg_fps
         || m_min_fps != min_fps || m_max_fps != max_fps
         || m_ms_per_frame != ms_per_frame);
+    const bool output_changed = m_output_fps != output_fps;
 
     m_fps = fps;
+    m_output_fps = output_fps;
     m_avg_fps = avg_fps;
     m_min_fps = min_fps;
     m_max_fps = max_fps;
     m_ms_per_frame = ms_per_frame;
 
-    if (changed || m_force_repaint) {
-        if (m_graph_enabled && fps_values && fps_values_count > 0) {
+    if (changed || output_changed || m_force_repaint) {
+        if ((changed || m_force_repaint) && m_graph_enabled && fps_values && fps_values_count > 0) {
             m_fps_graph.record_datapoint(static_cast<float>(fps), true);
             m_fps_graph.set_title(fmt::format("Framerate: {:04.1f}", static_cast<float>(fps)).c_str());
         }
@@ -86,19 +88,22 @@ void perf_overlay::set_fps_data(uint32_t fps, uint32_t avg_fps, uint32_t min_fps
 
 void perf_overlay::update_text() {
     std::string text;
+    const std::string fps_text = m_output_fps
+        ? fmt::format("{}->{}", m_fps, *m_output_fps)
+        : fmt::format("{}", m_fps);
 
     switch (m_detail) {
     case perf_detail_level::minimum:
-        text = fmt::format("FPS: {}", m_fps);
+        text = fmt::format("FPS: {}", fps_text);
         break;
     case perf_detail_level::low:
-        text = fmt::format("FPS: {} ({} ms)", m_fps, m_ms_per_frame);
+        text = fmt::format("FPS: {} ({} ms)", fps_text, m_ms_per_frame);
         break;
     case perf_detail_level::medium:
     case perf_detail_level::maximum:
         text = fmt::format("FPS: {} ({} ms)\n"
                            "Avg: {}  Min: {}  Max: {}",
-            m_fps, m_ms_per_frame,
+            fps_text, m_ms_per_frame,
             m_avg_fps, m_min_fps, m_max_fps);
         break;
     }

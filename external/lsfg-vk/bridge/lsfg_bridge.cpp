@@ -119,6 +119,10 @@ struct LsfgNxRuntime {
         return candidate == swapchain;
     }
 
+    [[nodiscard]] uint64_t presentCount() const {
+        return presentedFrames;
+    }
+
     VkResult present(VkQueue queue, const VkPresentInfoKHR& info) {
         if (queue != vulkan->queue())
             throw std::runtime_error("present queue differs from borrowed LSFG queue");
@@ -283,23 +287,30 @@ private:
     }
 
     VkResult presentGenerated(VkQueue queue, const VkPresentInfoKHR& original,
-            uint32_t imageIndex, VkSemaphore waitSemaphore) const {
+            uint32_t imageIndex, VkSemaphore waitSemaphore) {
         VkPresentInfoKHR generated = original;
         generated.waitSemaphoreCount = 1;
         generated.pWaitSemaphores = &waitSemaphore;
         generated.pImageIndices = &imageIndex;
         generated.pResults = nullptr;
-        return vulkan->df().QueuePresentKHR(queue, &generated);
+        return presentAndCount(queue, generated);
     }
 
     VkResult presentOriginal(VkQueue queue, const VkPresentInfoKHR& original,
-            uint32_t imageIndex, VkSemaphore waitSemaphore, bool keepNextChain) const {
+            uint32_t imageIndex, VkSemaphore waitSemaphore, bool keepNextChain) {
         VkPresentInfoKHR output = original;
         output.pNext = keepNextChain ? original.pNext : nullptr;
         output.waitSemaphoreCount = 1;
         output.pWaitSemaphores = &waitSemaphore;
         output.pImageIndices = &imageIndex;
-        return vulkan->df().QueuePresentKHR(queue, &output);
+        return presentAndCount(queue, output);
+    }
+
+    VkResult presentAndCount(VkQueue queue, const VkPresentInfoKHR& info) {
+        const VkResult result = vulkan->df().QueuePresentKHR(queue, &info);
+        if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR)
+            ++presentedFrames;
+        return result;
     }
 
     VkSwapchainKHR swapchain{};
@@ -313,6 +324,7 @@ private:
 
     std::array<bool, 2> sourceInitialized{false, false};
     uint64_t realFrameIndex{};
+    uint64_t presentedFrames{};
     size_t slotCursor{};
 };
 
@@ -329,6 +341,10 @@ extern "C" LsfgNxRuntime *lsfg_nx_create(const LsfgNxCreateInfo *info) {
 
 extern "C" void lsfg_nx_destroy(LsfgNxRuntime *runtime) {
     delete runtime;
+}
+
+extern "C" uint64_t lsfg_nx_get_present_count(const LsfgNxRuntime *runtime) {
+    return runtime ? runtime->presentCount() : 0;
 }
 
 extern "C" bool lsfg_nx_present(LsfgNxRuntime *runtime, VkQueue queue,

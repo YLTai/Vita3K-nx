@@ -12,6 +12,8 @@
 #endif
 #include <vulkan/vulkan.hpp>
 
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -43,6 +45,9 @@ bool is_dll_installed();
 bool is_available();
 bool is_enabled();
 bool is_high_fps_passthrough();
+// Measured successful presentations per second, including generated frames.
+// No value while disabled, warming up, paused for a dialog, or stale.
+std::optional<uint32_t> get_output_fps();
 bool request_enabled(bool enabled);
 std::string get_status();
 

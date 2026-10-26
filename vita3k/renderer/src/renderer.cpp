@@ -30,11 +30,16 @@
 #include <renderer/gl/types.h>
 #include <renderer/vulkan/functions.h>
 
+#ifdef __SWITCH__
+#include <renderer/vulkan/lsfg.h>
+#endif
+
 #include <gxm/functions.h>
 #include <util/log.h>
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 
 namespace renderer {
 
@@ -87,10 +92,15 @@ void State::update_overlays() {
 
         perf->set_position(static_cast<overlay::screen_quadrant>(perf_overlay.position));
         perf->set_detail_level(static_cast<overlay::perf_detail_level>(perf_overlay.detail));
+        std::optional<uint32_t> output_fps;
+#ifdef __SWITCH__
+        if (current_backend == Backend::Vulkan)
+            output_fps = vulkan::lsfg::get_output_fps();
+#endif
         perf->set_fps_data(perf_overlay.fps, perf_overlay.avg_fps, perf_overlay.min_fps,
             perf_overlay.max_fps, perf_overlay.ms_per_frame,
             perf_overlay.fps_values.data(), perf_overlay.fps_values_count,
-            perf_overlay.current_fps_offset);
+            perf_overlay.current_fps_offset, output_fps);
     } else {
         auto perf = overlay_manager->get<overlay::perf_overlay>();
         if (perf)

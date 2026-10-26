@@ -22,6 +22,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace overlay {
@@ -53,7 +54,7 @@ struct perf_overlay : public overlay {
     void set_fps_data(uint32_t fps, uint32_t avg_fps, uint32_t min_fps,
         uint32_t max_fps, uint32_t ms_per_frame,
         const float *fps_values, uint32_t fps_values_count,
-        uint32_t fps_offset);
+        uint32_t fps_offset, std::optional<uint32_t> output_fps = std::nullopt);
 
     compiled_resource get_compiled() override;
 
@@ -71,6 +72,7 @@ private:
 
     // Cached stats
     uint32_t m_fps = 0;
+    std::optional<uint32_t> m_output_fps;
     uint32_t m_avg_fps = 0;
     uint32_t m_min_fps = 0;
     uint32_t m_max_fps = 0;
