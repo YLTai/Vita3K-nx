@@ -13,6 +13,7 @@ SDK_REVISION="$(sed -n 's/^SDK_REVISION=//p' "$PREPARE")"
 [[ "$SDK_REVISION" =~ ^[0-9a-f]{40}$ ]]
 SDK="$BUILD_ROOT/mesa-$SDK_VERSION-switch-unified-horizon-sdk"
 SOURCE="$BUILD_ROOT/mesa-source"
+SDK_PATCH="$ROOT/.ci/patches/mesa-nvk-alloca.patch"
 JOBS="${VITA3K_BUILD_JOBS:-2}"
 export DEVKITPRO="${DEVKITPRO:-/opt/devkitpro}"
 export DEVKITA64="${DEVKITA64:-$DEVKITPRO/devkitA64}"
@@ -76,6 +77,11 @@ git -C "$SOURCE" fetch --depth 1 https://github.com/danfromtico/mesa-switch.git 
 git -C "$SOURCE" checkout --detach FETCH_HEAD
 test "$(git -C "$SOURCE" rev-parse HEAD)" = "$SDK_REVISION"
 test "$(cat "$SOURCE/VERSION")" = "$SDK_VERSION"
+
+# NVK_BUILD_ID_OVERRIDE uses alloca(), which needs Mesa's portability header
+# on Switch/newlib. Keep the pinned Mesa revision and apply only this include.
+git -C "$SOURCE" apply --check "$SDK_PATCH"
+git -C "$SOURCE" apply "$SDK_PATCH"
 
 # Debian's SPIRV-Tools is too old for mesa_clc. Use the version in Docker.rust.
 SPIRV_TAG=vulkan-sdk-1.3.290.0
@@ -176,6 +182,8 @@ printf '%s\n' "$SDK_REVISION" > "$staged/share/mesa-switch/revision"
 {
     printf 'Mesa source: https://github.com/danfromtico/mesa-switch\n'
     printf 'Mesa version: %s\nSPIRV-Tools tag: %s\n' "$SDK_VERSION" "$SPIRV_TAG"
+    printf 'Mesa source patch (SHA256):\n'
+    (cd "$ROOT" && sha256sum .ci/patches/mesa-nvk-alloca.patch)
     rustc --version
     bindgen --version
     cbindgen --version

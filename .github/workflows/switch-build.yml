@@ -75,7 +75,7 @@ jobs:
           path: |
             ${{ env.SWITCH_VULKAN_SDK }}
             ${{ env.SWITCH_OPENSSL_DIR }}
-          key: switch-deps-v1-${{ steps.toolchain.outputs.digest }}-${{ hashFiles('.ci/build-switch-sdk.sh', 'scripts/prepare-switch-*.sh', 'cmake/switch/openssl-compat/**') }}
+          key: switch-deps-v1-${{ steps.toolchain.outputs.digest }}-${{ hashFiles('.ci/build-switch-sdk.sh', '.ci/patches/**', 'scripts/prepare-switch-*.sh', 'cmake/switch/openssl-compat/**') }}
 
       - name: Build unified Mesa SDK from the pinned source
         if: steps.deps.outputs.cache-hit != 'true'

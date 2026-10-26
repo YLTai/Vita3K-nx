@@ -38,11 +38,13 @@ The SDK helper reads the Mesa version and commit from
 `efaf009f454e35fc6bcf4357e52455e30bfc3356`). No public download of the script's
 exact SDK ZIP was found. Instead, the helper follows the
 [Mesa Switch Linux CI recipe](https://github.com/danfromtico/mesa-switch/blob/main/.github/workflows/build.yml)
-to build that commit from source. It records the actual output checksums and
+to build that commit from source. A CI-only patch adds `c99_alloca.h` to NVK's
+physical-device source, which needs `alloca()` when `nvk-build-id` is set.
+The SDK records the patch hash and actual output checksums, and
 passes the repository's SDK `--check`. This does **not** reproduce or bypass the
 unpublished ZIP's archive checksum; the ZIP download/extraction path is unused.
 
-Mesa and OpenSSL are cached by the devkitPro package versions and build scripts.
+Mesa and OpenSSL are cached by the devkitPro package versions, scripts and patches.
 The first run builds Mesa's host tools, Rust bindings and graphics libraries;
 subsequent runs reuse the checked SDK. The container and Rust nightly follow
 upstream's moving versions, so this is not a bit-for-bit reproducible build.
