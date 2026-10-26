@@ -73,6 +73,7 @@ void preemption_watchdog(EmuEnvState &emuenv) {
     // Above every core-3 tenant: it must run precisely when the app cores are
     // saturated, which is the only time it does anything.
     switch_pin_to_helper_core("preemption watchdog", 42);
+    SwitchCpuProfileThread cpu_profile("preempt-watchdog");
 
     struct Watched {
         uint64_t ticks = 0;

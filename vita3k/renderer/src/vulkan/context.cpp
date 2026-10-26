@@ -57,6 +57,7 @@ static void copy_readback_to_guest(const MemState &mem, Address address, const u
 
 void VKContext::wait_thread_function(const MemState &mem) {
     switch_pin_to_hardware_priority("Vulkan wait thread", 45);
+    SwitchCpuProfileThread cpu_profile("vulkan-wait");
 
     // try to wait for multiple fences at the same time if possible
     std::vector<vk::Fence> fences;

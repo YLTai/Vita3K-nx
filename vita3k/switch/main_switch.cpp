@@ -1487,6 +1487,7 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
 
     do {
         relaunch_requested = false;
+        SwitchCpuProfileSession cpu_profile(launch_request.app_path.c_str());
         SwitchFrameHost frame_host(nwindow);
         std::optional<AppLaunchRequest> pending_launch_request;
 
@@ -1940,6 +1941,7 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
             }
 
             app::update_runtime_metrics(*emuenv, runtime_metrics);
+            cpu_profile.poll();
 
             if (!session_controller->is_running())
                 running = false;
@@ -1984,6 +1986,7 @@ int main(int argc, char *argv[]) {
     // scheduler). A title-takeover homebrew is otherwise allowed to use it, and any
     // busy thread there starves the system and hard-locks the console.
     switch_pin_to_app_cores("main thread");
+    SwitchCpuProfileThread cpu_profile_thread("main");
 
     // libnx runtime: romfs (bundled static assets) + sockets (net/http).
     romfsInit();

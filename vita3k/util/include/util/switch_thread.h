@@ -12,6 +12,31 @@
 
 // Do not include <switch.h> here: its Mutex and Semaphore names collide with
 // Vita3K kernel types. The implementation owns the libnx dependency.
+// Diagnostic measurement only: does not alter core affinity or thread priority.
+// Sample registered libnx thread CPU ticks on each core while their handles are valid.
+class SwitchCpuProfileThread {
+public:
+    explicit SwitchCpuProfileThread(const char *label);
+    ~SwitchCpuProfileThread();
+    SwitchCpuProfileThread(const SwitchCpuProfileThread &) = delete;
+    SwitchCpuProfileThread &operator=(const SwitchCpuProfileThread &) = delete;
+private:
+    uint64_t token_ = 0;
+};
+
+// Per-title session: writes CSV to sdmc:/switch/vita3k/logs/.
+class SwitchCpuProfileSession {
+public:
+    explicit SwitchCpuProfileSession(const char *title_id);
+    ~SwitchCpuProfileSession();
+    void poll();
+    SwitchCpuProfileSession(const SwitchCpuProfileSession &) = delete;
+    SwitchCpuProfileSession &operator=(const SwitchCpuProfileSession &) = delete;
+};
+
+enum class SwitchCpuProfilePhase : uint8_t { Batches, RenderFrame, Present };
+void switch_cpu_profile_render_phase(SwitchCpuProfilePhase phase, uint64_t begin_tick, uint64_t end_tick);
+
 #ifdef __SWITCH__
 void switch_pin_to_app_cores(const char *what);
 // Honour a guest thread's CPU affinity. The Vita's three user cores live in
@@ -57,6 +82,12 @@ private:
     bool m_held = false;
 };
 #else
+inline SwitchCpuProfileThread::SwitchCpuProfileThread(const char *) {}
+inline SwitchCpuProfileThread::~SwitchCpuProfileThread() {}
+inline SwitchCpuProfileSession::SwitchCpuProfileSession(const char *) {}
+inline SwitchCpuProfileSession::~SwitchCpuProfileSession() {}
+inline void SwitchCpuProfileSession::poll() {}
+inline void switch_cpu_profile_render_phase(SwitchCpuProfilePhase, uint64_t, uint64_t) {}
 inline void switch_pin_to_app_cores(const char *) {}
 inline void switch_apply_guest_thread_affinity(int32_t) {}
 inline bool switch_pin_to_helper_core(const char *, int32_t) { return false; }

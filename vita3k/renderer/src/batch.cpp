@@ -219,6 +219,7 @@ static void render_loop(renderer::State &state, DisplayState &display, GxmState 
     // Rendering is sustained work, so use core 3's preemptive priority rather
     // than the higher priorities reserved for short hardware helper threads.
     switch_pin_to_hardware_priority("render thread", 63);
+    SwitchCpuProfileThread cpu_profile("render");
 
     if (state.precompile_requested) {
         // Compiling the shader cache is CPU bound and only ever draws a progress
@@ -293,7 +294,14 @@ static void render_loop(renderer::State &state, DisplayState &display, GxmState 
             if (!state.set_current())
                 break;
 
+#ifdef __SWITCH__
+            const uint64_t batch_start = armGetSystemTick();
+#endif
             process_batches(state, state.features, mem, config, 500);
+#ifdef __SWITCH__
+            switch_cpu_profile_render_phase(SwitchCpuProfilePhase::Batches,
+                batch_start, armGetSystemTick());
+#endif
 
 
             if (state.render_abort.load(std::memory_order_relaxed))
@@ -313,8 +321,20 @@ static void render_loop(renderer::State &state, DisplayState &display, GxmState 
                 }
             }
 
+#ifdef __SWITCH__
+            const uint64_t render_start = armGetSystemTick();
+#endif
             state.render_frame(display, gxm, mem);
+#ifdef __SWITCH__
+            const uint64_t present_start = armGetSystemTick();
+            switch_cpu_profile_render_phase(SwitchCpuProfilePhase::RenderFrame,
+                render_start, present_start);
+#endif
             state.swap_window();
+#ifdef __SWITCH__
+            switch_cpu_profile_render_phase(SwitchCpuProfilePhase::Present,
+                present_start, armGetSystemTick());
+#endif
             state.async_flip_requested.store(false, std::memory_order_relaxed);
 
     #ifdef TRACY_ENABLE
