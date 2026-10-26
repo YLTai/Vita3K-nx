@@ -27,6 +27,12 @@ The workflow uses the devkitPro Linux container, applies the pinned submodule
 patches, builds OpenSSL, builds the emulator with CMake/Ninja, then bundles it
 with the launcher using Make. It uses the checked-in launcher version and assets.
 
+Use the toolchain and Switch portlibs already installed in the official image.
+Do not run `dkp-pacman -S`/`-Syu` in Actions: devkitPro
+[blocks package downloads from GitHub CI](https://github.com/devkitPro/installer/issues/69).
+The Mesa helper temporarily moves the packaged GL files aside and restores
+them locally on exit; it does not uninstall or download any devkitPro packages.
+
 The SDK helper reads the Mesa version and commit from
 `scripts/prepare-switch-vulkan-sdk.sh` (currently 26.2.1 at
 `efaf009f454e35fc6bcf4357e52455e30bfc3356`). No public download of the script's

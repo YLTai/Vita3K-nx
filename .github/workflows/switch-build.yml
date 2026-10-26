@@ -41,7 +41,9 @@ jobs:
           apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build pkg-config git curl \
             ca-certificates perl python3
-          dkp-pacman -Syu --noconfirm --needed switch-dev switch-portlibs
+          # The official image already includes switch-dev and switch-portlibs.
+          # devkitPro blocks package downloads from GitHub-hosted runners.
+          dkp-pacman -Q devkitA64 libnx switch-pkg-config switch-mesa
 
       - uses: actions/checkout@v4
         with:

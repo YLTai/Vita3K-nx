@@ -37,15 +37,40 @@ apt-get install -y --no-install-recommends \
     python3-pip python3-setuptools python3-wheel
 pip3 install --break-system-packages --no-cache-dir meson mako pyyaml packaging
 
-# Do not let the packaged GL implementation shadow the unified SDK build.
-# Restore it after building: the standalone launcher still uses that portlib.
-if dkp-pacman -Q switch-mesa >/dev/null 2>&1; then
-    dkp-pacman -Rdd --noconfirm switch-mesa
-fi
-dkp-pacman -S --noconfirm --needed \
-    switch-pkg-config switch-zlib switch-libzstd switch-libexpat switch-libdrm_nouveau
+# Use the packages baked into the official image. GitHub runners cannot fetch
+# packages from devkitPro, including reinstalling Mesa after the SDK build.
+dkp-pacman -Q switch-mesa switch-pkg-config switch-zlib switch-libzstd \
+    switch-libexpat switch-libdrm_nouveau
 
 mkdir -p "$BUILD_ROOT"
+
+# Hide the packaged GL implementation during configuration, then restore the
+# exact same files for the launcher, including when the SDK build fails.
+# Querying the local package manifest leaves the package database unchanged.
+mesa_backup="$(mktemp -d "$BUILD_ROOT/mesa-portlib.XXXXXX")"
+dkp-pacman -Qlq switch-mesa > "$mesa_backup/files"
+mapfile -t mesa_files < "$mesa_backup/files"
+restore_packaged_mesa() {
+    local path saved
+    for path in "${mesa_files[@]}"; do
+        saved="$mesa_backup$path"
+        if [[ -f "$saved" || -L "$saved" ]]; then
+            mkdir -p "$(dirname "$path")"
+            mv -- "$saved" "$path" || return
+        fi
+    done
+}
+trap restore_packaged_mesa EXIT
+for path in "${mesa_files[@]}"; do
+    [[ -f "$path" || -L "$path" ]] || continue
+    [[ "$path" == "$DEVKITPRO/portlibs/switch/"* ]] || {
+        echo "Unexpected switch-mesa package file: $path" >&2
+        exit 1
+    }
+    mkdir -p "$mesa_backup$(dirname "$path")"
+    mv -- "$path" "$mesa_backup$path"
+done
+
 git init "$SOURCE"
 git -C "$SOURCE" fetch --depth 1 https://github.com/danfromtico/mesa-switch.git "$SDK_REVISION"
 git -C "$SOURCE" checkout --detach FETCH_HEAD
@@ -82,7 +107,8 @@ install -m 644 "$SOURCE/bindgen-atomic-shim.h" /usr/local/libexec/bindgen-atomic
 # Keep the Switch nouveau.h API, not Mesa's incompatible Linux DRM facade.
 inc="$DEVKITPRO/portlibs/switch/include"
 if ! grep -q 'struct nouveau_list' "$inc/nouveau.h"; then
-    dkp-pacman -S --noconfirm switch-libdrm_nouveau
+    echo 'The container must provide the switch-libdrm_nouveau nouveau.h header.' >&2
+    exit 1
 fi
 install -m 644 "$SOURCE/src/nouveau/headers/nv_device_info.h" "$inc/"
 
@@ -163,4 +189,5 @@ printf '%s\n' "$SDK_REVISION" > "$staged/share/mesa-switch/revision"
 )
 mv "$staged" "$SDK"
 bash "$PREPARE" --check
-dkp-pacman -S --noconfirm --needed switch-mesa
+restore_packaged_mesa
+trap - EXIT
