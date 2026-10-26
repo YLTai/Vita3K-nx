@@ -72,6 +72,15 @@ jobs:
       - name: Apply Switch submodule patches
         run: bash scripts/apply-switch-submodule-patches.sh
 
+      - name: Validate language catalog generation
+        run: |
+          python3 --version
+          python3 tools/i18n/generate_lang_catalog.py \
+            --input-dir i18n/lang \
+            --strings-def vita3k/lang/include/lang/strings.def \
+            --output-header build-switch-preflight/generated_catalog.h \
+            --output-source build-switch-preflight/generated_catalog.cpp
+
       - name: Restore built dependencies
         id: deps
         uses: actions/cache/restore@v4
