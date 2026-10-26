@@ -16,6 +16,7 @@ SOURCE="$BUILD_ROOT/mesa-source"
 SDK_PATCHES=(
     "$ROOT/.ci/patches/mesa-nvk-alloca.patch"
     "$ROOT/.ci/patches/mesa-optional-libelf.patch"
+    "$ROOT/.ci/patches/mesa-cross-archiver.patch"
 )
 JOBS="${VITA3K_BUILD_JOBS:-2}"
 export DEVKITPRO="${DEVKITPRO:-/opt/devkitpro}"

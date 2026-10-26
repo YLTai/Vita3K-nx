@@ -103,6 +103,9 @@ jobs:
           bash scripts/prepare-switch-vulkan-sdk.sh --check
           bash scripts/prepare-switch-openssl.sh --check
 
+      - name: Check Mesa Rust linkage
+        run: bash .ci/check-switch-sdk-link.sh
+
       # Save before compiling Vita3K so a failed application build can reuse SDKs.
       - name: Cache built dependencies
         if: steps.deps.outputs.cache-hit != 'true'
@@ -163,6 +166,7 @@ jobs:
             build-switch/CMakeFiles/CMakeConfigureLog.yaml
             build-switch-deps/mesa-source/builddir-*/meson-logs/
             build-switch-deps/toolchain.txt
+            build-switch-preflight/mesa-link/undefined-symbols.txt
             switch-launcher/dependencies/build/CMakeFiles/CMakeConfigureLog.yaml
           if-no-files-found: ignore
           retention-days: 7
