@@ -2,6 +2,8 @@ name: Build CI
 
 on:
   push:
+    branches-ignore:
+      - ci/switch-build
     paths-ignore:
       - '**.md'
   pull_request:

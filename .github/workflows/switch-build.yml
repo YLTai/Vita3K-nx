@@ -1,0 +1,156 @@
+name: Build Switch NRO
+
+on:
+  push:
+    branches: [ci/switch-build]
+    paths-ignore:
+      - '**.md'
+  # GitHub only exposes this button once the workflow is on the default branch.
+  # The CI-only branch uses the push trigger above.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: switch-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    container:
+      image: devkitpro/devkita64:latest
+      options: --user root
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEVKITPRO: /opt/devkitpro
+      DEVKITA64: /opt/devkitpro/devkitA64
+      VITA3K_BUILD_JOBS: '2'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      LC_ALL: C
+      TZ: UTC
+
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config git curl \
+            ca-certificates perl python3
+          dkp-pacman -Syu --noconfirm --needed switch-dev switch-portlibs
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Resolve dependency paths and toolchain version
+        id: toolchain
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          echo "$DEVKITA64/bin" >> "$GITHUB_PATH"
+          echo "$DEVKITPRO/tools/bin" >> "$GITHUB_PATH"
+          echo "$DEVKITPRO/portlibs/switch/bin" >> "$GITHUB_PATH"
+          sdk_version=$(sed -n 's/^SDK_VERSION=//p' scripts/prepare-switch-vulkan-sdk.sh)
+          openssl_version=$(sed -n 's/^OPENSSL_VERSION=//p' scripts/prepare-switch-openssl.sh)
+          test -n "$sdk_version" && test -n "$openssl_version"
+          echo "SWITCH_VULKAN_SDK=$GITHUB_WORKSPACE/build-switch-deps/mesa-$sdk_version-switch-unified-horizon-sdk" >> "$GITHUB_ENV"
+          echo "SWITCH_OPENSSL_DIR=$GITHUB_WORKSPACE/build-switch-deps/openssl-$openssl_version" >> "$GITHUB_ENV"
+          mkdir -p build-switch-deps
+          dkp-pacman -Q | sort > build-switch-deps/toolchain.txt
+          digest=$(sha256sum build-switch-deps/toolchain.txt | cut -d ' ' -f 1)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Restore built dependencies
+        id: deps
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.SWITCH_VULKAN_SDK }}
+            ${{ env.SWITCH_OPENSSL_DIR }}
+          key: switch-deps-v1-${{ steps.toolchain.outputs.digest }}-${{ hashFiles('.ci/build-switch-sdk.sh', 'scripts/prepare-switch-*.sh', 'cmake/switch/openssl-compat/**') }}
+
+      - name: Build unified Mesa SDK from the pinned source
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: bash .ci/build-switch-sdk.sh
+
+      - name: Build pinned OpenSSL
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: bash scripts/prepare-switch-openssl.sh
+
+      - name: Check dependencies
+        run: |
+          bash scripts/prepare-switch-vulkan-sdk.sh --check
+          bash scripts/prepare-switch-openssl.sh --check
+
+      # Save before compiling Vita3K so a failed application build can reuse SDKs.
+      - name: Cache built dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.SWITCH_VULKAN_SDK }}
+            ${{ env.SWITCH_OPENSSL_DIR }}
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
+      - name: Apply Switch submodule patches
+        run: bash scripts/apply-switch-submodule-patches.sh
+
+      - name: Build emulator NRO
+        run: |
+          cmake -S . -B build-switch -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR" \
+            -DSWITCH_VULKAN_SDK="$SWITCH_VULKAN_SDK"
+          cmake --build build-switch --parallel "$VITA3K_BUILD_JOBS"
+          test -s build-switch/Vita3K.nro
+
+      - name: Bundle emulator into launcher NRO
+        run: |
+          mkdir -p switch-launcher/romfs/emu
+          cp build-switch/Vita3K.nro switch-launcher/romfs/emu/Vita3K.nro
+          make -C switch-launcher -j"$VITA3K_BUILD_JOBS"
+          test -s switch-launcher/Vita3K.nro
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p build-switch/artifacts/core
+          cp switch-launcher/Vita3K.nro build-switch/artifacts/Vita3K.nro
+          cp build-switch/Vita3K.nro build-switch/artifacts/core/Vita3K.nro
+          {
+            printf 'Vita3K commit: %s\n' "$(git rev-parse HEAD)"
+            printf 'Mesa commit: %s\n' "$(cat "$SWITCH_VULKAN_SDK/share/mesa-switch/revision")"
+            printf 'Vita3K.nro contains the launcher and emulator; core/ is for diagnostics.\n\n'
+            cat build-switch-deps/toolchain.txt
+            cat "$SWITCH_VULKAN_SDK/share/mesa-switch/build-info.txt"
+          } > build-switch/artifacts/build-info.txt
+          cd build-switch/artifacts
+          sha256sum Vita3K.nro core/Vita3K.nro > SHA256SUMS
+
+      - name: Upload NROs
+        uses: actions/upload-artifact@v4
+        with:
+          name: vita3k-switch-${{ github.sha }}
+          path: build-switch/artifacts/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload configure logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: switch-build-logs-${{ github.run_id }}
+          path: |
+            build-switch/CMakeCache.txt
+            build-switch/CMakeFiles/CMakeConfigureLog.yaml
+            build-switch-deps/mesa-source/builddir-*/meson-logs/
+            build-switch-deps/toolchain.txt
+            switch-launcher/dependencies/build/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: ignore
+          retention-days: 7
