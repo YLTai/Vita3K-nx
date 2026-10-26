@@ -51,7 +51,7 @@ apply_one "external/LibAtrac9" \
     "82767fe38823c32536726ea798f392b0b49e66b9"
 apply_one "external/sdl" \
     "sdl-switch.patch" \
-    "f5e5f6588921eed3d7d048ce43d9eb1ff0da0ffc"
+    "fa2c02bb6e21974a89ea9824bc53c9932abe5f9c"
 apply_one "external/psvpfstools/psvpfsparser" \
     "psvpfsparser-switch.patch" \
     "d14381f871a69009bd18b2aaec2213a6738bebba"

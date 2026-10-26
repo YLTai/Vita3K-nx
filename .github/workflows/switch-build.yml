@@ -68,6 +68,10 @@ jobs:
           digest=$(sha256sum build-switch-deps/toolchain.txt | cut -d ' ' -f 1)
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
+      # Check pinned submodules before spending time building the SDKs.
+      - name: Apply Switch submodule patches
+        run: bash scripts/apply-switch-submodule-patches.sh
+
       - name: Restore built dependencies
         id: deps
         uses: actions/cache/restore@v4
@@ -99,9 +103,6 @@ jobs:
             ${{ env.SWITCH_VULKAN_SDK }}
             ${{ env.SWITCH_OPENSSL_DIR }}
           key: ${{ steps.deps.outputs.cache-primary-key }}
-
-      - name: Apply Switch submodule patches
-        run: bash scripts/apply-switch-submodule-patches.sh
 
       - name: Build emulator NRO
         run: |
