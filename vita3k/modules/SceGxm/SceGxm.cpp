@@ -897,6 +897,7 @@ std::string to_debug_str<SceGxmTransferFlags>(const MemState &mem, SceGxmTransfe
 
 static void display_entry_thread(EmuEnvState &emuenv) {
     switch_pin_to_hardware_priority("GXM display thread", 46);
+    SwitchCpuProfileThread cpu_profile("gxm-display");
 
     auto &display_queue = emuenv.gxm.display_queue;
     const Address callback_address = emuenv.gxm.params.displayQueueCallback.address();
