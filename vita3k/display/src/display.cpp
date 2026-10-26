@@ -42,6 +42,7 @@ static void vblank_sync_thread(EmuEnvState &emuenv) {
     // blocked in sceCtrlReadBuffer* / sceDisplayWaitVblank, so keep it off the cores
     // the emulator saturates when the fourth core is available.
     switch_pin_to_helper_core("vblank thread", 44);
+    SwitchCpuProfileThread cpu_profile("vblank");
 
     DisplayState &display = emuenv.display;
 
