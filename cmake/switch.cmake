@@ -198,12 +198,24 @@ foreach(_file IN LISTS _switch_vulkan_required_files)
 	endif()
 endforeach()
 
+# Mesa can build NVK for Horizon without the optional CUBIN/libelf support.
+# SDKs without explicit metadata retain the original libelf requirement.
+set(_switch_vulkan_libelf_required ON)
+if(EXISTS "${SWITCH_VULKAN_SDK}/share/mesa-switch/libelf-required")
+	file(STRINGS "${SWITCH_VULKAN_SDK}/share/mesa-switch/libelf-required"
+		_switch_vulkan_libelf_required)
+	if(NOT "${_switch_vulkan_libelf_required}" MATCHES "^(ON|OFF)$")
+		message(FATAL_ERROR "Invalid Mesa Switch SDK libelf requirement")
+	endif()
+endif()
 set(_switch_vulkan_required_portlibs
-	libelf.a
 	libexpat.a
 	libdrm_nouveau.a
 	libzstd.a
 	libz.a)
+if(_switch_vulkan_libelf_required)
+	list(APPEND _switch_vulkan_required_portlibs libelf.a)
+endif()
 foreach(_library IN LISTS _switch_vulkan_required_portlibs)
 	if(NOT EXISTS "${SWITCH_PORTLIBS}/lib/${_library}")
 		message(FATAL_ERROR

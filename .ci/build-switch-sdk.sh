@@ -13,7 +13,10 @@ SDK_REVISION="$(sed -n 's/^SDK_REVISION=//p' "$PREPARE")"
 [[ "$SDK_REVISION" =~ ^[0-9a-f]{40}$ ]]
 SDK="$BUILD_ROOT/mesa-$SDK_VERSION-switch-unified-horizon-sdk"
 SOURCE="$BUILD_ROOT/mesa-source"
-SDK_PATCH="$ROOT/.ci/patches/mesa-nvk-alloca.patch"
+SDK_PATCHES=(
+    "$ROOT/.ci/patches/mesa-nvk-alloca.patch"
+    "$ROOT/.ci/patches/mesa-optional-libelf.patch"
+)
 JOBS="${VITA3K_BUILD_JOBS:-2}"
 export DEVKITPRO="${DEVKITPRO:-/opt/devkitpro}"
 export DEVKITA64="${DEVKITA64:-$DEVKITPRO/devkitA64}"
@@ -78,10 +81,11 @@ git -C "$SOURCE" checkout --detach FETCH_HEAD
 test "$(git -C "$SOURCE" rev-parse HEAD)" = "$SDK_REVISION"
 test "$(cat "$SOURCE/VERSION")" = "$SDK_VERSION"
 
-# NVK_BUILD_ID_OVERRIDE uses alloca(), which needs Mesa's portability header
-# on Switch/newlib. Keep the pinned Mesa revision and apply only this include.
-git -C "$SOURCE" apply --check "$SDK_PATCH"
-git -C "$SOURCE" apply "$SDK_PATCH"
+# Keep the pinned revision with the CI portability and SDK metadata fixes.
+for patch in "${SDK_PATCHES[@]}"; do
+    git -C "$SOURCE" apply --check "$patch"
+    git -C "$SOURCE" apply "$patch"
+done
 
 # Debian's SPIRV-Tools is too old for mesa_clc. Use the version in Docker.rust.
 SPIRV_TAG=vulkan-sdk-1.3.290.0
@@ -101,7 +105,7 @@ cmake --install "$SPIRV_SOURCE/build"
 # in the cached SDK so artifacts show which compiler produced the libraries.
 curl --proto '=https' --tlsv1.2 -fsSL --retry 3 https://sh.rustup.rs -o "$BUILD_ROOT/rustup-init.sh"
 sh "$BUILD_ROOT/rustup-init.sh" -y --default-toolchain nightly --profile minimal
-rustup component add rust-src
+rustup component add --toolchain nightly rust-src rustfmt
 rustup target add "$MESA_SWITCH_RUST_TARGET"
 cargo install --locked --jobs "$JOBS" bindgen-cli cbindgen
 
@@ -182,8 +186,8 @@ printf '%s\n' "$SDK_REVISION" > "$staged/share/mesa-switch/revision"
 {
     printf 'Mesa source: https://github.com/danfromtico/mesa-switch\n'
     printf 'Mesa version: %s\nSPIRV-Tools tag: %s\n' "$SDK_VERSION" "$SPIRV_TAG"
-    printf 'Mesa source patch (SHA256):\n'
-    (cd "$ROOT" && sha256sum .ci/patches/mesa-nvk-alloca.patch)
+    printf 'Mesa source patches (SHA256):\n'
+    (cd "$ROOT" && sha256sum .ci/patches/mesa-*.patch)
     rustc --version
     bindgen --version
     cbindgen --version

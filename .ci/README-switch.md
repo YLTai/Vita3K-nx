@@ -40,7 +40,12 @@ exact SDK ZIP was found. Instead, the helper follows the
 [Mesa Switch Linux CI recipe](https://github.com/danfromtico/mesa-switch/blob/main/.github/workflows/build.yml)
 to build that commit from source. A CI-only patch adds `c99_alloca.h` to NVK's
 physical-device source, which needs `alloca()` when `nvk-build-id` is set.
-The SDK records the patch hash and actual output checksums, and
+A second patch records Mesa's actual `libelf` dependency and makes its CMake
+and pkg-config exports match. The official container does not include a Switch
+libelf library; Mesa supports this by omitting NVIDIA CUBIN binary import,
+which Vita3K does not use. SDKs built with libelf still require that library.
+Older SDKs without the new metadata also retain the original requirement.
+The SDK records the patch hashes and actual output checksums, and
 passes the repository's SDK `--check`. This does **not** reproduce or bypass the
 unpublished ZIP's archive checksum; the ZIP download/extraction path is unused.
 
