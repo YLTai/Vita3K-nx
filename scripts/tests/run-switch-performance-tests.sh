@@ -15,3 +15,4 @@ done
 
 python3 "$ROOT/scripts/tests/test_switch_cpu_checkpoint.py" --cxx "${CXX:-c++}"
 python3 "$ROOT/scripts/tests/test_switch_hotspot_metric_layout.py"
+python3 "$ROOT/scripts/tests/test_switch_render_core_spread.py"
