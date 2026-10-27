@@ -939,6 +939,7 @@ static void display_entry_thread(EmuEnvState &emuenv) {
 
         // Now run callback
         display_thread->run_guest_function(callback_address, display_callback->data);
+        cpu_profile.checkpoint();
 
         // Notifies the renderer of the completion of the callback for the display_entry.
         // The last_display of the entry, when pushed into the queue, is guaranteed to be timestamp_ahead + 1 at the time of the call.
