@@ -556,7 +556,7 @@ SwitchCpuProfileSession::SwitchCpuProfileSession(const char *title_id) {
         entry.previous_wall = armGetSystemTick();
     }
     cpu_profile_enabled.store(true, std::memory_order_release);
-    switch_cpu_profile_lsfg_begin_session(safe_id, epoch, index);
+    switch_cpu_profile_lsfg_begin_session(safe_id, epoch, index, cpu_profile_session_tick);
     LOG_WARN("[cpu-profile] Per-thread CPU log: {}", cpu_path);
     LOG_WARN("[cpu-profile] Render wall-time log: {}", phase_path);
 }
