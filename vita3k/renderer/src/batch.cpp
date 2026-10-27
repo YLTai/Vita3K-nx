@@ -141,6 +141,12 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
             break;
         }
 
+#ifdef __SWITCH__
+        // This is the GXM NewFrame command as executed by the renderer, not
+        // proof of a unique game simulation frame or a physical scanout.
+        if (cmd->opcode == CommandOpcode::NewFrame)
+            switch_cpu_profile_frame_event("gxm_new_frame");
+#endif
         const size_t opcode = static_cast<size_t>(cmd->opcode);
         const CommandHandler handler = opcode < handlers.size() ? handlers[opcode] : nullptr;
         if (!handler) {
@@ -174,7 +180,14 @@ void process_batches(renderer::State &state, const FeatureState &features, MemSt
 
         // Queue waits are expressed in microseconds. Wait about 3 ms instead of
         // polling every 3 us, which would keep the renderer busy while idle.
+#ifdef __SWITCH__
+        const uint64_t queue_wait_start = armGetSystemTick();
+#endif
         auto cmd_list = state.command_buffer_queue.top(3000);
+#ifdef __SWITCH__
+        switch_cpu_profile_render_phase(SwitchCpuProfilePhase::BatchQueueWait,
+            queue_wait_start, armGetSystemTick());
+#endif
 
         if (!cmd_list || !is_cmd_ready(mem, *cmd_list)) {
             // beginning of the game or homebrew not using gxm
@@ -186,8 +199,16 @@ void process_batches(renderer::State &state, const FeatureState &features, MemSt
                 return;
 
             renderer::SyncWaitResult wait_result = renderer::SyncWaitResult::TimedOut;
-            if (cmd_list)
+            if (cmd_list) {
+#ifdef __SWITCH__
+                const uint64_t sync_wait_start = armGetSystemTick();
+#endif
                 wait_result = wait_cmd(mem, *cmd_list);
+#ifdef __SWITCH__
+                switch_cpu_profile_render_phase(SwitchCpuProfilePhase::BatchSyncWait,
+                    sync_wait_start, armGetSystemTick());
+#endif
+            }
             if (!cmd_list || wait_result != renderer::SyncWaitResult::Ready) {
                 if (wait_result == renderer::SyncWaitResult::Shutdown)
                     return;
@@ -206,7 +227,16 @@ void process_batches(renderer::State &state, const FeatureState &features, MemSt
         }
 
         state.command_buffer_queue.pop();
+#ifdef __SWITCH__
+        const uint64_t execute_start = armGetSystemTick();
+#endif
         process_batch(state, features, mem, config, *cmd_list);
+#ifdef __SWITCH__
+        // This wall time includes command handlers' Vulkan calls and waits;
+        // it must not be interpreted as pure CPU arithmetic.
+        switch_cpu_profile_render_phase(SwitchCpuProfilePhase::BatchCommandExecution,
+            execute_start, armGetSystemTick());
+#endif
     }
 }
 
@@ -296,11 +326,13 @@ static void render_loop(renderer::State &state, DisplayState &display, GxmState 
 
 #ifdef __SWITCH__
             const uint64_t batch_start = armGetSystemTick();
+            switch_cpu_profile_frame_event("render_loop_begin");
 #endif
             process_batches(state, state.features, mem, config, 500);
 #ifdef __SWITCH__
             switch_cpu_profile_render_phase(SwitchCpuProfilePhase::Batches,
                 batch_start, armGetSystemTick());
+            switch_cpu_profile_frame_event("batches_done");
 #endif
 
 
@@ -329,11 +361,13 @@ static void render_loop(renderer::State &state, DisplayState &display, GxmState 
             const uint64_t present_start = armGetSystemTick();
             switch_cpu_profile_render_phase(SwitchCpuProfilePhase::RenderFrame,
                 render_start, present_start);
+            switch_cpu_profile_frame_event("render_frame_done");
 #endif
             state.swap_window();
 #ifdef __SWITCH__
             switch_cpu_profile_render_phase(SwitchCpuProfilePhase::Present,
                 present_start, armGetSystemTick());
+            switch_cpu_profile_frame_event("render_swap_done");
 #endif
             state.async_flip_requested.store(false, std::memory_order_relaxed);
             cpu_profile.checkpoint();
