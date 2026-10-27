@@ -30,6 +30,10 @@
 #include <config/state.h>
 #include <util/log.h>
 #include <util/tracy.h>
+#ifdef __SWITCH__
+#include <switch/arm/counter.h>
+#include <util/switch_thread.h>
+#endif
 
 #include <cstring>
 
@@ -195,8 +199,17 @@ COMMAND(handle_sync_surface_data) {
 
     if (renderer.current_backend == Backend::Vulkan) {
         vulkan::VKContext *context = reinterpret_cast<vulkan::VKContext *>(render_context);
-        if (context->is_recording)
+        if (context->is_recording) {
+#ifdef __SWITCH__
+            const uint64_t stop_start = armGetSystemTick();
+#endif
             context->stop_recording(vertex_notification, fragment_notification);
+#ifdef __SWITCH__
+            // Nested in SyncSurfaceData opcode; do not sum both timings.
+            switch_cpu_profile_render_phase(SwitchCpuProfilePhase::GxmStopRecording,
+                stop_start, armGetSystemTick());
+#endif
+        }
     }
 
     SceGxmColorSurface *surface = &render_context->record.color_surface;
