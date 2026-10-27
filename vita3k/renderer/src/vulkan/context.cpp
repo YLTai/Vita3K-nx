@@ -375,6 +375,10 @@ void VKContext::start_recording(bool first_in_scene) {
     render_cmd.begin(begin_info);
     prerender_cmd.begin(begin_info);
 
+    // Descriptor bindings belong to a recording, even when a command-buffer
+    // handle is recycled or a scene is split at a macroblock/notification.
+    descriptor_binding_cache.invalidate();
+
     is_recording = true;
 
     // set all the dynamic state here

@@ -850,6 +850,15 @@ int TextureCache::cache_and_bind_sampler(const SceGxmTexture &gxm_texture, bool 
 
     compact_repr |= (static_cast<uint32_t>(force_nearest) << 23);
 
+    // Consecutive textures often use the same sampler. The queue head is
+    // already most recently used, so a matching key needs neither a hash
+    // lookup nor an LRU update. Empty slots have value 0; valid keys do not.
+    const SamplerCacheInfo &most_recent = sampler_queue.head->content;
+    if (most_recent.value == compact_repr) {
+        last_bound_sampler_index = most_recent.index;
+        return last_bound_sampler_index;
+    }
+
     auto it = sampler_lookup.find(compact_repr);
     if (it != sampler_lookup.end()) {
         sampler_queue.set_as_mru(it->second);

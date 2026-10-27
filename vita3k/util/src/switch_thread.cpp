@@ -585,20 +585,27 @@ void SwitchCpuProfileThread::checkpoint() {
     const u64 now = armGetSystemTick();
     if (now < next_checkpoint_tick_)
         return;
-    next_checkpoint_tick_ = now + armGetSystemTickFreq();
 
-    u64 cpu_ticks = 0;
-    const Result rc = svcGetInfo(&cpu_ticks, InfoType_ThreadTickCount,
-        CUR_THREAD_HANDLE, TickCountInfo_Total);
-    const u32 core = svcGetCurrentProcessorNumber();
+    // The frontend holds this mutex while polling and writing the CSV files.
+    // A self-sample must never park a render/audio worker behind SD-card I/O.
+    // Leave the deadline unchanged on contention so the next checkpoint can
+    // retry; the sampler uses the actual self_wall delta, not a fixed second.
+    std::unique_lock<std::mutex> lock(cpu_profile_mutex, std::try_to_lock);
+    if (!lock.owns_lock() || !cpu_profile_enabled.load(std::memory_order_acquire))
+        return;
 
-    std::lock_guard<std::mutex> lock(cpu_profile_mutex);
     const auto it = std::find_if(cpu_profile_threads.begin(),
         cpu_profile_threads.end(), [this](const CpuProfileEntry &entry) {
             return entry.token == token_;
         });
     if (it == cpu_profile_threads.end())
         return;
+
+    u64 cpu_ticks = 0;
+    const Result rc = svcGetInfo(&cpu_ticks, InfoType_ThreadTickCount,
+        CUR_THREAD_HANDLE, TickCountInfo_Total);
+    const u32 core = svcGetCurrentProcessorNumber();
+    next_checkpoint_tick_ = now + armGetSystemTickFreq();
     if (R_SUCCEEDED(rc) && it->self_wall == 0) {
         it->previous_self_wall = now;
         it->previous_self_total = cpu_ticks;

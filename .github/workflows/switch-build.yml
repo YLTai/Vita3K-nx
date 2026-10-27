@@ -5,6 +5,10 @@ on:
     branches: [ci/switch-build]
     paths-ignore:
       - '**.md'
+  pull_request:
+    branches: [ci/switch-build]
+    paths-ignore:
+      - '**.md'
   # GitHub only exposes this button once the workflow is on the default branch.
   # The CI-only branch uses the push trigger above.
   workflow_dispatch:
@@ -80,6 +84,9 @@ jobs:
             --strings-def vita3k/lang/include/lang/strings.def \
             --output-header build-switch-preflight/generated_catalog.h \
             --output-source build-switch-preflight/generated_catalog.cpp
+
+      - name: Check renderer state and profiling regressions on the host
+        run: bash scripts/tests/run-switch-performance-tests.sh
 
       - name: Restore built dependencies
         id: deps

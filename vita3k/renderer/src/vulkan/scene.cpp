@@ -294,7 +294,7 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem) {
     }
 
     const uint32_t dynamic_offset_count = state.features.enable_memory_mapping ? 2U : 4U;
-    const uint32_t dynamic_offsets[] = {
+    const std::array<uint32_t, 4> dynamic_offsets = {
         // GXMRenderVertUniformBlock
         context.vertex_info_uniform_buffer.data_offset,
         // GXMRenderFragUniformBlock
@@ -305,8 +305,17 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem) {
         context.fragment_uniform_stream_ring_buffer.data_offset
     };
 
-    context.render_cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline_layout, 0,
-        descriptors.size(), descriptors.data(), dynamic_offset_count, dynamic_offsets);
+    const auto bind = context.descriptor_binding_cache.update(pipeline_layout,
+        descriptors, dynamic_offsets, dynamic_offset_count);
+    if (bind.set_count != 0) {
+        // All dynamic descriptors are in set 0. A texture-only change must not
+        // resend their offsets, and a uniform-only change need not rebind the
+        // render target or textures. NVK otherwise re-emits root/cbuf state.
+        const uint32_t offset_count = bind.first_set == 0 ? dynamic_offset_count : 0;
+        context.render_cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline_layout, bind.first_set,
+            bind.set_count, descriptors.data() + bind.first_set, offset_count,
+            offset_count ? dynamic_offsets.data() : nullptr);
+    }
 }
 
 // vertex count is only used with double buffer mapping
@@ -315,17 +324,10 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
     const SceGxmVertexProgram &vertex_program = *state.vertex_program.get(mem);
     VertexProgram *vkvert = vertex_program.renderer_data.get();
 
-    int max_stream_idx = -1;
-
-    for (const SceGxmVertexAttribute &attribute : vertex_program.attributes) {
-        if (!vkvert->attribute_infos.contains(attribute.regIndex))
-            continue;
-        max_stream_idx = std::max<int>(max_stream_idx, attribute.streamIndex);
-    }
-    max_stream_idx++;
+    const uint32_t max_stream_idx = vkvert->vertex_input.stream_count;
 
     if (context.state.need_cpu_buffer_sync()) {
-        for (int i = 0; i < max_stream_idx; i++)
+        for (uint32_t i = 0; i < max_stream_idx; i++)
             state.vertex_streams[i].size = 0;
 
         // same as in SceGxm.cpp
@@ -339,7 +341,7 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
             state.vertex_streams[attribute.streamIndex].size = std::max<size_t>(state.vertex_streams[attribute.streamIndex].size, data_length);
         }
 
-        for (int i = 0; i < max_stream_idx; i++) {
+        for (uint32_t i = 0; i < max_stream_idx; i++) {
             if (state.vertex_streams[i].data)
                 // on the PS Vita, shader stores are used most of the time to write to a vertex buffer
                 context.state.buffer_trapping.access_buffer(state.vertex_streams[i].data.address(), static_cast<uint32_t>(state.vertex_streams[i].size), mem, context.state.has_shader_store);
@@ -349,7 +351,7 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
     if (max_stream_idx == 0)
         return;
 
-    for (int i = 0; i < max_stream_idx; i++) {
+    for (uint32_t i = 0; i < max_stream_idx; i++) {
         if (state.vertex_streams[i].data) {
             if (context.state.features.enable_memory_mapping) {
                 auto [buffer, offset] = context.state.get_matching_mapping(state.vertex_streams[i].data.cast<void>());

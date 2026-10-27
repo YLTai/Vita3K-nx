@@ -756,19 +756,8 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool depth
 }
 
 bool PipelineCache::needs_attribute_bindings(const PipelineVertexProgram &vertex_program) const {
-    const auto &infos = vertex_program.renderer_data.attribute_infos;
-    const uint32_t max_offset = state.physical_device_properties.limits.maxVertexInputAttributeOffset;
-    for (const SceGxmVertexAttribute &attribute : vertex_program.attributes) {
-        const auto it = infos.find(attribute.regIndex);
-        if (it == infos.end())
-            continue;
-
-        const auto &info = it->second;
-        const uint32_t array_offset = info.regformat && info.component_count > 4 ? ((info.component_count - 1) / 4) * 16 : 0;
-        if (attribute.offset + array_offset > max_offset)
-            return true;
-    }
-    return false;
+    return vertex_program.renderer_data.vertex_input.max_attribute_offset
+        > state.physical_device_properties.limits.maxVertexInputAttributeOffset;
 }
 
 bool PipelineCache::needs_attribute_bindings(const SceGxmVertexProgram &vertex_program) const {

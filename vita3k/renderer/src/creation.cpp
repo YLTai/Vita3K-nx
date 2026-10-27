@@ -249,6 +249,8 @@ bool create(std::unique_ptr<VertexProgram> &vp, State &state, const SceGxmProgra
         }
     }
 
+    vp->vertex_input = make_vertex_input_metadata(attributes, vp->attribute_infos);
+
     return true;
 }
 
