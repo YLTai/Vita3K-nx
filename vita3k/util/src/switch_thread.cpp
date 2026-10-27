@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <iterator>
 #include <cstdio>
 #include <ctime>
 #include <mutex>
@@ -548,7 +549,7 @@ SwitchCpuProfileSession::SwitchCpuProfileSession(const char *title_id) {
     cpu_profile_sample_index = 0;
     for (auto &entry : cpu_profile_threads) {
         entry.valid = cpu_profile_read_ticks(entry.handle, entry.previous,
-        entry.previous_total, entry.last_core_rc, entry.last_total_rc);
+            entry.previous_total, entry.last_core_rc, entry.last_total_rc);
         entry.previous_wall = armGetSystemTick();
     }
     cpu_profile_enabled.store(true, std::memory_order_release);
