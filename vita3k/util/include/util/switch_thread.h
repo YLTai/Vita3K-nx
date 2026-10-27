@@ -65,6 +65,26 @@ struct SwitchCpuOpcodeStats {
     uint64_t sampled_over_33ms = 0;
 };
 void switch_cpu_profile_opcode_merge(const SwitchCpuOpcodeStats *stats, size_t count);
+
+// Second-stage GXM profiling. SetState values intentionally match the numeric
+// GXMState enum in renderer/types.h; Draw stages are independent metrics.
+// Count all invocations exactly, but time a pseudorandom ~1/16 subset to
+// avoid synchronizing the sampler with a game's repeated draw/state pattern.
+enum class SwitchCpuFineMetric : uint8_t {
+    RegionClip, Program, Viewport, DepthBias, DepthFunc, DepthWriteEnable,
+    PolygonMode, PointLineWidth, StencilFunc, Texture, StencilRef,
+    VertexStream, TwoSided, CullMode, UniformBuffer, FragmentProgramEnable,
+    VisibilityBuffer, VisibilityIndex,
+    DrawSetup, DrawPipelineLookup, DrawPipelineBind, DrawUniforms,
+    DrawDescriptors, DrawIndexVertex, DrawEmit,
+    DrawSkippedMask, DrawSkippedPipeline,
+    Count
+};
+constexpr size_t SWITCH_CPU_FINE_STATE_COUNT = 18;
+constexpr size_t SWITCH_CPU_FINE_COUNT = static_cast<size_t>(SwitchCpuFineMetric::Count);
+bool switch_cpu_profile_fine_sample();
+void switch_cpu_profile_fine_record(SwitchCpuFineMetric metric, bool sampled, uint64_t sampled_ticks);
+void switch_cpu_profile_fine_flush();
 // Stage values 0..7 correspond to LsfgNxDebugStage in lsfg_bridge.h.
 void switch_cpu_profile_lsfg_stage(uint32_t stage, uint64_t begin_tick, uint64_t end_tick);
 void switch_cpu_profile_lsfg_state(bool requested, bool compatible, bool passthrough);
@@ -129,6 +149,9 @@ inline SwitchCpuProfileSession::~SwitchCpuProfileSession() {}
 inline void SwitchCpuProfileSession::poll() {}
 inline void switch_cpu_profile_render_phase(SwitchCpuProfilePhase, uint64_t, uint64_t) {}
 inline void switch_cpu_profile_opcode_merge(const SwitchCpuOpcodeStats *, size_t) {}
+inline bool switch_cpu_profile_fine_sample() { return false; }
+inline void switch_cpu_profile_fine_record(SwitchCpuFineMetric, bool, uint64_t) {}
+inline void switch_cpu_profile_fine_flush() {}
 inline void switch_cpu_profile_lsfg_stage(uint32_t, uint64_t, uint64_t) {}
 inline void switch_cpu_profile_lsfg_state(bool, bool, bool) {}
 inline void switch_cpu_profile_lsfg_generated(uint32_t) {}
