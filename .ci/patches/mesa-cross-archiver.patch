@@ -1,0 +1,23 @@
+diff --git a/src/nouveau/vulkan/meson.build b/src/nouveau/vulkan/meson.build
+--- a/src/nouveau/vulkan/meson.build
++++ b/src/nouveau/vulkan/meson.build
+@@ -310,6 +310,10 @@ if host_machine.system() == 'horizon'
+   # Merge every private Mesa archive into one real archive.  Unlike an ld
+   # GROUP script, the result remains valid when a consumer passes an absolute
+   # libvulkan.a path without adding the SDK directory to its -L search path.
++  # Use the cross-file archiver: a host ar can hand AArch64 Rust objects to
++  # an incompatible LLVM plugin and silently omit their symbols from the
++  # archive index, leaving Rust std unresolved in the final consumer link.
++  vulkan_archive_ar = find_program('ar', native : false)
+   libvulkan = custom_target(
+     'nvk_loaderless_libvulkan',
+     input : libvulkan_private_archives,
+@@ -317,7 +321,7 @@ if host_machine.system() == 'horizon'
+     output : 'libvulkan.a',
+     command : [
+       prog_python, files('nvk_archive_merge.py'),
+-      '--ar', 'ar',
++      '--ar', vulkan_archive_ar.full_path(),
+       '--output', '@OUTPUT@',
+       '@INPUT@',
+     ],

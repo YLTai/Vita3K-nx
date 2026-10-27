@@ -198,12 +198,20 @@ foreach(_file IN LISTS _switch_vulkan_required_files)
 	endif()
 endforeach()
 
+# CI-only compatibility: Mesa SDK declares whether libelf was built.
+set(_switch_vulkan_libelf_required ON)
+if(EXISTS "${SWITCH_VULKAN_SDK}/share/mesa-switch/libelf-required")
+	file(STRINGS "${SWITCH_VULKAN_SDK}/share/mesa-switch/libelf-required"
+		_switch_vulkan_libelf_required)
+endif()
 set(_switch_vulkan_required_portlibs
-	libelf.a
 	libexpat.a
 	libdrm_nouveau.a
 	libzstd.a
 	libz.a)
+if(_switch_vulkan_libelf_required)
+	list(APPEND _switch_vulkan_required_portlibs libelf.a)
+endif()
 foreach(_library IN LISTS _switch_vulkan_required_portlibs)
 	if(NOT EXISTS "${SWITCH_PORTLIBS}/lib/${_library}")
 		message(FATAL_ERROR
