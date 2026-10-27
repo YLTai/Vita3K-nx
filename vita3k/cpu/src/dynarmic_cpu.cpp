@@ -25,6 +25,7 @@
 #include <cpu/impl/dynarmic_cpu.h>
 #include <cpu/state.h>
 #include <util/log.h>
+#include <util/switch_tracelab.h>
 
 #include <mem/functions.h>
 #include <mem/ptr.h>
@@ -648,6 +649,9 @@ void DynarmicCPU::maybe_grow_code_cache() {
     if (recycles == handled_capacity_recycles)
         return;
     handled_capacity_recycles = recycles;
+    tracelab::count(tracelab::Metric::JitRecycle);
+    tracelab::event(tracelab::Event::JitCacheRecycle,
+        static_cast<uint32_t>(parent->thread_id), static_cast<uint32_t>(recycles));
     // One recycle can be one-off churn; a second means the working set does not
     // fit and the thread will thrash.
     if (recycles < 2)
@@ -759,7 +763,10 @@ int DynarmicCPU::run() {
     parent->svc_called = false;
     Dynarmic::HaltReason halt_reason;
     while (true) {
-        halt_reason = jit->Run();
+        {
+            tracelab::Scope jit_run(tracelab::Metric::JitRun, tracelab::Domain::Cpu);
+            halt_reason = jit->Run();
+        }
 #ifdef __SWITCH__
         maybe_grow_code_cache();
         // A preemption request carries no other meaning, so it is consumed here

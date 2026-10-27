@@ -49,8 +49,8 @@ jobs:
       CCACHE_COMPILERCHECK: content
       CCACHE_COMPRESS: 'true'
       CCACHE_MAXSIZE: 2G
-      # ON only for this PR's paired diagnostic artifacts; merged builds use OFF.
-      SWITCH_HOTPATH_DIAGNOSTICS: ${{ github.event_name == 'pull_request' && github.head_ref == 'perf/switch-render-hotspot-ab-20261027' && 'ON' || 'OFF' }}
+      # The one debug NRO carries both the established fine counters and TraceLab.
+      SWITCH_HOTPATH_DIAGNOSTICS: 'ON'
 
     steps:
       - name: Install build tools
@@ -167,6 +167,7 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DSWITCH_RENDER_CORE_SPREAD=ON \
             -DSWITCH_RENDER_HOTPATH_DIAGNOSTICS="$SWITCH_HOTPATH_DIAGNOSTICS" \
+            -DSWITCH_TRACELAB=ON \
             -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR" \
             -DSWITCH_VULKAN_SDK="$SWITCH_VULKAN_SDK"
           cmake --build build-switch --parallel "$VITA3K_BUILD_JOBS"
@@ -193,6 +194,7 @@ jobs:
             printf 'SWITCH_DESCRIPTOR_BIND_CACHE=ON\n'
             printf 'SWITCH_RENDER_CORE_SPREAD=ON\n'
             printf 'SWITCH_RENDER_HOTPATH_DIAGNOSTICS=%s\n' "$SWITCH_HOTPATH_DIAGNOSTICS"
+            printf 'SWITCH_TRACELAB=ON\n'
             printf 'USE_LTO=%s\n' "$SWITCH_LTO_MODE"
             printf 'compiler_cache=ccache\n\n'
             cat build-switch-deps/toolchain.txt
@@ -209,84 +211,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # Only the render-hotspot A/B experiment builds a second NRO; normal
-      # pull requests and merged pushes still compile exactly once.
-      - name: Build descriptor-cache OFF reference NRO for A/B
-        if: github.event_name == 'pull_request' && github.head_ref == 'perf/switch-render-hotspot-ab-20261027'
-        run: |
-          cmake -S . -B build-switch -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DUSE_LTO="$SWITCH_LTO_MODE" \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DSWITCH_DESCRIPTOR_BIND_CACHE=OFF \
-            -DSWITCH_RENDER_HOTPATH_DIAGNOSTICS="$SWITCH_HOTPATH_DIAGNOSTICS" \
-            -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR" \
-            -DSWITCH_VULKAN_SDK="$SWITCH_VULKAN_SDK"
-          cmake --build build-switch --parallel "$VITA3K_BUILD_JOBS"
-          test -s build-switch/Vita3K.nro
-          cp build-switch/Vita3K.nro switch-launcher/romfs/emu/Vita3K.nro
-          make -C switch-launcher -j"$VITA3K_BUILD_JOBS" \
-            CC="ccache $DEVKITA64/bin/aarch64-none-elf-gcc" \
-            CXX="ccache $DEVKITA64/bin/aarch64-none-elf-g++"
-          test -s switch-launcher/Vita3K.nro
-          mkdir -p build-switch/artifacts-descriptor-off/core
-          cp switch-launcher/Vita3K.nro build-switch/artifacts-descriptor-off/Vita3K.nro
-          cp build-switch/Vita3K.nro build-switch/artifacts-descriptor-off/core/Vita3K.nro
-          sed 's/SWITCH_DESCRIPTOR_BIND_CACHE=ON/SWITCH_DESCRIPTOR_BIND_CACHE=OFF/' \
-            build-switch/artifacts/build-info.txt > build-switch/artifacts-descriptor-off/build-info.txt
-          cd build-switch/artifacts-descriptor-off
-          sha256sum Vita3K.nro core/Vita3K.nro > SHA256SUMS
-
-      - name: Upload descriptor-cache OFF reference NRO
-        if: github.event_name == 'pull_request' && github.head_ref == 'perf/switch-render-hotspot-ab-20261027'
-        uses: actions/upload-artifact@v4
-        with:
-          name: vita3k-switch-descriptor-cache-off-${{ github.sha }}
-          path: build-switch/artifacts-descriptor-off/
-          if-no-files-found: error
-          retention-days: 14
-
-      # This scheduling experiment builds an identical renderer with the
-      # original core-3-only render affinity as a strict A/B reference.
-      # Normal PRs/merged pushes still produce only the production NRO.
-      - name: Build core-3-only render reference NRO
-        if: github.event_name == 'pull_request' && github.head_ref == 'perf/switch-render-core-spread-20261027'
-        run: |
-          cmake -S . -B build-switch -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DUSE_LTO="$SWITCH_LTO_MODE" \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DSWITCH_RENDER_CORE_SPREAD=OFF \
-            -DSWITCH_RENDER_HOTPATH_DIAGNOSTICS="$SWITCH_HOTPATH_DIAGNOSTICS" \
-            -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR" \
-            -DSWITCH_VULKAN_SDK="$SWITCH_VULKAN_SDK"
-          cmake --build build-switch --parallel "$VITA3K_BUILD_JOBS"
-          test -s build-switch/Vita3K.nro
-          cp build-switch/Vita3K.nro switch-launcher/romfs/emu/Vita3K.nro
-          make -C switch-launcher -j"$VITA3K_BUILD_JOBS" \
-            CC="ccache $DEVKITA64/bin/aarch64-none-elf-gcc" \
-            CXX="ccache $DEVKITA64/bin/aarch64-none-elf-g++"
-          test -s switch-launcher/Vita3K.nro
-          mkdir -p build-switch/artifacts-core3-reference/core
-          cp switch-launcher/Vita3K.nro build-switch/artifacts-core3-reference/Vita3K.nro
-          cp build-switch/Vita3K.nro build-switch/artifacts-core3-reference/core/Vita3K.nro
-          sed 's/SWITCH_RENDER_CORE_SPREAD=ON/SWITCH_RENDER_CORE_SPREAD=OFF/' \
-            build-switch/artifacts/build-info.txt > build-switch/artifacts-core3-reference/build-info.txt
-          cd build-switch/artifacts-core3-reference
-          sha256sum Vita3K.nro core/Vita3K.nro > SHA256SUMS
-
-      - name: Upload core-3-only render reference NRO
-        if: github.event_name == 'pull_request' && github.head_ref == 'perf/switch-render-core-spread-20261027'
-        uses: actions/upload-artifact@v4
-        with:
-          name: vita3k-switch-render-core3-reference-${{ github.sha }}
-          path: build-switch/artifacts-core3-reference/
-          if-no-files-found: error
-          retention-days: 14
+      # Keep exactly one emulator + launcher build in this workflow.
+      # Historical core-3-only and descriptor-cache A/B artifacts are retired.
 
       - name: Upload configure logs on failure
         if: failure()

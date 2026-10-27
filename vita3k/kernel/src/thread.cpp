@@ -23,6 +23,7 @@
 #include <util/align.h>
 
 #include <util/log.h>
+#include <util/switch_tracelab.h>
 
 #include <array>
 #include <atomic>
@@ -558,7 +559,10 @@ void ThreadState::run_loop() {
                 single_stepping = false;
 
             lock.unlock();
-            sched_acquire(priority, affinity_mask, kernel.accurate_thread_scheduling, cpu.get(), name, id);
+            {
+                tracelab::Scope sched(tracelab::Metric::GuestSchedAcquire, tracelab::Domain::Cpu);
+                sched_acquire(priority, affinity_mask, kernel.accurate_thread_scheduling, cpu.get(), name, id);
+            }
 
             // Single step or run
             const int res = do_step ? step(*cpu) : run(*cpu);
@@ -570,13 +574,25 @@ void ThreadState::run_loop() {
 #ifdef __SWITCH__
                 cpu->import_serial.fetch_add(1, std::memory_order_relaxed);
 #endif
-                kernel.call_import(*cpu, nid, id);
+                {
+                    tracelab::Scope hle(tracelab::Metric::HleImport, tracelab::Domain::Cpu);
+                    kernel.call_import(*cpu, nid, id);
+                    if (hle.sampled()) {
+                        const uint32_t us = hle.elapsed_us();
+                        static thread_local uint32_t nid_sequence = 0;
+                        if (us >= 1000 || ((++nid_sequence & 3u) == 0))
+                            tracelab::event(tracelab::Event::HleNidSample, nid, us);
+                    }
+                }
                 current_import_nid.store(0, std::memory_order_relaxed);
                 clear_exclusive(*cpu);
             }
 
             // The token is held across the HLE call; give it up on timeslice or preemption.
-            sched_maybe_yield(affinity_mask, kernel.accurate_thread_scheduling, cpu.get());
+            {
+                tracelab::Scope sched(tracelab::Metric::GuestSchedYield, tracelab::Domain::Cpu);
+                sched_maybe_yield(affinity_mask, kernel.accurate_thread_scheduling, cpu.get());
+            }
 
             // handle pending abort (exception handler from page fault)
             if (cpu->abort_pending.exchange(false))

@@ -1,0 +1,86 @@
+// Vita3K Switch TraceLab: low-overhead, per-session performance telemetry.
+// SPDX-License-Identifier: GPL-2.0-or-later
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+namespace tracelab {
+
+enum class Domain : uint8_t { Core, Cpu, Render };
+enum class Mode : uint8_t { Off, Light, Cpu, Render, Deep, Auto };
+enum class Metric : uint8_t {
+    JitRun, JitRecycle, HleImport, GuestSchedAcquire, GuestSchedYield,
+    GxmFrontDraw, GxmStateBuild, CmdPoolHit, CmdPoolMiss, CmdBatch,
+    TextureSync, TextureSurfaceLookup, TextureCache, TextureHash, TextureUpload,
+    IndexScan, VertexBind, CacheClean, CacheFlush,
+    DescriptorResolve, DescriptorUpdate, DescriptorBind,
+    PipelineLookup, PipelineCompile, QueueSubmit, QueuePresent,
+    RenderLoop, DrawBack, CollectorPoll, Count
+};
+enum class Event : uint16_t {
+    RenderBegin = 1, RenderEnd, GxmNewFrame, BatchConsume,
+    HleNidSample, LongFrame, PipelineCompiled, JitCacheRecycle
+};
+
+#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)
+
+uint64_t ticks();
+uint64_t frequency();
+bool active(Domain domain);
+void count(Metric metric, uint64_t bytes = 0);
+void event(Event event, uint32_t correlation = 0, uint32_t value = 0);
+void begin_session(const char *title_id);
+void end_session();
+void poll();
+void metadata(const char *key, const char *value);
+const char *mode_name();
+
+class Session {
+public:
+    explicit Session(const char *title_id) { begin_session(title_id); }
+    ~Session() { end_session(); }
+    Session(const Session &) = delete;
+    Session &operator=(const Session &) = delete;
+};
+
+class Scope {
+public:
+    Scope(Metric metric, Domain domain, uint64_t bytes = 0);
+    ~Scope();
+    Scope(const Scope &) = delete;
+    Scope &operator=(const Scope &) = delete;
+    bool sampled() const { return begin_ != 0; }
+    uint32_t elapsed_us() const;
+private:
+    Metric metric_;
+    uint64_t begin_ = 0;
+};
+
+#else
+
+inline uint64_t ticks() { return 0; }
+inline uint64_t frequency() { return 1; }
+inline bool active(Domain) { return false; }
+inline void count(Metric, uint64_t = 0) {}
+inline void event(Event, uint32_t = 0, uint32_t = 0) {}
+inline void begin_session(const char *) {}
+inline void end_session() {}
+inline void poll() {}
+inline void metadata(const char *, const char *) {}
+inline const char *mode_name() { return "off"; }
+
+class Session {
+public:
+    explicit Session(const char *) {}
+};
+
+class Scope {
+public:
+    Scope(Metric, Domain, uint64_t = 0) {}
+    bool sampled() const { return false; }
+    uint32_t elapsed_us() const { return 0; }
+};
+
+#endif
+} // namespace tracelab

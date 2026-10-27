@@ -18,6 +18,7 @@
 #include <renderer/functions.h>
 
 #include <renderer/profile.h>
+#include <util/switch_tracelab.h>
 #include <renderer/texture_cache.h>
 
 #include <gxm/functions.h>
@@ -50,6 +51,7 @@ static uint64_t hash_palette_data(const SceGxmTexture &texture, size_t count, co
 }
 
 uint64_t hash_texture_data(const SceGxmTexture &texture, uint32_t texture_size, const MemState &mem) {
+    tracelab::Scope hash_profile(tracelab::Metric::TextureHash, tracelab::Domain::Render, texture_size);
     const SceGxmTextureFormat format = gxm::get_format(texture);
     const SceGxmTextureBaseFormat base_format = gxm::get_base_format(format);
     const Ptr<const void> data(texture.data_addr << 2);
@@ -170,6 +172,8 @@ static void hash_unaligned_tiled(const uint8_t *data, uint32_t width, uint32_t h
 }
 
 uint64_t hash_texture_nostride(const SceGxmTexture &texture, const MemState &mem) {
+    tracelab::Scope hash_profile(tracelab::Metric::TextureHash, tracelab::Domain::Render,
+        gxm::texture_size_first_mip(texture));
     const SceGxmTextureFormat format = gxm::get_format(texture);
     const SceGxmTextureBaseFormat base_format = gxm::get_base_format(format);
     const Ptr<const uint8_t> data(texture.data_addr << 2);
@@ -326,6 +330,8 @@ bool TextureCache::init(const bool hashless_texture_cache, const fs::path &textu
 }
 
 void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &mem) {
+    tracelab::Scope upload_profile(tracelab::Metric::TextureUpload, tracelab::Domain::Render,
+        gxm::texture_size(gxm_texture));
     R_PROFILE(__func__);
 
     bool is_vulkan = (backend == renderer::Backend::Vulkan);
@@ -655,6 +661,7 @@ static constexpr TextureGxmDataRepr strided_texture_mask = {
 };
 
 void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemState &mem) {
+    tracelab::Scope texture_profile(tracelab::Metric::TextureCache, tracelab::Domain::Render);
     R_PROFILE(__func__);
 
     size_t index = 0;

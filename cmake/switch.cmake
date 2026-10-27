@@ -131,6 +131,13 @@ message(STATUS "Switch: using OpenSSL 4.0.1 at ${SWITCH_OPENSSL_DIR}")
 # __SWITCH__ case added to external/sdl/src/dynapi/SDL_dynapi.h (SDL refuses a
 # command-line -DSDL_DYNAMIC_API and requires editing that header).
 
+# Optional performance diagnostic build. Normal builds have no TraceLab
+# instrumentation or runtime memory overhead.
+option(SWITCH_TRACELAB "Enable Vita3K Switch TraceLab diagnostics" OFF)
+if(SWITCH_TRACELAB)
+    add_compile_definitions(VITA3K_SWITCH_TRACELAB=1)
+endif()
+
 # Features that make no sense / are unavailable on Switch.
 set(USE_DISCORD_RICH_PRESENCE OFF CACHE BOOL "" FORCE)  # x86_64/APPLE only anyway
 # Preserve Release LTO for performance comparisons, but honor

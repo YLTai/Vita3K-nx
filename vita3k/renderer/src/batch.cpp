@@ -31,6 +31,7 @@
 #include <overlay/shader_precompile_progress.h>
 #include <util/log.h>
 #include <util/switch_thread.h>
+#include <util/switch_tracelab.h>
 #ifdef __SWITCH__
 #include <switch.h>
 
@@ -73,8 +74,11 @@ static moodycamel::ConcurrentQueue<Command *> command_pool;
 
 Command *generic_command_allocate() {
     Command *command = nullptr;
-    if (command_pool.try_dequeue(command))
+    if (command_pool.try_dequeue(command)) {
+        tracelab::count(tracelab::Metric::CmdPoolHit);
         return command;
+    }
+    tracelab::count(tracelab::Metric::CmdPoolMiss);
     return new Command;
 }
 
@@ -162,8 +166,11 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
 #ifdef __SWITCH__
         // This is the GXM NewFrame command as executed by the renderer, not
         // proof of a unique game simulation frame or a physical scanout.
-        if (cmd->opcode == CommandOpcode::NewFrame)
+        if (cmd->opcode == CommandOpcode::NewFrame) {
             switch_cpu_profile_frame_event("gxm_new_frame");
+            static thread_local uint32_t gxm_frame_number = 0;
+            tracelab::event(tracelab::Event::GxmNewFrame, ++gxm_frame_number);
+        }
 #endif
         const size_t opcode = static_cast<size_t>(cmd->opcode);
         const CommandHandler handler = opcode < handlers.size() ? handlers[opcode] : nullptr;
@@ -286,10 +293,15 @@ void process_batches(renderer::State &state, const FeatureState &features, MemSt
         }
 
         state.command_buffer_queue.pop();
+        static thread_local uint32_t batch_number = 0;
+        tracelab::event(tracelab::Event::BatchConsume, ++batch_number);
 #ifdef __SWITCH__
         const uint64_t execute_start = armGetSystemTick();
 #endif
-        process_batch(state, features, mem, config, *cmd_list);
+        {
+            tracelab::Scope execution(tracelab::Metric::CmdBatch, tracelab::Domain::Render);
+            process_batch(state, features, mem, config, *cmd_list);
+        }
 #ifdef __SWITCH__
         // This wall time includes command handlers' Vulkan calls and waits;
         // it must not be interpreted as pure CPU arithmetic.
@@ -380,6 +392,10 @@ static void render_loop(renderer::State &state, DisplayState &display, GxmState 
     #ifdef TRACY_ENABLE
             ZoneScopedN("Game rendering");
     #endif
+            tracelab::Scope render_loop_profile(tracelab::Metric::RenderLoop, tracelab::Domain::Render);
+            static thread_local uint32_t render_frame_number = 0;
+            const uint32_t render_frame_id = ++render_frame_number;
+            tracelab::event(tracelab::Event::RenderBegin, render_frame_id);
             if (!state.set_current())
                 break;
 
@@ -429,6 +445,7 @@ static void render_loop(renderer::State &state, DisplayState &display, GxmState 
             switch_cpu_profile_frame_event("render_swap_done");
 #endif
             state.async_flip_requested.store(false, std::memory_order_relaxed);
+            tracelab::event(tracelab::Event::RenderEnd, render_frame_id);
             cpu_profile.checkpoint();
 
     #ifdef TRACY_ENABLE
