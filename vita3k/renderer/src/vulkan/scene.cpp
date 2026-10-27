@@ -27,8 +27,30 @@
 #include <spdlog/fmt/bin_to_hex.h>
 
 #include <util/log.h>
+#ifdef __SWITCH__
+#include <switch/arm/counter.h>
+#include <util/switch_thread.h>
+#endif
 
 namespace renderer::vulkan {
+
+#ifdef __SWITCH__
+// Sub-stages share a single random Draw sample decision. A phase's call
+// counter is exact even when it is not timed; lap() never synchronizes with
+// the GPU or performs file I/O. Stopwatch overhead is excluded from most
+// nested spans but can still perturb performance slightly.
+struct DrawFineStageTimer {
+    const bool sampled = switch_cpu_profile_fine_sample();
+    uint64_t previous = sampled ? armGetSystemTick() : 0;
+
+    void lap(SwitchCpuFineMetric stage) {
+        const uint64_t now = sampled ? armGetSystemTick() : 0;
+        switch_cpu_profile_fine_record(stage, sampled,
+            sampled ? now - previous : 0);
+        previous = now;
+    }
+};
+#endif
 
 static void record_draw_rect(VKContext &context) {
     const float vx1f = context.viewport.x + context.viewport.width;
@@ -380,9 +402,16 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
 void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format,
     Ptr<void> indices, size_t count, uint32_t instance_count, MemState &mem, const Config &config) {
     // Without a mask attachment, mask updates would overwrite the color surface.
-    if (!context.state.features.use_mask_bit && context.record.fragment_program.get(mem)->is_maskupdate)
+    if (!context.state.features.use_mask_bit && context.record.fragment_program.get(mem)->is_maskupdate) {
+#ifdef __SWITCH__
+        switch_cpu_profile_fine_record(SwitchCpuFineMetric::DrawSkippedMask, false, 0);
+#endif
         return;
+    }
 
+#ifdef __SWITCH__
+    DrawFineStageTimer fine_timer;
+#endif
     void *indices_ptr = indices.get(mem);
 
     context.check_for_macroblock_change(true);
@@ -454,6 +483,9 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         context.is_in_query = true;
     }
 
+#ifdef __SWITCH__
+    fine_timer.lap(SwitchCpuFineMetric::DrawSetup);
+#endif
     // do we need to check for a pipeline change?
     if (context.refresh_pipeline || type != context.last_primitive) {
         context.refresh_pipeline = false;
@@ -469,6 +501,9 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         can_be_whole_quad = false;
 #endif
         vk::Pipeline new_pipeline = context.state.pipeline_cache.retrieve_pipeline(context, type, !can_be_whole_quad, mem);
+#ifdef __SWITCH__
+        fine_timer.lap(SwitchCpuFineMetric::DrawPipelineLookup);
+#endif
 
         if (new_pipeline != context.current_pipeline) {
             context.current_pipeline = new_pipeline;
@@ -476,11 +511,18 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
             if (new_pipeline != nullptr)
                 context.render_cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, context.current_pipeline);
         }
+#ifdef __SWITCH__
+        fine_timer.lap(SwitchCpuFineMetric::DrawPipelineBind);
+#endif
     }
 
     // can happen with asynchronous pipeline compilation
-    if (context.current_pipeline == nullptr)
+    if (context.current_pipeline == nullptr) {
+#ifdef __SWITCH__
+        switch_cpu_profile_fine_record(SwitchCpuFineMetric::DrawSkippedPipeline, false, 0);
+#endif
         return;
+    }
 
     if (config.log_active_shaders) {
         const std::string hash_text_f = hex_string(context.record.fragment_program.get(mem)->renderer_data->hash);
@@ -554,8 +596,15 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         memcpy(&context.prev_frag_ublock, &frag_ublock, sizeof(frag_ublock));
     }
 
+#ifdef __SWITCH__
+    fine_timer.lap(SwitchCpuFineMetric::DrawUniforms);
+#endif
+
     // create, update and bind descriptors (uniforms and textures)
     draw_bind_descriptors(context, mem);
+#ifdef __SWITCH__
+    fine_timer.lap(SwitchCpuFineMetric::DrawDescriptors);
+#endif
 
     // Upload index data.
     vk::IndexType index_type = (format == SCE_GXM_INDEX_FORMAT_U16) ? vk::IndexType::eUint16 : vk::IndexType::eUint32;
@@ -587,6 +636,9 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
 
     // bind the vertex streams
     bind_vertex_streams(context, mem, instance_count, max_index);
+#ifdef __SWITCH__
+    fine_timer.lap(SwitchCpuFineMetric::DrawIndexVertex);
+#endif
 
     context.render_cmd.drawIndexed(count, instance_count, 0, 0, 0);
     if (count && instance_count) {
@@ -600,6 +652,9 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
 
     context.vertex_uniform_storage_allocated = false;
     context.fragment_uniform_storage_allocated = false;
+#ifdef __SWITCH__
+    fine_timer.lap(SwitchCpuFineMetric::DrawEmit);
+#endif
 }
 
 } // namespace renderer::vulkan
