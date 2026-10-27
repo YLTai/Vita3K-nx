@@ -20,6 +20,7 @@
 #include <gxm/types.h>
 #include <renderer/commands.h>
 #include <renderer/gxm_types.h>
+#include <renderer/vertex_input.h>
 #include <shader/spirv_recompiler.h>
 #include <shader/usse_program_analyzer.h>
 #include <util/hash.h>
@@ -216,6 +217,7 @@ struct FragmentProgram : ShaderProgram {
 
 struct VertexProgram : ShaderProgram {
     shader::usse::AttributeInformationMap attribute_infos;
+    VertexInputMetadata vertex_input;
     uint32_t varying_location_mask = 0x00ffffff;
 };
 

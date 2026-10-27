@@ -20,6 +20,7 @@
 #include <renderer/texture_cache.h>
 #include <renderer/texture/readback.h>
 #include <renderer/types.h>
+#include <renderer/vulkan/descriptor_binding_cache.h>
 #include <shader/uniform_block.h>
 #include <vkutil/objects.h>
 
@@ -321,6 +322,8 @@ struct VKContext : public renderer::Context {
     vk::DescriptorSet last_vert_texture_descriptor;
     uint16_t last_frag_texture_count = ~0;
     vk::DescriptorSet last_frag_texture_descriptor;
+
+    DescriptorBindingCache<vk::DescriptorSet, vk::PipelineLayout> descriptor_binding_cache;
 
     VKRenderTarget *render_target = nullptr;
     vk::Viewport viewport;
