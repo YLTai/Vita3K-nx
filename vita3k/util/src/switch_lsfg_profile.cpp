@@ -86,7 +86,7 @@ void switch_cpu_profile_lsfg_generated(uint32_t frames) {
     switch_cpu_profile_frame_event("generated_return", frames);
 }
 
-void switch_cpu_profile_lsfg_begin_session(const char *safe_title_id, int64_t epoch, uint64_t session) {
+void switch_cpu_profile_lsfg_begin_session(const char *safe_title_id, int64_t epoch, uint64_t session, uint64_t origin_tick) {
     frame_recording.store(false, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(frame_mutex);
@@ -94,7 +94,7 @@ void switch_cpu_profile_lsfg_begin_session(const char *safe_title_id, int64_t ep
         frame_events.reserve(MAX_FRAME_EVENTS);
         frame_dropped = 0;
         frame_sequence = 0;
-        frame_origin_tick = armGetSystemTick();
+        frame_origin_tick = origin_tick;
     }
     if (frame_csv) {
         std::fclose(frame_csv);
