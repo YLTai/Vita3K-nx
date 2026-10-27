@@ -12,6 +12,7 @@ add_library(
 	src/string_utils.cpp
 	src/switch_storage.cpp
 	src/switch_thread.cpp
+	src/switch_lsfg_profile.cpp
 	src/switch_vibration.cpp
 	src/tracy.cpp
 	src/vita_theme_utils.cpp
