@@ -217,13 +217,17 @@ std::mutex cpu_profile_mutex;
 std::vector<CpuProfileEntry> cpu_profile_threads;
 std::array<CpuPhaseStats, static_cast<size_t>(SwitchCpuProfilePhase::Count)> cpu_profile_phases;
 std::array<CpuOpcodeCounter, SWITCH_CPU_OPCODE_COUNT> cpu_profile_opcodes;
+std::array<CpuOpcodeCounter, SWITCH_CPU_FINE_COUNT> cpu_profile_fine;
+thread_local std::array<SwitchCpuOpcodeStats, SWITCH_CPU_FINE_COUNT> cpu_fine_local{};
 // Snapshot all six opcode fields together. No disk I/O while this lock is held.
 std::mutex cpu_opcode_snapshot_mutex;
+std::mutex cpu_fine_snapshot_mutex;
 std::atomic<bool> cpu_profile_enabled{ false };
 std::atomic<u64> cpu_profile_next_tick{ 0 };
 std::FILE *cpu_profile_threads_file = nullptr;
 std::FILE *cpu_profile_phases_file = nullptr;
 std::FILE *cpu_profile_opcodes_file = nullptr;
+std::FILE *cpu_profile_fine_file = nullptr;
 u64 cpu_profile_session_tick = 0;
 uint64_t cpu_profile_token = 0;
 uint64_t cpu_profile_session_index = 0;
@@ -274,6 +278,14 @@ void cpu_profile_reset_phases() {
         opcode.sampled_max_ticks.store(0, std::memory_order_relaxed);
         opcode.sampled_over_16ms.store(0, std::memory_order_relaxed);
         opcode.sampled_over_33ms.store(0, std::memory_order_relaxed);
+    }
+    for (auto &fine : cpu_profile_fine) {
+        fine.calls.store(0, std::memory_order_relaxed);
+        fine.sampled_calls.store(0, std::memory_order_relaxed);
+        fine.sampled_ticks.store(0, std::memory_order_relaxed);
+        fine.sampled_max_ticks.store(0, std::memory_order_relaxed);
+        fine.sampled_over_16ms.store(0, std::memory_order_relaxed);
+        fine.sampled_over_33ms.store(0, std::memory_order_relaxed);
     }
 }
 
