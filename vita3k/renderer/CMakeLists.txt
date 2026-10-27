@@ -53,6 +53,14 @@ target_link_libraries(renderer PUBLIC display mem stb shader glutil threads conf
 target_link_libraries(renderer PRIVATE dialog ddspp SDL3::SDL3 stb ffmpeg xxHash::xxhash concurrentqueue)
 
 if(SWITCH)
+	# Compile-time A/B isolation: both variants keep all descriptor updates,
+	# texture synchronization, barriers and draws. The OFF variant always
+	# records a full descriptor binding and does not consult the binding cache.
+	option(SWITCH_DESCRIPTOR_BIND_CACHE "Elide redundant Switch Vulkan descriptor binds" ON)
+	if(NOT SWITCH_DESCRIPTOR_BIND_CACHE)
+		target_compile_definitions(renderer PRIVATE VITA3K_SWITCH_DISABLE_DESCRIPTOR_BIND_CACHE=1)
+	endif()
+
 	# The unified Horizon SDK provides native NVC0 OpenGL and Zink alongside NVK.
 	# The `vulkan` interface already carries OpenGL::GL's complete unified static
 	# rescan group. Do not link it again here: NVK, EGL, Nouveau, and Zink must
