@@ -1,0 +1,139 @@
+diff --git a/OpenGLConfig.cmake b/OpenGLConfig.cmake
+--- a/OpenGLConfig.cmake
++++ b/OpenGLConfig.cmake
+@@ -2,6 +2,15 @@
+ 	"${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+ set(_OPENGL_SWITCH_LIBDIR "${_OPENGL_SWITCH_PREFIX}/lib")
+ set(_OPENGL_SWITCH_INCLUDEDIR "${_OPENGL_SWITCH_PREFIX}/include")
++
++# Older SDKs always required libelf. New SDKs record whether Mesa used it.
++set(_OPENGL_SWITCH_LIBELF_REQUIRED ON)
++if(EXISTS "${_OPENGL_SWITCH_PREFIX}/share/mesa-switch/libelf-required")
++    file(STRINGS "${_OPENGL_SWITCH_PREFIX}/share/mesa-switch/libelf-required" _OPENGL_SWITCH_LIBELF_REQUIRED)
++    if(NOT "${_OPENGL_SWITCH_LIBELF_REQUIRED}" MATCHES "^(ON|OFF)$")
++        message(FATAL_ERROR "Invalid Mesa Switch libelf requirement")
++    endif()
++endif()
+ 
+ find_library(OPENGL_gl_LIBRARY GL
+ 	PATHS "${_OPENGL_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
+@@ -51,7 +60,7 @@
+     _OPENGL_xmlconfig_LIBRARY _OPENGL_expat_LIBRARY
+     _OPENGL_zstd_LIBRARY _OPENGL_z_LIBRARY _OPENGL_nx_LIBRARY
+     _OPENGL_gl_gl_INCLUDE_DIR _OPENGL_gl_egl_INCLUDE_DIR)
+-if(_OPENGL_vulkan_LIBRARY)
++if(_OPENGL_vulkan_LIBRARY AND _OPENGL_SWITCH_LIBELF_REQUIRED)
+     list(APPEND _OPENGL_SWITCH_REQUIRED_VARS _OPENGL_elf_LIBRARY)
+ endif()
+ find_package_handle_standard_args(OpenGL
+@@ -87,8 +96,10 @@
+ set(_OPENGL_SWITCH_ZINK_LIBRARIES)
+ if(_OPENGL_vulkan_LIBRARY)
+ 	list(APPEND _OPENGL_SWITCH_ZINK_LIBRARIES
+-		${_OPENGL_vulkan_LIBRARY}
+-		${_OPENGL_elf_LIBRARY})
++		${_OPENGL_vulkan_LIBRARY})
++	if(_OPENGL_SWITCH_LIBELF_REQUIRED)
++		list(APPEND _OPENGL_SWITCH_ZINK_LIBRARIES ${_OPENGL_elf_LIBRARY})
++	endif()
+ endif()
+ 
+ if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24" AND
+diff --git a/VulkanConfig.cmake b/VulkanConfig.cmake
+--- a/VulkanConfig.cmake
++++ b/VulkanConfig.cmake
+@@ -2,6 +2,15 @@
+ 	"${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+ set(_VULKAN_SWITCH_LIBDIR "${_VULKAN_SWITCH_PREFIX}/lib")
+ set(_VULKAN_SWITCH_INCLUDEDIR "${_VULKAN_SWITCH_PREFIX}/include")
++
++# Older SDKs always required libelf. New SDKs record whether Mesa used it.
++set(_VULKAN_SWITCH_LIBELF_REQUIRED ON)
++if(EXISTS "${_VULKAN_SWITCH_PREFIX}/share/mesa-switch/libelf-required")
++    file(STRINGS "${_VULKAN_SWITCH_PREFIX}/share/mesa-switch/libelf-required" _VULKAN_SWITCH_LIBELF_REQUIRED)
++    if(NOT "${_VULKAN_SWITCH_LIBELF_REQUIRED}" MATCHES "^(ON|OFF)$")
++        message(FATAL_ERROR "Invalid Mesa Switch libelf requirement")
++    endif()
++endif()
+ 
+ find_library(Vulkan_LIBRARY vulkan
+ 	PATHS "${_VULKAN_SWITCH_LIBDIR}" NO_DEFAULT_PATH)
+@@ -13,13 +22,18 @@
+ find_library(_VULKAN_SWITCH_Z_LIBRARY z)
+ find_library(_VULKAN_SWITCH_NX_LIBRARY nx)
+ 
++set(_VULKAN_SWITCH_OPTIONAL_REQUIRED_VARS)
++if(_VULKAN_SWITCH_LIBELF_REQUIRED)
++    list(APPEND _VULKAN_SWITCH_OPTIONAL_REQUIRED_VARS _VULKAN_SWITCH_ELF_LIBRARY)
++endif()
++
+ set(Vulkan_VERSION "26.2.0")
+ include(FindPackageHandleStandardArgs)
+ find_package_handle_standard_args(Vulkan
+ 	REQUIRED_VARS
+ 		Vulkan_LIBRARY
+ 		Vulkan_INCLUDE_DIR
+-		_VULKAN_SWITCH_ELF_LIBRARY
++		${_VULKAN_SWITCH_OPTIONAL_REQUIRED_VARS}
+ 		_VULKAN_SWITCH_EXPAT_LIBRARY
+ 		_VULKAN_SWITCH_ZSTD_LIBRARY
+ 		_VULKAN_SWITCH_Z_LIBRARY
+@@ -28,13 +42,15 @@
+ set(Vulkan_INCLUDE_DIRS "${Vulkan_INCLUDE_DIR}")
+ set(_VULKAN_SWITCH_LIBRARIES
+ 	"${Vulkan_LIBRARY}"
+-	"${_VULKAN_SWITCH_ELF_LIBRARY}"
+ 	"${_VULKAN_SWITCH_EXPAT_LIBRARY}"
+ 	"${_VULKAN_SWITCH_ZSTD_LIBRARY}"
+ 	"${_VULKAN_SWITCH_Z_LIBRARY}"
+ 	"${_VULKAN_SWITCH_NX_LIBRARY}"
+ 	stdc++
+ 	m)
++if(_VULKAN_SWITCH_LIBELF_REQUIRED)
++	list(APPEND _VULKAN_SWITCH_LIBRARIES "${_VULKAN_SWITCH_ELF_LIBRARY}")
++endif()
+ 
+ if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24" AND
+    NOT DEFINED CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED)
+diff --git a/meson.build b/meson.build
+--- a/meson.build
++++ b/meson.build
+@@ -2172,6 +2172,20 @@
+   error('NVK requires libelf')
+ endif
+ 
++# Export the dependency actually selected by this cross build. Consumers of
++# a Switch SDK without CUBIN support must not require a nonexistent libelf.
++if with_platform_switch
++  switch_dependency_config = configuration_data()
++  switch_dependency_config.set('MESA_SWITCH_LIBELF_REQUIRED', dep_elf.found() ? 'ON' : 'OFF')
++  configure_file(
++    input : 'switch-libelf-required.in',
++    output : 'libelf-required',
++    configuration : switch_dependency_config,
++    install : true,
++    install_dir : join_paths(get_option('datadir'), 'mesa-switch'),
++  )
++endif
++
+ dep_valgrind = dependency('valgrind', required : get_option('valgrind'))
+ if dep_valgrind.found()
+   pre_args += '-DHAVE_VALGRIND'
+diff --git a/switch-libelf-required.in b/switch-libelf-required.in
+new file mode 100644
+--- /dev/null
++++ b/switch-libelf-required.in
+@@ -0,0 +1 @@
++@MESA_SWITCH_LIBELF_REQUIRED@
+diff --git a/src/nouveau/vulkan/meson.build b/src/nouveau/vulkan/meson.build
+--- a/src/nouveau/vulkan/meson.build
++++ b/src/nouveau/vulkan/meson.build
+@@ -308,7 +308,7 @@
+     version : meson.project_version(),
+     libraries : ['-lvulkan'],
+     libraries_private : ['-lnx', '-lm', '-lstdc++'],
+-    requires_private : ['libelf', 'expat', 'zlib', 'libzstd'],
++    requires_private : (dep_elf.found() ? ['libelf'] : []) + ['expat', 'zlib', 'libzstd'],
+   )
+ else
+   libvulkan_nouveau = shared_library(
