@@ -57,8 +57,12 @@ if(SWITCH)
 	# texture synchronization, barriers and draws. The OFF variant always
 	# records a full descriptor binding and does not consult the binding cache.
 	option(SWITCH_DESCRIPTOR_BIND_CACHE "Elide redundant Switch Vulkan descriptor binds" ON)
+	option(SWITCH_RENDER_HOTPATH_DIAGNOSTICS "Enable extra sampled/counted Switch draw/texture diagnostics" OFF)
 	if(NOT SWITCH_DESCRIPTOR_BIND_CACHE)
 		target_compile_definitions(renderer PRIVATE VITA3K_SWITCH_DISABLE_DESCRIPTOR_BIND_CACHE=1)
+	endif()
+	if(SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
+		target_compile_definitions(renderer PRIVATE VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS=1)
 	endif()
 
 	# The unified Horizon SDK provides native NVC0 OpenGL and Zink alongside NVK.
