@@ -1,0 +1,11 @@
+diff --git a/src/nouveau/vulkan/nvk_physical_device.c b/src/nouveau/vulkan/nvk_physical_device.c
+--- a/src/nouveau/vulkan/nvk_physical_device.c
++++ b/src/nouveau/vulkan/nvk_physical_device.c
+@@ -7,6 +7,7 @@
++#include "c99_alloca.h"
+ #include "nak.h"
+ #include "nvk_buffer.h"
+ #include "nvk_descriptor_types.h"
+ #include "nvk_entrypoints.h"
+ #include "nvk_format.h"
+ #include "nvk_image.h"
