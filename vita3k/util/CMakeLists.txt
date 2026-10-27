@@ -37,4 +37,11 @@ if(SWITCH)
     if(SWITCH_RENDER_CORE_SPREAD)
         target_compile_definitions(util PRIVATE VITA3K_SWITCH_RENDER_CORE_SPREAD=1)
     endif()
+
+    # Keep a full 0b1111 affinity mask but prefer the fourth core for the
+    # render thread. OFF restores the proven unbiased migration behavior.
+    option(SWITCH_RENDER_PREFER_CORE3 "Prefer core 3 for render while allowing all cores" ON)
+    if(SWITCH_RENDER_CORE_SPREAD AND SWITCH_RENDER_PREFER_CORE3)
+        target_compile_definitions(util PRIVATE VITA3K_SWITCH_RENDER_PREFER_CORE3=1)
+    endif()
 endif()
