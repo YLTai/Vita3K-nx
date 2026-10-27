@@ -131,6 +131,7 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
             -DCMAKE_BUILD_TYPE=Release \
             -DSWITCH_RENDER_CORE_SPREAD=ON \
+            -DSWITCH_RENDER_PREFER_CORE3=ON \
             -DSWITCH_RENDER_HOTPATH_DIAGNOSTICS="$SWITCH_HOTPATH_DIAGNOSTICS" \
             -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR" \
             -DSWITCH_VULKAN_SDK="$SWITCH_VULKAN_SDK"
@@ -155,6 +156,7 @@ jobs:
             printf 'Vita3K.nro contains the launcher and emulator; core/ is for diagnostics.\n'
             printf 'SWITCH_DESCRIPTOR_BIND_CACHE=ON\n'
             printf 'SWITCH_RENDER_CORE_SPREAD=ON\n'
+            printf 'SWITCH_RENDER_PREFER_CORE3=ON\n'
             printf 'SWITCH_RENDER_HOTPATH_DIAGNOSTICS=%s\n\n' "$SWITCH_HOTPATH_DIAGNOSTICS"
             cat build-switch-deps/toolchain.txt
             cat "$SWITCH_VULKAN_SDK/share/mesa-switch/build-info.txt"
@@ -236,6 +238,41 @@ jobs:
         with:
           name: vita3k-switch-render-core3-reference-${{ github.sha }}
           path: build-switch/artifacts-core3-reference/
+          if-no-files-found: error
+          retention-days: 14
+
+      # Paired A/B experiment for preferred-core semantics. Both NROs
+      # have the same affinity *mask*, thread priority and Vulkan work.
+      - name: Build unbiased renderer reference NRO (preferred core disabled)
+        if: github.event_name == 'pull_request' && github.head_ref == 'perf/switch-prefer-core3-render-20261027'
+        run: |
+          cmake -S . -B build-switch -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSWITCH_RENDER_CORE_SPREAD=ON \
+            -DSWITCH_RENDER_PREFER_CORE3=OFF \
+            -DSWITCH_RENDER_HOTPATH_DIAGNOSTICS="$SWITCH_HOTPATH_DIAGNOSTICS" \
+            -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR" \
+            -DSWITCH_VULKAN_SDK="$SWITCH_VULKAN_SDK"
+          cmake --build build-switch --parallel "$VITA3K_BUILD_JOBS"
+          test -s build-switch/Vita3K.nro
+          cp build-switch/Vita3K.nro switch-launcher/romfs/emu/Vita3K.nro
+          make -C switch-launcher -j"$VITA3K_BUILD_JOBS"
+          test -s switch-launcher/Vita3K.nro
+          mkdir -p build-switch/artifacts-unbiased-reference/core
+          cp switch-launcher/Vita3K.nro build-switch/artifacts-unbiased-reference/Vita3K.nro
+          cp build-switch/Vita3K.nro build-switch/artifacts-unbiased-reference/core/Vita3K.nro
+          sed 's/SWITCH_RENDER_PREFER_CORE3=ON/SWITCH_RENDER_PREFER_CORE3=OFF/' \
+            build-switch/artifacts/build-info.txt > build-switch/artifacts-unbiased-reference/build-info.txt
+          cd build-switch/artifacts-unbiased-reference
+          sha256sum Vita3K.nro core/Vita3K.nro > SHA256SUMS
+
+      - name: Upload unbiased renderer reference NRO
+        if: github.event_name == 'pull_request' && github.head_ref == 'perf/switch-prefer-core3-render-20261027'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vita3k-switch-render-unbiased-${{ github.sha }}
+          path: build-switch/artifacts-unbiased-reference/
           if-no-files-found: error
           retention-days: 14
 
