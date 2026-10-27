@@ -9,6 +9,7 @@
 #include "lsfg-vk-common/vulkan/vulkan.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -19,8 +20,38 @@
 #include <string>
 #include <utility>
 #include <vector>
+#ifdef __SWITCH__
+#include <switch/arm/counter.h>
+#endif
 
 namespace {
+
+// A callback is registered by Vita3K when the Switch swapchain is initialized.
+// The bridge remains standalone and does not include Vita3K's util headers.
+std::atomic<LsfgNxDebugCallback> g_debug_callback{nullptr};
+
+uint64_t profile_tick() {
+#ifdef __SWITCH__
+    return armGetSystemTick();
+#else
+    return 0;
+#endif
+}
+
+struct ScopedLsfgProfile {
+    explicit ScopedLsfgProfile(LsfgNxDebugStage stage)
+        : stage(stage), callback(g_debug_callback.load(std::memory_order_relaxed)),
+          start(callback ? profile_tick() : 0) {}
+    ~ScopedLsfgProfile() {
+        if (callback)
+            callback(static_cast<uint32_t>(stage), start, profile_tick());
+    }
+    ScopedLsfgProfile(const ScopedLsfgProfile&) = delete;
+    ScopedLsfgProfile& operator=(const ScopedLsfgProfile&) = delete;
+    LsfgNxDebugStage stage;
+    LsfgNxDebugCallback callback;
+    uint64_t start;
+};
 
 VkImageMemoryBarrier imageBarrier(VkImage image,
         VkAccessFlags sourceAccess, VkAccessFlags destinationAccess,
@@ -147,15 +178,21 @@ struct LsfgNxRuntime {
         }
 
         slot.frame.begin(*vulkan);
-        recordCapture(slot.frame, swapchainImages.at(originalImageIndex), sourceImage,
-            sourceInitialized.at(sourceIndex));
+        {
+            ScopedLsfgProfile timer(LSFG_NX_DEBUG_CAPTURE_RECORD);
+            recordCapture(slot.frame, swapchainImages.at(originalImageIndex), sourceImage,
+                sourceInitialized.at(sourceIndex));
+        }
 
         if (realFrameIndex == 0) {
             slot.frame.end(*vulkan);
-            slot.frame.submit(*vulkan,
-                std::move(applicationWaits), VK_NULL_HANDLE, 0,
-                {slot.original.handle()}, VK_NULL_HANDLE, 0,
-                slot.completion.handle());
+            {
+                ScopedLsfgProfile timer(LSFG_NX_DEBUG_QUEUE_SUBMIT);
+                slot.frame.submit(*vulkan,
+                    std::move(applicationWaits), VK_NULL_HANDLE, 0,
+                    {slot.original.handle()}, VK_NULL_HANDLE, 0,
+                    slot.completion.handle());
+            }
             sourceInitialized.at(sourceIndex) = true;
             slot.pending = true;
             ++realFrameIndex;
@@ -164,16 +201,22 @@ struct LsfgNxRuntime {
             return result;
         }
 
-        backend->recordFrame(*context, slot.frame);
+        {
+            ScopedLsfgProfile timer(LSFG_NX_DEBUG_RECORD_COMPUTE);
+            backend->recordFrame(*context, slot.frame);
+        }
 
         /* VI allows only one acquired image here. Put the generated frame into the image already
          * owned by Vita3K, present it, acquire one released image, then restore the real frame. */
         recordOutput(slot.frame, backend->destinationImage(*context, 0),
             swapchainImages.at(originalImageIndex));
         slot.frame.end(*vulkan);
-        slot.frame.submit(*vulkan,
-            std::move(applicationWaits), VK_NULL_HANDLE, 0,
-            {slot.generated.handle()}, VK_NULL_HANDLE, 0);
+        {
+            ScopedLsfgProfile timer(LSFG_NX_DEBUG_QUEUE_SUBMIT);
+            slot.frame.submit(*vulkan,
+                std::move(applicationWaits), VK_NULL_HANDLE, 0,
+                {slot.generated.handle()}, VK_NULL_HANDLE, 0);
+        }
         sourceInitialized.at(sourceIndex) = true;
 
         const VkResult generatedResult = presentGenerated(
@@ -181,9 +224,13 @@ struct LsfgNxRuntime {
         if (generatedResult != VK_SUCCESS && generatedResult != VK_SUBOPTIMAL_KHR)
             return generatedResult;
         uint32_t restoredImageIndex{};
-        const VkResult acquireResult = vulkan->df().AcquireNextImageKHR(
-            vulkan->dev(), swapchain, UINT64_MAX,
-            slot.acquired.handle(), VK_NULL_HANDLE, &restoredImageIndex);
+        VkResult acquireResult;
+        {
+            ScopedLsfgProfile timer(LSFG_NX_DEBUG_ACQUIRE_IMAGE);
+            acquireResult = vulkan->df().AcquireNextImageKHR(
+                vulkan->dev(), swapchain, UINT64_MAX,
+                slot.acquired.handle(), VK_NULL_HANDLE, &restoredImageIndex);
+        }
         if (acquireResult != VK_SUCCESS && acquireResult != VK_SUBOPTIMAL_KHR) {
             throw std::runtime_error("vkAcquireNextImageKHR after generated present failed: " +
                 std::to_string(acquireResult));
@@ -192,12 +239,18 @@ struct LsfgNxRuntime {
             throw std::runtime_error("acquired original-frame image index out of range");
 
         slot.restore.begin(*vulkan);
-        recordOriginal(slot.restore, sourceImage, swapchainImages.at(restoredImageIndex));
+        {
+            ScopedLsfgProfile timer(LSFG_NX_DEBUG_RESTORE_RECORD);
+            recordOriginal(slot.restore, sourceImage, swapchainImages.at(restoredImageIndex));
+        }
         slot.restore.end(*vulkan);
-        slot.restore.submit(*vulkan,
-            {slot.acquired.handle()}, VK_NULL_HANDLE, 0,
-            {slot.original.handle()}, VK_NULL_HANDLE, 0,
-            slot.completion.handle());
+        {
+            ScopedLsfgProfile timer(LSFG_NX_DEBUG_QUEUE_SUBMIT);
+            slot.restore.submit(*vulkan,
+                {slot.acquired.handle()}, VK_NULL_HANDLE, 0,
+                {slot.original.handle()}, VK_NULL_HANDLE, 0,
+                slot.completion.handle());
+        }
         slot.pending = true;
 
         const VkResult originalResult = presentOriginal(
@@ -210,6 +263,7 @@ private:
     FrameSlot& prepareSlot() {
         FrameSlot& slot = slots.at(slotCursor++ % slots.size());
         if (slot.pending) {
+            ScopedLsfgProfile timer(LSFG_NX_DEBUG_SLOT_FENCE_WAIT);
             if (!slot.completion.wait(*vulkan))
                 throw std::runtime_error("timeout waiting for LSFG frame slot");
             slot.pending = false;
@@ -293,6 +347,7 @@ private:
         generated.pWaitSemaphores = &waitSemaphore;
         generated.pImageIndices = &imageIndex;
         generated.pResults = nullptr;
+        ScopedLsfgProfile timer(LSFG_NX_DEBUG_PRESENT_GENERATED);
         return presentAndCount(queue, generated);
     }
 
@@ -303,6 +358,7 @@ private:
         output.waitSemaphoreCount = 1;
         output.pWaitSemaphores = &waitSemaphore;
         output.pImageIndices = &imageIndex;
+        ScopedLsfgProfile timer(LSFG_NX_DEBUG_PRESENT_ORIGINAL);
         return presentAndCount(queue, output);
     }
 
@@ -327,6 +383,10 @@ private:
     uint64_t presentedFrames{};
     size_t slotCursor{};
 };
+
+extern "C" void lsfg_nx_set_debug_callback(LsfgNxDebugCallback callback) {
+    g_debug_callback.store(callback, std::memory_order_release);
+}
 
 extern "C" LsfgNxRuntime *lsfg_nx_create(const LsfgNxCreateInfo *info) {
     if (!info) return nullptr;
