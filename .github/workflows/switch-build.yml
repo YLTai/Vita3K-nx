@@ -37,6 +37,8 @@ jobs:
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       LC_ALL: C
       TZ: UTC
+      # ON only for this PR's paired diagnostic artifacts; merged builds use OFF.
+      SWITCH_HOTPATH_DIAGNOSTICS: ${{ github.event_name == 'pull_request' && github.head_ref == 'perf/switch-render-hotspot-ab-20261027' && 'ON' || 'OFF' }}
 
     steps:
       - name: Install build tools
@@ -128,6 +130,7 @@ jobs:
           cmake -S . -B build-switch -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
             -DCMAKE_BUILD_TYPE=Release \
+            -DSWITCH_RENDER_HOTPATH_DIAGNOSTICS="$SWITCH_HOTPATH_DIAGNOSTICS" \
             -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR" \
             -DSWITCH_VULKAN_SDK="$SWITCH_VULKAN_SDK"
           cmake --build build-switch --parallel "$VITA3K_BUILD_JOBS"
@@ -149,7 +152,8 @@ jobs:
             printf 'Vita3K commit: %s\n' "$(git rev-parse HEAD)"
             printf 'Mesa commit: %s\n' "$(cat "$SWITCH_VULKAN_SDK/share/mesa-switch/revision")"
             printf 'Vita3K.nro contains the launcher and emulator; core/ is for diagnostics.\n'
-            printf 'SWITCH_DESCRIPTOR_BIND_CACHE=ON\n\n'
+            printf 'SWITCH_DESCRIPTOR_BIND_CACHE=ON\n'
+            printf 'SWITCH_RENDER_HOTPATH_DIAGNOSTICS=%s\n\n' "$SWITCH_HOTPATH_DIAGNOSTICS"
             cat build-switch-deps/toolchain.txt
             cat "$SWITCH_VULKAN_SDK/share/mesa-switch/build-info.txt"
           } > build-switch/artifacts/build-info.txt
@@ -173,6 +177,7 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
             -DCMAKE_BUILD_TYPE=Release \
             -DSWITCH_DESCRIPTOR_BIND_CACHE=OFF \
+            -DSWITCH_RENDER_HOTPATH_DIAGNOSTICS="$SWITCH_HOTPATH_DIAGNOSTICS" \
             -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR" \
             -DSWITCH_VULKAN_SDK="$SWITCH_VULKAN_SDK"
           cmake --build build-switch --parallel "$VITA3K_BUILD_JOBS"
