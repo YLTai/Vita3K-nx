@@ -28,3 +28,13 @@ if(ANDROID)
 	target_link_libraries(util PRIVATE adrenotools)
 endif()
 target_compile_definitions(util PRIVATE $<$<CONFIG:Debug,RelWithDebInfo>:TRACY_ENABLE>)
+
+if(SWITCH)
+    # Defaults ON for Switch: render may borrow idle app cores while guest
+    # priorities and core-3 audio/display/Vulkan helpers always preempt it.
+    # OFF restores the original core-3-only render affinity.
+    option(SWITCH_RENDER_CORE_SPREAD "Allow render thread to use spare cores 0-2" ON)
+    if(SWITCH_RENDER_CORE_SPREAD)
+        target_compile_definitions(util PRIVATE VITA3K_SWITCH_RENDER_CORE_SPREAD=1)
+    endif()
+endif()
