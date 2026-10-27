@@ -48,6 +48,23 @@ struct FeatureState;
 
 namespace renderer {
 #ifdef __SWITCH__
+// Single render-thread counters. Only the results of a full process_batches()
+// invocation are published to shared atomics; no SD writes or shared atomics
+// are performed for individual GXM commands.
+namespace {
+thread_local std::array<SwitchCpuOpcodeStats, SWITCH_CPU_OPCODE_COUNT> opcode_window{};
+thread_local std::array<uint32_t, SWITCH_CPU_OPCODE_COUNT> opcode_sample_sequence{};
+
+struct FlushOpcodeProfile {
+    ~FlushOpcodeProfile() {
+        switch_cpu_profile_opcode_merge(opcode_window.data(), opcode_window.size());
+        opcode_window.fill({});
+    }
+};
+} // namespace
+
+static_assert(static_cast<size_t>(CommandOpcode::DestroyContext) + 1 == SWITCH_CPU_OPCODE_COUNT);
+
 // Every draw allocates several commands here and the render thread frees them
 // moments later on another core, and newlib's dlmalloc serializes both behind
 // one global lock. Recycle them through a lock-free pool instead.
@@ -153,7 +170,36 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
             LOG_ERROR("Unimplemented command opcode {}", static_cast<int>(cmd->opcode));
         } else {
             CommandHelper helper(cmd);
+#ifdef __SWITCH__
+            auto &timing = opcode_window[opcode];
+            ++timing.calls;
+            // Draw and SetState dominate command counts. Sample each on a
+            // stable 1/16 cadence; other opcodes, particularly waits and
+            // scene-sync calls, are timed on every invocation.
+            const bool hot = cmd->opcode == CommandOpcode::Draw ||
+                cmd->opcode == CommandOpcode::SetState;
+            const bool sampled = !hot || ((++opcode_sample_sequence[opcode] & 15u) == 0);
+            if (sampled) {
+                const uint64_t start = armGetSystemTick();
+                handler(state, mem, config, helper, features, command_list.context);
+                const uint64_t end = armGetSystemTick();
+                const uint64_t ticks = end - start;
+                ++timing.sampled_calls;
+                timing.sampled_ticks += ticks;
+                if (ticks > timing.sampled_max_ticks)
+                    timing.sampled_max_ticks = ticks;
+                static const uint64_t limit_60 = armGetSystemTickFreq() / 60;
+                static const uint64_t limit_30 = armGetSystemTickFreq() / 30;
+                if (ticks > limit_60)
+                    ++timing.sampled_over_16ms;
+                if (ticks > limit_30)
+                    ++timing.sampled_over_33ms;
+            } else {
+                handler(state, mem, config, helper, features, command_list.context);
+            }
+#else
             handler(state, mem, config, helper, features, command_list.context);
+#endif
         }
 
         Command *last_cmd = cmd;
@@ -168,6 +214,10 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
 }
 
 void process_batches(renderer::State &state, const FeatureState &features, MemState &mem, Config &config, int64_t max_wait_ms) {
+#ifdef __SWITCH__
+    // RAII flush is also reached on timeout, render-abort and async flip.
+    FlushOpcodeProfile profile_flush;
+#endif
     auto max_time = duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() + max_wait_ms;
 
     while (!state.should_display) {
