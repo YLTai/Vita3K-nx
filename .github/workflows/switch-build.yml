@@ -130,6 +130,7 @@ jobs:
           cmake -S . -B build-switch -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
             -DCMAKE_BUILD_TYPE=Release \
+            -DSWITCH_RENDER_CORE_SPREAD=ON \
             -DSWITCH_RENDER_HOTPATH_DIAGNOSTICS="$SWITCH_HOTPATH_DIAGNOSTICS" \
             -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR" \
             -DSWITCH_VULKAN_SDK="$SWITCH_VULKAN_SDK"
@@ -153,6 +154,7 @@ jobs:
             printf 'Mesa commit: %s\n' "$(cat "$SWITCH_VULKAN_SDK/share/mesa-switch/revision")"
             printf 'Vita3K.nro contains the launcher and emulator; core/ is for diagnostics.\n'
             printf 'SWITCH_DESCRIPTOR_BIND_CACHE=ON\n'
+            printf 'SWITCH_RENDER_CORE_SPREAD=ON\n'
             printf 'SWITCH_RENDER_HOTPATH_DIAGNOSTICS=%s\n\n' "$SWITCH_HOTPATH_DIAGNOSTICS"
             cat build-switch-deps/toolchain.txt
             cat "$SWITCH_VULKAN_SDK/share/mesa-switch/build-info.txt"
@@ -199,6 +201,41 @@ jobs:
         with:
           name: vita3k-switch-descriptor-cache-off-${{ github.sha }}
           path: build-switch/artifacts-descriptor-off/
+          if-no-files-found: error
+          retention-days: 14
+
+      # This scheduling experiment builds an identical renderer with the
+      # original core-3-only render affinity as a strict A/B reference.
+      # Normal PRs/merged pushes still produce only the production NRO.
+      - name: Build core-3-only render reference NRO
+        if: github.event_name == 'pull_request' && github.head_ref == 'perf/switch-render-core-spread-20261027'
+        run: |
+          cmake -S . -B build-switch -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSWITCH_RENDER_CORE_SPREAD=OFF \
+            -DSWITCH_RENDER_HOTPATH_DIAGNOSTICS="$SWITCH_HOTPATH_DIAGNOSTICS" \
+            -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR" \
+            -DSWITCH_VULKAN_SDK="$SWITCH_VULKAN_SDK"
+          cmake --build build-switch --parallel "$VITA3K_BUILD_JOBS"
+          test -s build-switch/Vita3K.nro
+          cp build-switch/Vita3K.nro switch-launcher/romfs/emu/Vita3K.nro
+          make -C switch-launcher -j"$VITA3K_BUILD_JOBS"
+          test -s switch-launcher/Vita3K.nro
+          mkdir -p build-switch/artifacts-core3-reference/core
+          cp switch-launcher/Vita3K.nro build-switch/artifacts-core3-reference/Vita3K.nro
+          cp build-switch/Vita3K.nro build-switch/artifacts-core3-reference/core/Vita3K.nro
+          sed 's/SWITCH_RENDER_CORE_SPREAD=ON/SWITCH_RENDER_CORE_SPREAD=OFF/' \
+            build-switch/artifacts/build-info.txt > build-switch/artifacts-core3-reference/build-info.txt
+          cd build-switch/artifacts-core3-reference
+          sha256sum Vita3K.nro core/Vita3K.nro > SHA256SUMS
+
+      - name: Upload core-3-only render reference NRO
+        if: github.event_name == 'pull_request' && github.head_ref == 'perf/switch-render-core-spread-20261027'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vita3k-switch-render-core3-reference-${{ github.sha }}
+          path: build-switch/artifacts-core3-reference/
           if-no-files-found: error
           retention-days: 14
 
