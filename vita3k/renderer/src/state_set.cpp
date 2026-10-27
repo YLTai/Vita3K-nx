@@ -32,6 +32,10 @@
 #include <util/align.h>
 #include <util/log.h>
 #include <util/tracy.h>
+#ifdef __SWITCH__
+#include <switch/arm/counter.h>
+#include <util/switch_thread.h>
+#endif
 
 #include <config/state.h>
 
@@ -570,11 +574,24 @@ COMMAND(handle_set_state) {
         return result;
     }();
 
+#ifdef __SWITCH__
+    static_assert(static_cast<size_t>(GXMState::TotalState) == SWITCH_CPU_FINE_STATE_COUNT);
+#endif
     const size_t state_index = static_cast<size_t>(gxm_state_to_set);
     const StateChangeHandler handler = state_index < handlers.size() ? handlers[state_index] : nullptr;
     if (handler) {
-        // LOG_TRACE("State set: {}", (int)gxm_state_to_set);
+        // Log exact subtype counts, but time an independent pseudorandom
+        // ~1/16 sample to avoid alignment with repeated frame state patterns.
+#ifdef __SWITCH__
+        const bool sample = switch_cpu_profile_fine_sample();
+        const uint64_t begin_tick = sample ? armGetSystemTick() : 0;
+#endif
         handler(renderer, mem, config, helper, render_context);
+#ifdef __SWITCH__
+        const uint64_t elapsed_ticks = sample ? armGetSystemTick() - begin_tick : 0;
+        switch_cpu_profile_fine_record(static_cast<SwitchCpuFineMetric>(state_index),
+            sample, elapsed_ticks);
+#endif
     } else {
         LOG_ERROR("Unknown state set command {}", static_cast<uint16_t>(gxm_state_to_set));
     }
