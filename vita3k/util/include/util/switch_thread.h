@@ -50,6 +50,9 @@ void switch_cpu_profile_render_phase(SwitchCpuProfilePhase phase, uint64_t begin
 void switch_cpu_profile_lsfg_stage(uint32_t stage, uint64_t begin_tick, uint64_t end_tick);
 void switch_cpu_profile_lsfg_state(bool requested, bool compatible, bool passthrough);
 void switch_cpu_profile_lsfg_generated(uint32_t frames);
+void switch_cpu_profile_lsfg_begin_session(const char *safe_title_id, int64_t epoch, uint64_t session);
+void switch_cpu_profile_lsfg_poll(double elapsed_ms, bool final_sample);
+void switch_cpu_profile_lsfg_end_session();
 
 #ifdef __SWITCH__
 void switch_pin_to_app_cores(const char *what);
@@ -106,6 +109,9 @@ inline void switch_cpu_profile_render_phase(SwitchCpuProfilePhase, uint64_t, uin
 inline void switch_cpu_profile_lsfg_stage(uint32_t, uint64_t, uint64_t) {}
 inline void switch_cpu_profile_lsfg_state(bool, bool, bool) {}
 inline void switch_cpu_profile_lsfg_generated(uint32_t) {}
+inline void switch_cpu_profile_lsfg_begin_session(const char *, int64_t, uint64_t) {}
+inline void switch_cpu_profile_lsfg_poll(double, bool) {}
+inline void switch_cpu_profile_lsfg_end_session() {}
 inline void switch_pin_to_app_cores(const char *) {}
 inline void switch_apply_guest_thread_affinity(int32_t) {}
 inline bool switch_pin_to_helper_core(const char *, int32_t) { return false; }
