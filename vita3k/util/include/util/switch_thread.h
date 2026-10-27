@@ -45,7 +45,7 @@ enum class SwitchCpuProfilePhase : uint8_t {
     LsfgOriginalPresent, LsfgCaptureRecord, LsfgCreate, LsfgDestroy,
     BatchQueueWait, BatchSyncWait, BatchCommandExecution,
     VkQueueMutexWait, VkQueueSubmit, VkQueuePresent,
-    SwapchainAcquire, SwapchainFenceWait,
+    SwapchainAcquire, SwapchainFenceWait, VkOneTimeSubmitWait,
     Count
 };
 void switch_cpu_profile_render_phase(SwitchCpuProfilePhase phase, uint64_t begin_tick, uint64_t end_tick);
