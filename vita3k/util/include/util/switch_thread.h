@@ -129,6 +129,11 @@ void switch_allow_helper_core(const char *what);
 // fence processing). Raises them above the guest priority band so busy guest
 // threads cannot starve the very work they are waiting on.
 void switch_pin_to_hardware_priority(const char *what, int32_t helper_priority);
+// Optional render-thread-only affinity spread: leave the latency-sensitive
+// helpers on core 3, but let sustained rendering use slack on cores 0..2.
+// Render stays priority 63, below all guest and hardware helper threads;
+// if the mask or priority is rejected, use the original core-3 policy.
+void switch_pin_render_thread(const char *what);
 // Applies a guest thread's Vita priority to the calling Horizon thread. Without
 // it every guest thread runs at the process default, level with the render and
 // audio threads, so a busy game can hold off the 5 ms audio deadline and the
@@ -176,6 +181,7 @@ inline void switch_apply_guest_thread_affinity(int32_t) {}
 inline bool switch_pin_to_helper_core(const char *, int32_t) { return false; }
 inline void switch_allow_helper_core(const char *) {}
 inline void switch_pin_to_hardware_priority(const char *, int32_t) {}
+inline void switch_pin_render_thread(const char *) {}
 inline void switch_apply_guest_thread_priority(int) {}
 inline int switch_mapped_guest_priority(int) { return -1; }
 
