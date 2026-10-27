@@ -463,6 +463,59 @@ void cpu_profile_poll_locked(bool final_sample) {
         }
     }
 
+    // Names and state index ordering correspond exactly to GXMState.
+    // Last two Draw entries are counters only, not durations.
+    static constexpr const char *fine_names[] = {
+        "state_region_clip", "state_program", "state_viewport", "state_depth_bias",
+        "state_depth_func", "state_depth_write_enable", "state_polygon_mode",
+        "state_point_line_width", "state_stencil_func", "state_texture",
+        "state_stencil_ref", "state_vertex_stream", "state_two_sided",
+        "state_cull_mode", "state_uniform_buffer",
+        "state_fragment_program_enable", "state_visibility_buffer",
+        "state_visibility_index",
+        "draw_setup", "draw_pipeline_lookup", "draw_pipeline_bind",
+        "draw_uniforms", "draw_descriptors", "draw_index_vertex",
+        "draw_emit", "draw_skipped_mask", "draw_skipped_pipeline"
+    };
+    static_assert(std::size(fine_names) == SWITCH_CPU_FINE_COUNT);
+    if (cpu_profile_fine_file) {
+        std::array<SwitchCpuOpcodeStats, SWITCH_CPU_FINE_COUNT> snapshot{};
+        {
+            const std::lock_guard<std::mutex> lock(cpu_fine_snapshot_mutex);
+            for (size_t i = 0; i < cpu_profile_fine.size(); ++i) {
+                auto &src = cpu_profile_fine[i];
+                auto &dst = snapshot[i];
+                dst.calls = src.calls.exchange(0, std::memory_order_relaxed);
+                dst.sampled_calls = src.sampled_calls.exchange(0, std::memory_order_relaxed);
+                dst.sampled_ticks = src.sampled_ticks.exchange(0, std::memory_order_relaxed);
+                dst.sampled_max_ticks = src.sampled_max_ticks.exchange(0, std::memory_order_relaxed);
+                dst.sampled_over_16ms = src.sampled_over_16ms.exchange(0, std::memory_order_relaxed);
+                dst.sampled_over_33ms = src.sampled_over_33ms.exchange(0, std::memory_order_relaxed);
+            }
+        }
+        // Writing CSV is intentionally outside cpu_fine_snapshot_mutex.
+        for (size_t i = 0; i < snapshot.size(); ++i) {
+            const auto &p = snapshot[i];
+            const bool counter_only =
+                i >= static_cast<size_t>(SwitchCpuFineMetric::DrawSkippedMask);
+            const double measured_ms = cpu_profile_to_ms(p.sampled_ticks);
+            const double average_ms = p.sampled_calls ?
+                measured_ms / static_cast<double>(p.sampled_calls) : 0.0;
+            const double estimated_ms = counter_only ? 0.0 :
+                static_cast<double>(p.calls) * average_ms;
+            std::fprintf(cpu_profile_fine_file,
+                "%.2f,%zu,%s,%s,%llu,%llu,%.3f,%.3f,%.5f,%.3f,%llu,%llu\n",
+                elapsed_ms, i, fine_names[i],
+                counter_only ? "counter_only" : "random_1_in_16",
+                static_cast<unsigned long long>(p.calls),
+                static_cast<unsigned long long>(p.sampled_calls),
+                measured_ms, estimated_ms, average_ms,
+                cpu_profile_to_ms(p.sampled_max_ticks),
+                static_cast<unsigned long long>(p.sampled_over_16ms),
+                static_cast<unsigned long long>(p.sampled_over_33ms));
+        }
+    }
+
     switch_cpu_profile_lsfg_poll(elapsed_ms, final_sample);
     cpu_profile_next_tick.store(now + armGetSystemTickFreq(),
         std::memory_order_release);
@@ -472,6 +525,8 @@ void cpu_profile_poll_locked(bool final_sample) {
         std::fflush(cpu_profile_phases_file);
         if (cpu_profile_opcodes_file)
             std::fflush(cpu_profile_opcodes_file);
+        if (cpu_profile_fine_file)
+            std::fflush(cpu_profile_fine_file);
     }
 }
 
@@ -492,6 +547,10 @@ void cpu_profile_close_locked() {
     if (cpu_profile_opcodes_file) {
         std::fclose(cpu_profile_opcodes_file);
         cpu_profile_opcodes_file = nullptr;
+    }
+    if (cpu_profile_fine_file) {
+        std::fclose(cpu_profile_fine_file);
+        cpu_profile_fine_file = nullptr;
     }
     cpu_profile_next_tick.store(0, std::memory_order_relaxed);
     cpu_profile_reset_phases();
