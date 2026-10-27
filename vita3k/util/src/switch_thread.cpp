@@ -190,7 +190,7 @@ struct CpuProfileEntry {
     u64 self_wall = 0;
     u64 previous_self_total = 0;
     u64 previous_self_wall = 0;
-    Result self_rc = 0;
+    Result self_rc = 0xFFFFFFFF;
     u32 self_core = 0xFFFFFFFF;
     bool valid = false;
     bool exited = false;
@@ -431,6 +431,38 @@ SwitchCpuProfileThread::SwitchCpuProfileThread(const char *label) {
     entry.token = ++cpu_profile_token;
     token_ = entry.token;
     cpu_profile_threads.push_back(entry);
+}
+
+void SwitchCpuProfileThread::checkpoint() {
+    if (!token_ || !cpu_profile_enabled.load(std::memory_order_acquire))
+        return;
+    const u64 now = armGetSystemTick();
+    if (now < next_checkpoint_tick_)
+        return;
+    next_checkpoint_tick_ = now + armGetSystemTickFreq();
+
+    u64 cpu_ticks = 0;
+    const Result rc = svcGetInfo(&cpu_ticks, InfoType_ThreadTickCount,
+        CUR_THREAD_HANDLE, TickCountInfo_Total);
+    const u32 core = svcGetCurrentProcessorNumber();
+
+    std::lock_guard<std::mutex> lock(cpu_profile_mutex);
+    const auto it = std::find_if(cpu_profile_threads.begin(),
+        cpu_profile_threads.end(), [this](const CpuProfileEntry &entry) {
+            return entry.token == token_;
+        });
+    if (it == cpu_profile_threads.end())
+        return;
+    if (R_SUCCEEDED(rc) && it->self_wall == 0) {
+        it->previous_self_wall = now;
+        it->previous_self_total = cpu_ticks;
+    }
+    if (R_SUCCEEDED(rc)) {
+        it->self_total = cpu_ticks;
+        it->self_wall = now;
+    }
+    it->self_core = core;
+    it->self_rc = rc;
 }
 
 SwitchCpuProfileThread::~SwitchCpuProfileThread() {
