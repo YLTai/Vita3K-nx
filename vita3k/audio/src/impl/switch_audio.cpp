@@ -148,6 +148,7 @@ void SwitchAudioAdapter::update_thread_func() {
         }
         // A wavebuf may have completed; wake any port waiting for a free slot.
         wait_cond.notify_all();
+        cpu_profile.checkpoint();
     }
 }
 
