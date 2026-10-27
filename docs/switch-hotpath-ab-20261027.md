@@ -30,6 +30,11 @@ be trusted. Do not claim the system is CPU-bound or GPU-bound from these logs.
 
 The existing per-thread Switch fine profiler records exact call counts in
 thread-local state and samples timed sub-stages with a random ~1/16 decision.
+**The extra hot-path instrumentation is compile-time OFF by default** to avoid
+increasing ordinary Switch release overhead; set
+`SWITCH_RENDER_HOTPATH_DIAGNOSTICS=ON` to collect the new rows. Both paired
+artifacts from this PR's GitHub Actions job enable it. Merged push builds do not.
+No counters or timing overhead from the new sub-stages runs when the option is OFF.
 Its existing once-per-second frontend poll writes the CSV. This PR appends
 new named metrics to `gxm-state-draw-*.csv` without changing column names.
 
@@ -72,10 +77,18 @@ cmake -S . -B build-switch -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
   -DCMAKE_BUILD_TYPE=Release \
   -DSWITCH_DESCRIPTOR_BIND_CACHE=ON \
+  -DSWITCH_RENDER_HOTPATH_DIAGNOSTICS=ON \
   -DSWITCH_VULKAN_SDK="$SWITCH_VULKAN_SDK" \
   -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR"
 cmake --build build-switch --parallel 2
 ```
+
+The PR #7 workflow produces two identically instrumented artifacts:
+`vita3k-switch-<SHA>` (cache ON) and
+`vita3k-switch-descriptor-cache-off-<SHA>` (cache OFF). Both contain launcher
+and core NRO files, checksums and `build-info.txt`. The OFF artifact is a
+reference for this experiment and is not an optimized build. This optional
+second build step runs only on this PR branch, not on ordinary merged pushes.
 
 Build the reference with **the same commit, toolchain, dependencies and
 settings**, but `-DSWITCH_DESCRIPTOR_BIND_CACHE=OFF`; use separate
