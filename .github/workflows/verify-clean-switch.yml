@@ -1,0 +1,144 @@
+name: Verify clean db030b5 Switch render affinity
+
+on:
+  push:
+    branches: [ci/verify-prefer-core3-db030b5]
+
+permissions:
+  contents: read
+
+jobs:
+  build-switch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    container:
+      image: devkitpro/devkita64:latest
+      options: --user root
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEVKITPRO: /opt/devkitpro
+      DEVKITA64: /opt/devkitpro/devkitA64
+      VITA3K_BUILD_JOBS: '2'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config git curl \
+            ca-certificates perl python3
+          dkp-pacman -Q devkitA64 libnx switch-pkg-config switch-mesa
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify historical clean source is unchanged
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          test -z "$(git diff --name-only b7601fd624b9032abdc8b65e681875e08975a3c7 HEAD -- vita3k)"
+          test "$(git rev-parse HEAD:vita3k/renderer/src/batch.cpp)" = \
+               "$(git rev-parse b7601fd624b9032abdc8b65e681875e08975a3c7:vita3k/renderer/src/batch.cpp)"
+          echo "CI-only build scaffolding; emulator source exactly matches clean PR #10"
+
+      - name: Resolve Switch toolchain paths
+        id: toolchain
+        run: |
+          echo "$DEVKITA64/bin" >> "$GITHUB_PATH"
+          echo "$DEVKITPRO/tools/bin" >> "$GITHUB_PATH"
+          echo "$DEVKITPRO/portlibs/switch/bin" >> "$GITHUB_PATH"
+          sdk_version=$(sed -n 's/^SDK_VERSION=//p' scripts/prepare-switch-vulkan-sdk.sh)
+          openssl_version=$(sed -n 's/^OPENSSL_VERSION=//p' scripts/prepare-switch-openssl.sh)
+          echo "SWITCH_VULKAN_SDK=$GITHUB_WORKSPACE/build-switch-deps/mesa-$sdk_version-switch-unified-horizon-sdk" >> "$GITHUB_ENV"
+          echo "SWITCH_OPENSSL_DIR=$GITHUB_WORKSPACE/build-switch-deps/openssl-$openssl_version" >> "$GITHUB_ENV"
+          mkdir -p build-switch-deps
+          dkp-pacman -Q | sort > build-switch-deps/toolchain.txt
+          echo "digest=$(sha256sum build-switch-deps/toolchain.txt | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Compile Horizon core-mask API smoke test
+        run: |
+          cat > /tmp/test-render-core.cpp <<'CPP'
+          #include <switch.h>
+          void verify_render_affinity() {
+              svcSetThreadPriority(CUR_THREAD_HANDLE, 63);
+              svcSetThreadCoreMask(CUR_THREAD_HANDLE, 3, 0b1111);
+          }
+          CPP
+          "$DEVKITA64/bin/aarch64-none-elf-g++" -std=c++20 -c \
+            -I"$DEVKITPRO/libnx/include" \
+            -D__SWITCH__ -march=armv8-a+crc+crypto -mtune=cortex-a57 \
+            /tmp/test-render-core.cpp -o /tmp/test-render-core.o
+          test -s /tmp/test-render-core.o
+
+      - name: Apply pinned Switch submodule patches
+        run: bash scripts/apply-switch-submodule-patches.sh
+
+      - name: Restore pinned Mesa and OpenSSL builds
+        id: deps
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.SWITCH_VULKAN_SDK }}
+            ${{ env.SWITCH_OPENSSL_DIR }}
+          key: switch-clean-db030b5-deps-${{ steps.toolchain.outputs.digest }}-${{ hashFiles('.ci/build-switch-sdk.sh', '.ci/patches/**', 'scripts/prepare-switch-*.sh', 'cmake/switch/openssl-compat/**') }}
+
+      - name: Build pinned Mesa SDK
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: bash .ci/build-switch-sdk.sh
+
+      - name: Build pinned OpenSSL
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: bash scripts/prepare-switch-openssl.sh
+
+      - name: Check pinned dependencies
+        run: |
+          bash scripts/prepare-switch-vulkan-sdk.sh --check
+          bash scripts/prepare-switch-openssl.sh --check
+
+      - name: Cache pinned dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.SWITCH_VULKAN_SDK }}
+            ${{ env.SWITCH_OPENSSL_DIR }}
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
+      - name: Build clean historical emulator NRO
+        run: |
+          cmake -S . -B build-switch -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR" \
+            -DSWITCH_VULKAN_SDK="$SWITCH_VULKAN_SDK"
+          cmake --build build-switch --parallel "$VITA3K_BUILD_JOBS"
+          test -s build-switch/Vita3K.nro
+
+      - name: Bundle Switch launcher
+        run: |
+          mkdir -p switch-launcher/romfs/emu
+          cp build-switch/Vita3K.nro switch-launcher/romfs/emu/Vita3K.nro
+          make -C switch-launcher -j"$VITA3K_BUILD_JOBS"
+          test -s switch-launcher/Vita3K.nro
+
+      - name: Upload clean-baseline build artifact
+        run: |
+          mkdir -p build-switch/artifacts/core
+          cp switch-launcher/Vita3K.nro build-switch/artifacts/Vita3K.nro
+          cp build-switch/Vita3K.nro build-switch/artifacts/core/Vita3K.nro
+          printf 'Clean PR #10 SHA: b7601fd624b9032abdc8b65e681875e08975a3c7\n' > build-switch/artifacts/build-info.txt
+          printf 'CI-only shim SHA: %s\n' "$(git rev-parse HEAD)" >> build-switch/artifacts/build-info.txt
+          cd build-switch/artifacts
+          sha256sum Vita3K.nro core/Vita3K.nro > SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vita3k-clean-core3-preferred-${{ github.sha }}
+          path: build-switch/artifacts/
+          if-no-files-found: error
+          retention-days: 14
