@@ -505,6 +505,11 @@ void cpu_profile_poll_locked(bool final_sample) {
         // Writing CSV is intentionally outside cpu_fine_snapshot_mutex.
         for (size_t i = 0; i < snapshot.size(); ++i) {
             const auto &p = snapshot[i];
+            // When diagnostic instrumentation is OFF, omit the inactive
+            // appended rows. The original 27 metric rows stay unchanged.
+            if (i >= static_cast<size_t>(SwitchCpuFineMetric::TextureSurfaceLookup)
+                && p.calls == 0)
+                continue;
             const bool counter_only =
                 i == static_cast<size_t>(SwitchCpuFineMetric::DrawSkippedMask)
                 || i == static_cast<size_t>(SwitchCpuFineMetric::DrawSkippedPipeline)
