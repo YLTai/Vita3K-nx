@@ -217,6 +217,8 @@ std::mutex cpu_profile_mutex;
 std::vector<CpuProfileEntry> cpu_profile_threads;
 std::array<CpuPhaseStats, static_cast<size_t>(SwitchCpuProfilePhase::Count)> cpu_profile_phases;
 std::array<CpuOpcodeCounter, SWITCH_CPU_OPCODE_COUNT> cpu_profile_opcodes;
+// Snapshot all six opcode fields together. No disk I/O while this lock is held.
+std::mutex cpu_opcode_snapshot_mutex;
 std::atomic<bool> cpu_profile_enabled{ false };
 std::atomic<u64> cpu_profile_next_tick{ 0 };
 std::FILE *cpu_profile_threads_file = nullptr;
@@ -416,26 +418,36 @@ void cpu_profile_poll_locked(bool final_sample) {
     };
     static_assert(std::size(opcode_names) == SWITCH_CPU_OPCODE_COUNT);
     if (cpu_profile_opcodes_file) {
-        for (size_t i = 0; i < cpu_profile_opcodes.size(); ++i) {
-            auto &p = cpu_profile_opcodes[i];
-            const u64 calls = p.calls.exchange(0, std::memory_order_relaxed);
-            const u64 samples = p.sampled_calls.exchange(0, std::memory_order_relaxed);
-            const u64 ticks = p.sampled_ticks.exchange(0, std::memory_order_relaxed);
-            const u64 maximum = p.sampled_max_ticks.exchange(0, std::memory_order_relaxed);
-            const u64 slow16 = p.sampled_over_16ms.exchange(0, std::memory_order_relaxed);
-            const u64 slow33 = p.sampled_over_33ms.exchange(0, std::memory_order_relaxed);
-            const double sampled_ms = cpu_profile_to_ms(ticks);
+        std::array<SwitchCpuOpcodeStats, SWITCH_CPU_OPCODE_COUNT> snapshot{};
+        {
+            const std::lock_guard<std::mutex> lock(cpu_opcode_snapshot_mutex);
+            for (size_t i = 0; i < cpu_profile_opcodes.size(); ++i) {
+                auto &p = cpu_profile_opcodes[i];
+                auto &out = snapshot[i];
+                out.calls = p.calls.exchange(0, std::memory_order_relaxed);
+                out.sampled_calls = p.sampled_calls.exchange(0, std::memory_order_relaxed);
+                out.sampled_ticks = p.sampled_ticks.exchange(0, std::memory_order_relaxed);
+                out.sampled_max_ticks = p.sampled_max_ticks.exchange(0, std::memory_order_relaxed);
+                out.sampled_over_16ms = p.sampled_over_16ms.exchange(0, std::memory_order_relaxed);
+                out.sampled_over_33ms = p.sampled_over_33ms.exchange(0, std::memory_order_relaxed);
+            }
+        }
+        for (size_t i = 0; i < snapshot.size(); ++i) {
+            const auto &p = snapshot[i];
+            const double sampled_ms = cpu_profile_to_ms(p.sampled_ticks);
+            const double avg_ms = p.sampled_calls ?
+                sampled_ms / static_cast<double>(p.sampled_calls) : 0.0;
             // Extrapolated totals for Draw/SetState are estimates, not exact totals.
-            const double avg_ms = samples ? sampled_ms / static_cast<double>(samples) : 0.0;
-            const double estimated_ms = static_cast<double>(calls) * avg_ms;
+            const double estimated_ms = static_cast<double>(p.calls) * avg_ms;
             std::fprintf(cpu_profile_opcodes_file,
                 "%.2f,%zu,%s,%llu,%llu,%.3f,%.3f,%.3f,%.3f,%llu,%llu\n",
                 elapsed_ms, i, opcode_names[i],
-                static_cast<unsigned long long>(calls),
-                static_cast<unsigned long long>(samples),
-                sampled_ms, estimated_ms, avg_ms, cpu_profile_to_ms(maximum),
-                static_cast<unsigned long long>(slow16),
-                static_cast<unsigned long long>(slow33));
+                static_cast<unsigned long long>(p.calls),
+                static_cast<unsigned long long>(p.sampled_calls),
+                sampled_ms, estimated_ms, avg_ms,
+                cpu_profile_to_ms(p.sampled_max_ticks),
+                static_cast<unsigned long long>(p.sampled_over_16ms),
+                static_cast<unsigned long long>(p.sampled_over_33ms));
         }
     }
 
@@ -652,6 +664,7 @@ void switch_cpu_profile_opcode_merge(const SwitchCpuOpcodeStats *stats, size_t c
     if (!stats || !cpu_profile_enabled.load(std::memory_order_relaxed))
         return;
     const size_t slots = std::min(count, cpu_profile_opcodes.size());
+    const std::lock_guard<std::mutex> lock(cpu_opcode_snapshot_mutex);
     for (size_t i = 0; i < slots; ++i) {
         const auto &source = stats[i];
         if (!source.calls)
