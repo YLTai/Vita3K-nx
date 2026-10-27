@@ -190,8 +190,16 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
                     timing.sampled_max_ticks = ticks;
                 static const uint64_t limit_60 = armGetSystemTickFreq() / 60;
                 static const uint64_t limit_30 = armGetSystemTickFreq() / 30;
-                if (ticks > limit_60)
+                if (ticks > limit_60) {
                     ++timing.sampled_over_16ms;
+                    // Sparse frame-time correlation event. High 32 bits are
+                    // opcode id, low 32 bits are observed microseconds.
+                    const uint64_t elapsed_us =
+                        (ticks * 1000000ULL) / armGetSystemTickFreq();
+                    switch_cpu_profile_frame_event("gxm_handler_slow",
+                        (static_cast<uint64_t>(opcode) << 32) |
+                        (elapsed_us & 0xffffffffULL));
+                }
                 if (ticks > limit_30)
                     ++timing.sampled_over_33ms;
             } else {
