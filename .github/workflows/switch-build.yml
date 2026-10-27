@@ -12,6 +12,11 @@ on:
   # GitHub only exposes this button once the workflow is on the default branch.
   # The CI-only branch uses the push trigger above.
   workflow_dispatch:
+    inputs:
+      fast_dev:
+        description: "Skip LTO for faster iteration; not suitable for Release FPS comparisons"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -37,6 +42,13 @@ jobs:
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       LC_ALL: C
       TZ: UTC
+      # Release artifacts keep LTO by default; manually dispatched builds may opt out.
+      SWITCH_LTO_MODE: ${{ inputs.fast_dev && 'NEVER' || 'RELEASE_ONLY' }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_COMPRESS: 'true'
+      CCACHE_MAXSIZE: 2G
       # ON only for this PR's paired diagnostic artifacts; merged builds use OFF.
       SWITCH_HOTPATH_DIAGNOSTICS: ${{ github.event_name == 'pull_request' && github.head_ref == 'perf/switch-render-hotspot-ab-20261027' && 'ON' || 'OFF' }}
 
@@ -45,7 +57,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build pkg-config git curl \
+            build-essential cmake ninja-build ccache pkg-config git curl \
             ca-certificates perl python3
           # The official image already includes switch-dev and switch-portlibs.
           # devkitPro blocks package downloads from GitHub-hosted runners.
@@ -73,6 +85,26 @@ jobs:
           dkp-pacman -Q | sort > build-switch-deps/toolchain.txt
           digest=$(sha256sum build-switch-deps/toolchain.txt | cut -d ' ' -f 1)
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # Do not cache build-switch/: freshly checked out files have new mtimes and
+      # Ninja would rebuild them. ccache reuses object code by content/flags.
+      - name: Restore C/C++ object cache
+        id: ccache_restore
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: .ccache
+          key: switch-ccache-v1-${{ steps.toolchain.outputs.digest }}-${{ hashFiles('scripts/prepare-switch-*.sh', '.ci/build-switch-sdk.sh', '.ci/patches/**', 'cmake/switch/openssl-compat/**') }}-${{ env.SWITCH_LTO_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            switch-ccache-v1-${{ steps.toolchain.outputs.digest }}-${{ hashFiles('scripts/prepare-switch-*.sh', '.ci/build-switch-sdk.sh', '.ci/patches/**', 'cmake/switch/openssl-compat/**') }}-${{ env.SWITCH_LTO_MODE }}-
+
+      - name: Initialize compiler cache
+        id: ccache_setup
+        run: |
+          mkdir -p "$CCACHE_DIR"
+          ccache --max-size="$CCACHE_MAXSIZE"
+          ccache --zero-stats
+          ccache --version | head -1
 
       # Check pinned submodules before spending time building the SDKs.
       - name: Apply Switch submodule patches
@@ -130,6 +162,9 @@ jobs:
           cmake -S . -B build-switch -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
             -DCMAKE_BUILD_TYPE=Release \
+            -DUSE_LTO="$SWITCH_LTO_MODE" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DSWITCH_RENDER_CORE_SPREAD=ON \
             -DSWITCH_RENDER_HOTPATH_DIAGNOSTICS="$SWITCH_HOTPATH_DIAGNOSTICS" \
             -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR" \
@@ -141,7 +176,9 @@ jobs:
         run: |
           mkdir -p switch-launcher/romfs/emu
           cp build-switch/Vita3K.nro switch-launcher/romfs/emu/Vita3K.nro
-          make -C switch-launcher -j"$VITA3K_BUILD_JOBS"
+          make -C switch-launcher -j"$VITA3K_BUILD_JOBS" \
+            CC="ccache $DEVKITA64/bin/aarch64-none-elf-gcc" \
+            CXX="ccache $DEVKITA64/bin/aarch64-none-elf-g++"
           test -s switch-launcher/Vita3K.nro
 
       - name: Stage artifacts
@@ -155,7 +192,9 @@ jobs:
             printf 'Vita3K.nro contains the launcher and emulator; core/ is for diagnostics.\n'
             printf 'SWITCH_DESCRIPTOR_BIND_CACHE=ON\n'
             printf 'SWITCH_RENDER_CORE_SPREAD=ON\n'
-            printf 'SWITCH_RENDER_HOTPATH_DIAGNOSTICS=%s\n\n' "$SWITCH_HOTPATH_DIAGNOSTICS"
+            printf 'SWITCH_RENDER_HOTPATH_DIAGNOSTICS=%s\n' "$SWITCH_HOTPATH_DIAGNOSTICS"
+            printf 'USE_LTO=%s\n' "$SWITCH_LTO_MODE"
+            printf 'compiler_cache=ccache\n\n'
             cat build-switch-deps/toolchain.txt
             cat "$SWITCH_VULKAN_SDK/share/mesa-switch/build-info.txt"
           } > build-switch/artifacts/build-info.txt
@@ -178,6 +217,9 @@ jobs:
           cmake -S . -B build-switch -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
             -DCMAKE_BUILD_TYPE=Release \
+            -DUSE_LTO="$SWITCH_LTO_MODE" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DSWITCH_DESCRIPTOR_BIND_CACHE=OFF \
             -DSWITCH_RENDER_HOTPATH_DIAGNOSTICS="$SWITCH_HOTPATH_DIAGNOSTICS" \
             -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR" \
@@ -185,7 +227,9 @@ jobs:
           cmake --build build-switch --parallel "$VITA3K_BUILD_JOBS"
           test -s build-switch/Vita3K.nro
           cp build-switch/Vita3K.nro switch-launcher/romfs/emu/Vita3K.nro
-          make -C switch-launcher -j"$VITA3K_BUILD_JOBS"
+          make -C switch-launcher -j"$VITA3K_BUILD_JOBS" \
+            CC="ccache $DEVKITA64/bin/aarch64-none-elf-gcc" \
+            CXX="ccache $DEVKITA64/bin/aarch64-none-elf-g++"
           test -s switch-launcher/Vita3K.nro
           mkdir -p build-switch/artifacts-descriptor-off/core
           cp switch-launcher/Vita3K.nro build-switch/artifacts-descriptor-off/Vita3K.nro
@@ -213,6 +257,9 @@ jobs:
           cmake -S . -B build-switch -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
             -DCMAKE_BUILD_TYPE=Release \
+            -DUSE_LTO="$SWITCH_LTO_MODE" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DSWITCH_RENDER_CORE_SPREAD=OFF \
             -DSWITCH_RENDER_HOTPATH_DIAGNOSTICS="$SWITCH_HOTPATH_DIAGNOSTICS" \
             -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR" \
@@ -220,7 +267,9 @@ jobs:
           cmake --build build-switch --parallel "$VITA3K_BUILD_JOBS"
           test -s build-switch/Vita3K.nro
           cp build-switch/Vita3K.nro switch-launcher/romfs/emu/Vita3K.nro
-          make -C switch-launcher -j"$VITA3K_BUILD_JOBS"
+          make -C switch-launcher -j"$VITA3K_BUILD_JOBS" \
+            CC="ccache $DEVKITA64/bin/aarch64-none-elf-gcc" \
+            CXX="ccache $DEVKITA64/bin/aarch64-none-elf-g++"
           test -s switch-launcher/Vita3K.nro
           mkdir -p build-switch/artifacts-core3-reference/core
           cp switch-launcher/Vita3K.nro build-switch/artifacts-core3-reference/Vita3K.nro
@@ -253,3 +302,17 @@ jobs:
             switch-launcher/dependencies/build/CMakeFiles/CMakeConfigureLog.yaml
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Show compiler cache statistics
+        if: always() && steps.ccache_setup.outcome == 'success'
+        run: ccache --show-stats
+
+      # A fresh key is saved each run, including after a compiler/link failure,
+      # so repeated PR updates can reuse already compiled sources.
+      - name: Save C/C++ object cache
+        if: always() && steps.ccache_setup.outcome == 'success' && steps.ccache_restore.outcome == 'success'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: .ccache
+          key: ${{ steps.ccache_restore.outputs.cache-primary-key }}
