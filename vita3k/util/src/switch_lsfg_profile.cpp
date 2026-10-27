@@ -146,25 +146,27 @@ void switch_cpu_profile_lsfg_poll(double elapsed_ms, bool final_sample) {
     if (!state_csv && !frame_csv)
         return;
     if (state_csv) {
-    const uint64_t sources = source_present_calls.exchange(0, std::memory_order_relaxed);
-    const uint64_t generated = generated_frames.exchange(0, std::memory_order_relaxed);
-    std::fprintf(state_csv, "%.2f,%d,%d,%d,%llu,%llu,%d\n",
-        elapsed_ms,
-        requested.load(std::memory_order_relaxed) ? 1 : 0,
-        compatible.load(std::memory_order_relaxed) ? 1 : 0,
-        passthrough.load(std::memory_order_relaxed) ? 1 : 0,
-        static_cast<unsigned long long>(sources),
-        static_cast<unsigned long long>(generated),
-        generated > 0 ? 1 : 0);
+        const uint64_t sources = source_present_calls.exchange(0, std::memory_order_relaxed);
+        const uint64_t generated = generated_frames.exchange(0, std::memory_order_relaxed);
+        std::fprintf(state_csv, "%.2f,%d,%d,%d,%llu,%llu,%d\n",
+            elapsed_ms,
+            requested.load(std::memory_order_relaxed) ? 1 : 0,
+            compatible.load(std::memory_order_relaxed) ? 1 : 0,
+            passthrough.load(std::memory_order_relaxed) ? 1 : 0,
+            static_cast<unsigned long long>(sources),
+            static_cast<unsigned long long>(generated),
+            generated > 0 ? 1 : 0);
     }
-    // Stop-the-world only for a short vector swap. The 1 Hz frontend does the
-    // potentially expensive CSV formatting and SD writes outside this lock.
+    // Copy pending events under a short lock. The producer vector retains its
+    // reserved storage, so every frame does not contend with newlib allocations.
+    // All potentially expensive CSV formatting and SD writes occur outside.
     std::vector<FrameEvent> snapshot;
     uint64_t dropped = 0;
     if (frame_csv) {
         {
             std::lock_guard<std::mutex> lock(frame_mutex);
-            snapshot.swap(frame_events);
+            snapshot.assign(frame_events.begin(), frame_events.end());
+            frame_events.clear();
             dropped = frame_dropped;
             frame_dropped = 0;
         }
