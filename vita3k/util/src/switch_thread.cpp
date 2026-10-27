@@ -137,6 +137,22 @@ void switch_pin_render_thread(const char *what) {
 #ifdef VITA3K_SWITCH_RENDER_CORE_SPREAD
     const Result priority_rc = svcSetThreadPriority(CUR_THREAD_HANDLE, BACKGROUND_PRIORITY);
     if (R_SUCCEEDED(priority_rc)) {
+#ifdef VITA3K_SWITCH_RENDER_PREFER_CORE3
+        // Preferred core is NOT an affinity restriction. Keep all four cores
+        // eligible, but bias the scheduler to use otherwise idle core 3 first.
+        // Audio/vblank/Vulkan helpers retain their higher priorities there;
+        // the guest remains higher-priority on cores 0..2.
+        const Result preferred_rc =
+            svcSetThreadCoreMask(CUR_THREAD_HANDLE, 3, ALL_CORE_MASK);
+        if (R_SUCCEEDED(preferred_rc)) {
+            LOG_INFO("[switch] {} prefers core 3, may migrate to 0..2 at priority {}",
+                what, BACKGROUND_PRIORITY);
+            return;
+        }
+        LOG_WARN("[switch] {} core-3 preference rejected (rc=0x{:X}); trying unbiased spreading",
+            what, preferred_rc);
+#endif
+        // Original spread policy is the exact fallback and the A/B reference.
         const Result affinity_rc =
             svcSetThreadCoreMask(CUR_THREAD_HANDLE, IDEAL_CORE_DONT_CARE, ALL_CORE_MASK);
         if (R_SUCCEEDED(affinity_rc)) {
