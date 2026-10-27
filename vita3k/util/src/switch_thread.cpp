@@ -217,13 +217,17 @@ std::mutex cpu_profile_mutex;
 std::vector<CpuProfileEntry> cpu_profile_threads;
 std::array<CpuPhaseStats, static_cast<size_t>(SwitchCpuProfilePhase::Count)> cpu_profile_phases;
 std::array<CpuOpcodeCounter, SWITCH_CPU_OPCODE_COUNT> cpu_profile_opcodes;
+std::array<CpuOpcodeCounter, SWITCH_CPU_FINE_COUNT> cpu_profile_fine;
+thread_local std::array<SwitchCpuOpcodeStats, SWITCH_CPU_FINE_COUNT> cpu_fine_local{};
 // Snapshot all six opcode fields together. No disk I/O while this lock is held.
 std::mutex cpu_opcode_snapshot_mutex;
+std::mutex cpu_fine_snapshot_mutex;
 std::atomic<bool> cpu_profile_enabled{ false };
 std::atomic<u64> cpu_profile_next_tick{ 0 };
 std::FILE *cpu_profile_threads_file = nullptr;
 std::FILE *cpu_profile_phases_file = nullptr;
 std::FILE *cpu_profile_opcodes_file = nullptr;
+std::FILE *cpu_profile_fine_file = nullptr;
 u64 cpu_profile_session_tick = 0;
 uint64_t cpu_profile_token = 0;
 uint64_t cpu_profile_session_index = 0;
@@ -274,6 +278,14 @@ void cpu_profile_reset_phases() {
         opcode.sampled_max_ticks.store(0, std::memory_order_relaxed);
         opcode.sampled_over_16ms.store(0, std::memory_order_relaxed);
         opcode.sampled_over_33ms.store(0, std::memory_order_relaxed);
+    }
+    for (auto &fine : cpu_profile_fine) {
+        fine.calls.store(0, std::memory_order_relaxed);
+        fine.sampled_calls.store(0, std::memory_order_relaxed);
+        fine.sampled_ticks.store(0, std::memory_order_relaxed);
+        fine.sampled_max_ticks.store(0, std::memory_order_relaxed);
+        fine.sampled_over_16ms.store(0, std::memory_order_relaxed);
+        fine.sampled_over_33ms.store(0, std::memory_order_relaxed);
     }
 }
 
@@ -451,6 +463,59 @@ void cpu_profile_poll_locked(bool final_sample) {
         }
     }
 
+    // Names and state index ordering correspond exactly to GXMState.
+    // Last two Draw entries are counters only, not durations.
+    static constexpr const char *fine_names[] = {
+        "state_region_clip", "state_program", "state_viewport", "state_depth_bias",
+        "state_depth_func", "state_depth_write_enable", "state_polygon_mode",
+        "state_point_line_width", "state_stencil_func", "state_texture",
+        "state_stencil_ref", "state_vertex_stream", "state_two_sided",
+        "state_cull_mode", "state_uniform_buffer",
+        "state_fragment_program_enable", "state_visibility_buffer",
+        "state_visibility_index",
+        "draw_setup", "draw_pipeline_lookup", "draw_pipeline_bind",
+        "draw_uniforms", "draw_descriptors", "draw_index_vertex",
+        "draw_emit", "draw_skipped_mask", "draw_skipped_pipeline"
+    };
+    static_assert(std::size(fine_names) == SWITCH_CPU_FINE_COUNT);
+    if (cpu_profile_fine_file) {
+        std::array<SwitchCpuOpcodeStats, SWITCH_CPU_FINE_COUNT> snapshot{};
+        {
+            const std::lock_guard<std::mutex> lock(cpu_fine_snapshot_mutex);
+            for (size_t i = 0; i < cpu_profile_fine.size(); ++i) {
+                auto &src = cpu_profile_fine[i];
+                auto &dst = snapshot[i];
+                dst.calls = src.calls.exchange(0, std::memory_order_relaxed);
+                dst.sampled_calls = src.sampled_calls.exchange(0, std::memory_order_relaxed);
+                dst.sampled_ticks = src.sampled_ticks.exchange(0, std::memory_order_relaxed);
+                dst.sampled_max_ticks = src.sampled_max_ticks.exchange(0, std::memory_order_relaxed);
+                dst.sampled_over_16ms = src.sampled_over_16ms.exchange(0, std::memory_order_relaxed);
+                dst.sampled_over_33ms = src.sampled_over_33ms.exchange(0, std::memory_order_relaxed);
+            }
+        }
+        // Writing CSV is intentionally outside cpu_fine_snapshot_mutex.
+        for (size_t i = 0; i < snapshot.size(); ++i) {
+            const auto &p = snapshot[i];
+            const bool counter_only =
+                i >= static_cast<size_t>(SwitchCpuFineMetric::DrawSkippedMask);
+            const double measured_ms = cpu_profile_to_ms(p.sampled_ticks);
+            const double average_ms = p.sampled_calls ?
+                measured_ms / static_cast<double>(p.sampled_calls) : 0.0;
+            const double estimated_ms = counter_only ? 0.0 :
+                static_cast<double>(p.calls) * average_ms;
+            std::fprintf(cpu_profile_fine_file,
+                "%.2f,%zu,%s,%s,%llu,%llu,%.3f,%.3f,%.5f,%.3f,%llu,%llu\n",
+                elapsed_ms, i, fine_names[i],
+                counter_only ? "counter_only" : "random_1_in_16",
+                static_cast<unsigned long long>(p.calls),
+                static_cast<unsigned long long>(p.sampled_calls),
+                measured_ms, estimated_ms, average_ms,
+                cpu_profile_to_ms(p.sampled_max_ticks),
+                static_cast<unsigned long long>(p.sampled_over_16ms),
+                static_cast<unsigned long long>(p.sampled_over_33ms));
+        }
+    }
+
     switch_cpu_profile_lsfg_poll(elapsed_ms, final_sample);
     cpu_profile_next_tick.store(now + armGetSystemTickFreq(),
         std::memory_order_release);
@@ -460,6 +525,8 @@ void cpu_profile_poll_locked(bool final_sample) {
         std::fflush(cpu_profile_phases_file);
         if (cpu_profile_opcodes_file)
             std::fflush(cpu_profile_opcodes_file);
+        if (cpu_profile_fine_file)
+            std::fflush(cpu_profile_fine_file);
     }
 }
 
@@ -480,6 +547,10 @@ void cpu_profile_close_locked() {
     if (cpu_profile_opcodes_file) {
         std::fclose(cpu_profile_opcodes_file);
         cpu_profile_opcodes_file = nullptr;
+    }
+    if (cpu_profile_fine_file) {
+        std::fclose(cpu_profile_fine_file);
+        cpu_profile_fine_file = nullptr;
     }
     cpu_profile_next_tick.store(0, std::memory_order_relaxed);
     cpu_profile_reset_phases();
@@ -631,6 +702,21 @@ SwitchCpuProfileSession::SwitchCpuProfileSession(const char *title_id) {
         LOG_WARN("[cpu-profile] Could not open GXM opcode CSV under {}", dir);
     }
 
+    char fine_path[192]{};
+    std::snprintf(fine_path, sizeof(fine_path),
+        "%s/gxm-state-draw-%s-%lld-%llu.csv", dir, safe_id, epoch,
+        static_cast<unsigned long long>(index));
+    cpu_profile_fine_file = std::fopen(fine_path, "w");
+    if (cpu_profile_fine_file) {
+        std::fputs("elapsed_ms,metric_id,metric,measurement,calls,sampled_calls,"
+            "sampled_wall_ms,estimated_total_wall_ms,avg_sampled_wall_ms,"
+            "max_sampled_wall_ms,sampled_over_16_7ms,sampled_over_33_3ms\n",
+            cpu_profile_fine_file);
+        LOG_WARN("[cpu-profile] GXM state and Vulkan Draw detail CSV: {}", fine_path);
+    } else {
+        LOG_WARN("[cpu-profile] Could not open GXM state/Draw detail CSV under {}", dir);
+    }
+
     cpu_profile_reset_phases();
     cpu_profile_session_tick = armGetSystemTick();
     cpu_profile_next_tick.store(cpu_profile_session_tick +
@@ -680,6 +766,64 @@ void switch_cpu_profile_opcode_merge(const SwitchCpuOpcodeStats *stats, size_t c
             !dst.sampled_max_ticks.compare_exchange_weak(old_max, source.sampled_max_ticks,
                 std::memory_order_relaxed)) {}
     }
+}
+
+// Called only from the render thread, with a lightweight PRNG instead of
+// sampling every Nth command. Fixed periodic sampling could accidentally
+// measure the same state in every repeated multi-pass frame.
+bool switch_cpu_profile_fine_sample() {
+    if (!cpu_profile_enabled.load(std::memory_order_relaxed))
+        return false;
+    thread_local uint32_t random_state =
+        static_cast<uint32_t>(armGetSystemTick()) | 1u;
+    random_state ^= random_state << 13;
+    random_state ^= random_state >> 17;
+    random_state ^= random_state << 5;
+    return (random_state & 15u) == 0u;
+}
+
+void switch_cpu_profile_fine_record(SwitchCpuFineMetric metric, bool sampled, uint64_t sampled_ticks) {
+    if (!cpu_profile_enabled.load(std::memory_order_relaxed))
+        return;
+    const size_t index = static_cast<size_t>(metric);
+    if (index >= cpu_fine_local.size())
+        return;
+    auto &stats = cpu_fine_local[index];
+    ++stats.calls;
+    if (!sampled)
+        return;
+    ++stats.sampled_calls;
+    stats.sampled_ticks += sampled_ticks;
+    if (sampled_ticks > stats.sampled_max_ticks)
+        stats.sampled_max_ticks = sampled_ticks;
+    if (sampled_ticks > armGetSystemTickFreq() / 60)
+        ++stats.sampled_over_16ms;
+    if (sampled_ticks > armGetSystemTickFreq() / 30)
+        ++stats.sampled_over_33ms;
+}
+
+void switch_cpu_profile_fine_flush() {
+    if (!cpu_profile_enabled.load(std::memory_order_relaxed)) {
+        cpu_fine_local.fill({});
+        return;
+    }
+    const std::lock_guard<std::mutex> lock(cpu_fine_snapshot_mutex);
+    for (size_t i = 0; i < cpu_fine_local.size(); ++i) {
+        const auto &source = cpu_fine_local[i];
+        if (!source.calls)
+            continue;
+        auto &dst = cpu_profile_fine[i];
+        dst.calls.fetch_add(source.calls, std::memory_order_relaxed);
+        dst.sampled_calls.fetch_add(source.sampled_calls, std::memory_order_relaxed);
+        dst.sampled_ticks.fetch_add(source.sampled_ticks, std::memory_order_relaxed);
+        dst.sampled_over_16ms.fetch_add(source.sampled_over_16ms, std::memory_order_relaxed);
+        dst.sampled_over_33ms.fetch_add(source.sampled_over_33ms, std::memory_order_relaxed);
+        u64 old_max = dst.sampled_max_ticks.load(std::memory_order_relaxed);
+        while (source.sampled_max_ticks > old_max &&
+            !dst.sampled_max_ticks.compare_exchange_weak(old_max, source.sampled_max_ticks,
+                std::memory_order_relaxed)) {}
+    }
+    cpu_fine_local.fill({});
 }
 
 void switch_cpu_profile_render_phase(

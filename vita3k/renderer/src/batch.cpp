@@ -58,6 +58,7 @@ thread_local std::array<uint32_t, SWITCH_CPU_OPCODE_COUNT> opcode_sample_sequenc
 struct FlushOpcodeProfile {
     ~FlushOpcodeProfile() {
         switch_cpu_profile_opcode_merge(opcode_window.data(), opcode_window.size());
+        switch_cpu_profile_fine_flush();
         opcode_window.fill({});
     }
 };
