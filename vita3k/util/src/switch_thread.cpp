@@ -125,6 +125,35 @@ void switch_pin_to_hardware_priority(const char *what, const int32_t helper_prio
         LOG_WARN("Could not raise {} above the guest band", what);
 }
 
+// The heavy renderer used to be pinned exclusively to core 3. When audio,
+// display, Vulkan helpers and the renderer fill that core, unused time on
+// the three application cores cannot shorten the renderer's critical path.
+// Permit the scheduler to move rendering into their spare time. At priority
+// 63 all mapped guest threads (45..56) and short hardware helpers (43..46)
+// retain precedence; no new concurrency, queue reordering or GPU sync changes.
+// Set low priority BEFORE broadening affinity, in case the inherited priority
+// was high. Failure returns to the original core-3 scheduling policy.
+void switch_pin_render_thread(const char *what) {
+#ifdef VITA3K_SWITCH_RENDER_CORE_SPREAD
+    const Result priority_rc = svcSetThreadPriority(CUR_THREAD_HANDLE, BACKGROUND_PRIORITY);
+    if (R_SUCCEEDED(priority_rc)) {
+        const Result affinity_rc =
+            svcSetThreadCoreMask(CUR_THREAD_HANDLE, IDEAL_CORE_DONT_CARE, ALL_CORE_MASK);
+        if (R_SUCCEEDED(affinity_rc)) {
+            LOG_INFO("[switch] {} may migrate across cores 0..3 at priority {} (render spread)",
+                what, BACKGROUND_PRIORITY);
+            return;
+        }
+        LOG_WARN("[switch] {} render spread rejected (affinity rc=0x{:X}); using core-3 policy",
+            what, affinity_rc);
+    } else {
+        LOG_WARN("[switch] {} render spread priority rejected (rc=0x{:X}); using core-3 policy",
+            what, priority_rc);
+    }
+#endif
+    switch_pin_to_hardware_priority(what, BACKGROUND_PRIORITY);
+}
+
 void switch_allow_helper_core(const char *what) {
     // Permits the helper core without moving the thread there: the scheduler
     // uses core 3's idle time, but the tenants above always preempt it.
