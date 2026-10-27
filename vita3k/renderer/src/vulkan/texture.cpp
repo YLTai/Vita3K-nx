@@ -31,9 +31,28 @@
 extern "C" {
 #include <switch/arm/cache.h>
 }
+#include <switch/arm/counter.h>
+#include <util/switch_thread.h>
 #endif
 
 namespace renderer::vulkan {
+
+#ifdef __SWITCH__
+// CPU-only, randomized 1/16 sub-stage sample. The exact call counters are
+// aggregated by the existing render-thread profiler; no per-texture I/O,
+// atomics or GPU synchronization is introduced.
+struct TextureFineStageTimer {
+    const bool sampled = switch_cpu_profile_fine_sample();
+    uint64_t previous = sampled ? armGetSystemTick() : 0;
+
+    void lap(SwitchCpuFineMetric metric) {
+        const uint64_t now = sampled ? armGetSystemTick() : 0;
+        switch_cpu_profile_fine_record(metric, sampled,
+            sampled ? now - previous : 0);
+        previous = now;
+    }
+};
+#endif
 
 // return if this format can be used to read a depth stencil buffer
 // Only return the formats we support and make sense for now
@@ -105,6 +124,9 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
         return;
     }
 
+#ifdef __SWITCH__
+    TextureFineStageTimer texture_timer;
+#endif
     if (index >= SCE_GXM_MAX_TEXTURE_UNITS) {
         // Vertex textures
         context.shader_hints.vertex_textures[index - SCE_GXM_MAX_TEXTURE_UNITS] = format;
@@ -126,20 +148,34 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
     if (color_convertible && !texture_is_cube) {
         // try to retrieve it from the color surface cache
         lookup_result = context.state.surface_cache.retrieve_color_surface_as_texture(texture, format_target_of_texture, &texture_viewport, !is_vertex);
+#ifdef __SWITCH__
+        if (lookup_result.has_value())
+            switch_cpu_profile_fine_record(SwitchCpuFineMetric::TextureColorHit, false, 0);
+#endif
     }
 
     bool is_depth_surface = false;
     if (!lookup_result.has_value() && !texture_is_cube && is_depth_stencil_compatible_format(base_format, is_depth_surface)) {
         // Try to retrieve depth/stencil cache
         lookup_result = context.state.surface_cache.retrieve_depth_stencil_as_texture(texture, &texture_viewport);
+#ifdef __SWITCH__
+        if (lookup_result.has_value())
+            switch_cpu_profile_fine_record(SwitchCpuFineMetric::TextureDepthHit, false, 0);
+#endif
     }
 
+#ifdef __SWITCH__
+    texture_timer.lap(SwitchCpuFineMetric::TextureSurfaceLookup);
+#endif
     if (lookup_result.has_value()) {
         // get the sampler now
         const bool force_nearest = lookup_result->is_raw_bits
             || !context.state.texture_cache.format_supports_linear_filter(lookup_result->format);
         context.state.texture_cache.cache_and_bind_sampler(texture, force_nearest);
     } else {
+#ifdef __SWITCH__
+        switch_cpu_profile_fine_record(SwitchCpuFineMetric::TextureCacheFallback, false, 0);
+#endif
         context.state.texture_cache.cache_and_bind_texture(texture, mem);
         auto &image = context.state.texture_cache.current_texture->texture;
         lookup_result = TextureLookupResult{
@@ -149,6 +185,9 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
         };
     }
 
+#ifdef __SWITCH__
+    texture_timer.lap(SwitchCpuFineMetric::TextureCacheOperation);
+#endif
     if (!is_vertex) {
         const uint32_t old_cast_units = context.curr_frag_ublock.cast_sampler_bits | context.curr_frag_ublock.raw_cast_bits;
         context.curr_frag_ublock.set_cast_sampler_bit(index, lookup_result->is_typeless_cast, lookup_result->cast_phase_hi);
@@ -177,6 +216,13 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
             context.last_vert_texture_count = ~0;
         else
             context.last_frag_texture_count = ~0;
+#ifdef __SWITCH__
+        switch_cpu_profile_fine_record(SwitchCpuFineMetric::TextureDescriptorChanged, false, 0);
+#endif
+    } else {
+#ifdef __SWITCH__
+        switch_cpu_profile_fine_record(SwitchCpuFineMetric::TextureDescriptorReused, false, 0);
+#endif
     }
 
     if (context.state.features.use_texture_viewport) {
@@ -188,6 +234,9 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
             context.curr_frag_ublock.set_viewport_offset(index, texture_viewport.offset);
         }
     }
+#ifdef __SWITCH__
+    texture_timer.lap(SwitchCpuFineMetric::TextureDescriptorState);
+#endif
 }
 
 void VKTextureCache::prepare_staging_buffer(bool is_configure) {
