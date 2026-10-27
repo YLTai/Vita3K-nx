@@ -464,7 +464,7 @@ void cpu_profile_poll_locked(bool final_sample) {
     }
 
     // Names and state index ordering correspond exactly to GXMState.
-    // Last two Draw entries are counters only, not durations.
+    // DrawSkipped* and all DescBind* and following metrics are counters only.
     static constexpr const char *fine_names[] = {
         "state_region_clip", "state_program", "state_viewport", "state_depth_bias",
         "state_depth_func", "state_depth_write_enable", "state_polygon_mode",
@@ -475,7 +475,16 @@ void cpu_profile_poll_locked(bool final_sample) {
         "state_visibility_index",
         "draw_setup", "draw_pipeline_lookup", "draw_pipeline_bind",
         "draw_uniforms", "draw_descriptors", "draw_index_vertex",
-        "draw_emit", "draw_skipped_mask", "draw_skipped_pipeline"
+        "draw_emit", "draw_skipped_mask", "draw_skipped_pipeline",
+        "texture_surface_lookup", "texture_cache_operation", "texture_descriptor_state",
+        "draw_descriptor_resolve", "draw_descriptor_update", "draw_descriptor_bind",
+        "draw_index_data", "draw_vertex_data",
+        "desc_bind_skipped", "desc_bind_partial", "desc_bind_full",
+        "desc_bind_unconditional", "desc_vert_set_refresh",
+        "desc_frag_set_refresh", "desc_pool_grow", "desc_vert_update",
+        "desc_frag_update", "texture_color_hit", "texture_depth_hit",
+        "texture_cache_fallback", "texture_descriptor_changed",
+        "texture_descriptor_reused", "index_range_scanned", "index_range_reused"
     };
     static_assert(std::size(fine_names) == SWITCH_CPU_FINE_COUNT);
     if (cpu_profile_fine_file) {
@@ -497,7 +506,9 @@ void cpu_profile_poll_locked(bool final_sample) {
         for (size_t i = 0; i < snapshot.size(); ++i) {
             const auto &p = snapshot[i];
             const bool counter_only =
-                i >= static_cast<size_t>(SwitchCpuFineMetric::DrawSkippedMask);
+                i == static_cast<size_t>(SwitchCpuFineMetric::DrawSkippedMask)
+                || i == static_cast<size_t>(SwitchCpuFineMetric::DrawSkippedPipeline)
+                || i >= static_cast<size_t>(SwitchCpuFineMetric::DescBindSkipped);
             const double measured_ms = cpu_profile_to_ms(p.sampled_ticks);
             const double average_ms = p.sampled_calls ?
                 measured_ms / static_cast<double>(p.sampled_calls) : 0.0;
