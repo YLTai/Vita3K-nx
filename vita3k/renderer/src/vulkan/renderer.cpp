@@ -531,13 +531,26 @@ VKState::OneTimeCommand VKState::create_one_time_command() {
 void VKState::submit_one_time_command(OneTimeCommand command, const char *stage) {
     // command.command_pool_lock stays held until vkutil has submitted, waited,
     // and freed the command buffer from the shared pool.
+#ifdef __SWITCH__
+    const uint64_t lock_start = armGetSystemTick();
+#endif
     const std::lock_guard<std::mutex> queue_lock(general_queue_mutex);
+#ifdef __SWITCH__
+    switch_cpu_profile_render_phase(SwitchCpuProfilePhase::VkQueueMutexWait,
+        lock_start, armGetSystemTick());
+    const uint64_t wait_start = armGetSystemTick();
+#endif
     try {
         vkutil::end_single_time_command(device, general_queue, one_time_command_pool, command.buffer);
     } catch (const vk::SystemError &error) {
         LOG_CRITICAL("Vulkan {} failed: {}", stage, error.what());
         throw;
     }
+#ifdef __SWITCH__
+    // Synchronous helper includes GPU/fence waiting, unlike submit().
+    switch_cpu_profile_render_phase(SwitchCpuProfilePhase::VkOneTimeSubmitWait,
+        wait_start, armGetSystemTick());
+#endif
 }
 
 bool VKState::init() {
