@@ -192,7 +192,7 @@ static vk::DescriptorSet retrieve_descriptor(VKContext &context, bool is_vertex,
         return frame_descriptor.sets[frame_descriptor.descriptors_idx++];
 
     // we have no more frame descriptor available, create a bunch of new one for this specific layout
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
     switch_cpu_profile_fine_record(SwitchCpuFineMetric::DescPoolGrow, false, 0);
 #endif
     vk::DescriptorPoolSize pool_size{
@@ -231,7 +231,7 @@ static vk::DescriptorSet retrieve_descriptor(VKContext &context, bool is_vertex,
 }
 
 static void draw_bind_descriptors(VKContext &context, MemState &mem, [[maybe_unused]] bool sampled) {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
     DrawFineStageTimer descriptor_timer(sampled);
 #endif
     VKState &state = context.state;
@@ -254,7 +254,7 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem, [[maybe_unu
 
     {
         if (need_vert_descr) {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
             switch_cpu_profile_fine_record(SwitchCpuFineMetric::DescVertSetRefresh, false, 0);
 #endif
             context.last_vert_texture_descriptor = retrieve_descriptor(context, true, vertex_textures_count);
@@ -262,7 +262,7 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem, [[maybe_unu
         descriptors[2] = context.last_vert_texture_descriptor;
 
         if (need_frag_descr) {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
             switch_cpu_profile_fine_record(SwitchCpuFineMetric::DescFragSetRefresh, false, 0);
 #endif
             context.last_frag_texture_descriptor = retrieve_descriptor(context, false, fragment_texture_count);
@@ -270,7 +270,7 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem, [[maybe_unu
         descriptors[3] = context.last_frag_texture_descriptor;
     }
 
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
     descriptor_timer.lap(SwitchCpuFineMetric::DrawDescriptorResolve);
 #endif
 
@@ -295,7 +295,7 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem, [[maybe_unu
             write_descrs[i].setImageInfo(context.vertex_textures[i].sampler ? context.vertex_textures[i] : default_image_info);
         }
         state.device.updateDescriptorSets(vertex_textures_count, write_descrs.data(), 0, nullptr);
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
         switch_cpu_profile_fine_record(SwitchCpuFineMetric::DescVertUpdate, false, 0);
 #endif
     }
@@ -312,12 +312,12 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem, [[maybe_unu
             write_descrs[i].setImageInfo(context.fragment_textures[i].sampler ? context.fragment_textures[i] : default_image_info);
         }
         state.device.updateDescriptorSets(fragment_texture_count, write_descrs.data(), 0, nullptr);
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
         switch_cpu_profile_fine_record(SwitchCpuFineMetric::DescFragUpdate, false, 0);
 #endif
     }
 
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
     descriptor_timer.lap(SwitchCpuFineMetric::DrawDescriptorUpdate);
 #endif
 
@@ -339,11 +339,13 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem, [[maybe_unu
     context.render_cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline_layout,
         0, static_cast<uint32_t>(descriptors.size()), descriptors.data(),
         dynamic_offset_count, dynamic_offsets.data());
+#if defined(__SWITCH__) && defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
     switch_cpu_profile_fine_record(SwitchCpuFineMetric::DescBindUnconditional, false, 0);
+#endif
 #else
     const auto bind = context.descriptor_binding_cache.update(pipeline_layout,
         descriptors, dynamic_offsets, dynamic_offset_count);
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
     const auto kind = bind.set_count == 0 ? SwitchCpuFineMetric::DescBindSkipped
         : (bind.first_set == 0 && bind.set_count == descriptors.size())
             ? SwitchCpuFineMetric::DescBindFull
@@ -360,7 +362,7 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem, [[maybe_unu
             offset_count ? dynamic_offsets.data() : nullptr);
     }
 #endif
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
     descriptor_timer.lap(SwitchCpuFineMetric::DrawDescriptorBind);
 #endif
 }
@@ -660,7 +662,7 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
 #endif
 
     // Upload index data.
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
     DrawFineStageTimer index_vertex_timer(fine_timer.sampled);
 #endif
     vk::IndexType index_type = (format == SCE_GXM_INDEX_FORMAT_U16) ? vk::IndexType::eUint16 : vk::IndexType::eUint32;
@@ -672,7 +674,7 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         if (context.state.need_cpu_buffer_sync()) {
             TrappedBuffer *trapped_buffer = context.state.buffer_trapping.access_buffer(indices.address(), count * index_size, mem);
             if (trapped_buffer->extra == ~0) {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
                 switch_cpu_profile_fine_record(SwitchCpuFineMetric::IndexRangeScanned, false, 0);
 #endif
                 // store the max element in extra
@@ -684,7 +686,7 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
                     trapped_buffer->extra = *std::max_element(&data[0], &data[count]);
                 }
             } else {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
                 switch_cpu_profile_fine_record(SwitchCpuFineMetric::IndexRangeReused, false, 0);
 #endif
             }
@@ -697,13 +699,15 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         context.render_cmd.bindIndexBuffer(context.index_stream_ring_buffer.handle(), context.index_stream_ring_buffer.data_offset, index_type);
     }
 
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
     index_vertex_timer.lap(SwitchCpuFineMetric::DrawIndexData);
 #endif
     // bind the vertex streams
     bind_vertex_streams(context, mem, instance_count, max_index);
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
     index_vertex_timer.lap(SwitchCpuFineMetric::DrawVertexData);
+#endif
+#ifdef __SWITCH__
     fine_timer.lap(SwitchCpuFineMetric::DrawIndexVertex);
 #endif
 
