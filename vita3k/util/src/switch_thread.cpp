@@ -366,7 +366,8 @@ void cpu_profile_poll_locked(bool final_sample) {
         "lsfg_create", "lsfg_destroy",
         "batch_queue_wait", "batch_sync_wait", "batch_command_execution",
         "vk_queue_mutex_wait", "vk_queue_submit", "vk_queue_present",
-        "swapchain_acquire", "swapchain_fence_wait"
+        "swapchain_acquire", "swapchain_fence_wait",
+        "vk_one_time_submit_wait"
     };
     static_assert(std::size(names) == static_cast<size_t>(SwitchCpuProfilePhase::Count));
     for (size_t i = 0; i < cpu_profile_phases.size(); ++i) {
