@@ -2,11 +2,11 @@ name: Build CI
 
 on:
   push:
-    branches-ignore:
-      - ci/switch-build
+    branches: [master]
     paths-ignore:
       - '**.md'
   pull_request:
+    branches: [master]
     paths-ignore:
       - '**.md'
 

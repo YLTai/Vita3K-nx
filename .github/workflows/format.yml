@@ -2,12 +2,14 @@ name: Format Check
 
 on:
   push:
+    branches: [master]
     paths:
       - .clang-format
       - vita3k/**
       - tools/**
 
   pull_request:
+    branches: [master]
     paths:
       - .clang-format
       - vita3k/**
