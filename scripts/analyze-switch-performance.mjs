@@ -157,6 +157,18 @@ async function main() {
             interval_ms: stats(intervals), over_50_ms: intervals.filter(value => value > 50).length,
             over_100_ms: intervals.filter(value => value > 100).length }];
     }));
+    // These exact counters extend the existing CSV without changing its schema.
+    // Old six-file recordings have only the two draw-skip counters; an absent
+    // diagnostic must not be reported as a measured 0% cache hit rate.
+    const fineCounters = [...group(selected('gxm-state-draw')
+        .filter(row => row.measurement === 'counter_only'), 'metric')]
+        .map(([metric, rows]) => ({ metric, calls: total(rows, 'calls'),
+            calls_per_render_loop: total(rows, 'calls') / renderLoops }))
+        .sort((a, b) => a.metric.localeCompare(b.metric));
+    const counter = name => fineCounters.find(row => row.metric === name)?.calls ?? 0;
+    const descriptorModes = ['desc_bind_skipped', 'desc_bind_partial',
+        'desc_bind_full', 'desc_bind_unconditional'];
+    const descriptorBindCalls = sum(descriptorModes.map(counter));
     const cpuMs = row => row.delta_total_ticks * 1000 / row.tick_frequency;
     const cpu = [...group(selected('cpu-threads'), 'label')].map(([label, rows]) => ({
         label, cpu_ms: sum(rows.map(cpuMs)), one_core_equivalent_pct: sum(rows.map(cpuMs)) * 100 / duration,
@@ -204,7 +216,37 @@ async function main() {
             'generated_frames', 'actually_generated'].map(field => [field, stats(data['lsfg-state'].map(row => row[field]))])),
         skipped_draws_full_session: Object.fromEntries(['draw_skipped_mask', 'draw_skipped_pipeline'].map(metric =>
             [metric, total(data['gxm-state-draw'].filter(row => row.metric === metric), 'calls')])),
-        events, phases, opcodes: sampled('gxm-opcodes', 'opcode'), fine_metrics: sampled('gxm-state-draw', 'metric'), cpu,
+        events, phases, opcodes: sampled('gxm-opcodes', 'opcode'),
+        fine_metrics: sampled('gxm-state-draw', 'metric'), fine_counters: fineCounters,
+        hotpath_diagnostics: {
+            available: descriptorBindCalls > 0,
+            descriptor_bind: {
+                total: descriptorBindCalls,
+                skipped: counter('desc_bind_skipped'),
+                partial: counter('desc_bind_partial'),
+                full: counter('desc_bind_full'),
+                unconditional: counter('desc_bind_unconditional'),
+                skipped_pct: descriptorBindCalls > 0 ?
+                    100 * counter('desc_bind_skipped') / descriptorBindCalls : null
+            },
+            descriptor_updates: {
+                vertex: counter('desc_vert_update'),
+                fragment: counter('desc_frag_update'),
+                pool_grows: counter('desc_pool_grow')
+            },
+            texture_resolution: {
+                color_surface_hit: counter('texture_color_hit'),
+                depth_surface_hit: counter('texture_depth_hit'),
+                texture_cache_fallback: counter('texture_cache_fallback'),
+                descriptor_changed: counter('texture_descriptor_changed'),
+                descriptor_reused: counter('texture_descriptor_reused')
+            },
+            index_ranges: {
+                rescanned: counter('index_range_scanned'),
+                reused: counter('index_range_reused')
+            }
+        },
+        cpu,
         complete_loop_new_frames: stats(completeLoops.map(row => row.new_frames)),
         post_swap_gap_ms: stats(gaps), post_swap_gaps_over_3_ms: largeGaps,
         interpretation: [
@@ -214,6 +256,8 @@ async function main() {
             'Sampled estimates sum the CSV window estimates; fixed opcode sampling may alias repeating workloads.',
             'CPU percentages use kernel total ticks divided by the selected common interval, not summed per-core fields.',
             'Self CPU samples have independent checkpoint windows. Post-swap gaps alone do not prove a mutex wait.',
+            'Hotpath counters are exact for instrumented calls only; an absent metric is not evidence of a zero hit rate.',
+            'CPU fine-timer sub-stages are sampled wall time and cannot establish GPU saturation.',
             'Do not claim exact cadence percentiles if the quality report shows dropped or missing events.'
         ]
     };

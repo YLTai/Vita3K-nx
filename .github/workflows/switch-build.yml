@@ -37,6 +37,8 @@ jobs:
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       LC_ALL: C
       TZ: UTC
+      # ON only for this PR's paired diagnostic artifacts; merged builds use OFF.
+      SWITCH_HOTPATH_DIAGNOSTICS: ${{ github.event_name == 'pull_request' && github.head_ref == 'perf/switch-render-hotspot-ab-20261027' && 'ON' || 'OFF' }}
 
     steps:
       - name: Install build tools
@@ -128,6 +130,7 @@ jobs:
           cmake -S . -B build-switch -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
             -DCMAKE_BUILD_TYPE=Release \
+            -DSWITCH_RENDER_HOTPATH_DIAGNOSTICS="$SWITCH_HOTPATH_DIAGNOSTICS" \
             -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR" \
             -DSWITCH_VULKAN_SDK="$SWITCH_VULKAN_SDK"
           cmake --build build-switch --parallel "$VITA3K_BUILD_JOBS"
@@ -148,7 +151,9 @@ jobs:
           {
             printf 'Vita3K commit: %s\n' "$(git rev-parse HEAD)"
             printf 'Mesa commit: %s\n' "$(cat "$SWITCH_VULKAN_SDK/share/mesa-switch/revision")"
-            printf 'Vita3K.nro contains the launcher and emulator; core/ is for diagnostics.\n\n'
+            printf 'Vita3K.nro contains the launcher and emulator; core/ is for diagnostics.\n'
+            printf 'SWITCH_DESCRIPTOR_BIND_CACHE=ON\n'
+            printf 'SWITCH_RENDER_HOTPATH_DIAGNOSTICS=%s\n\n' "$SWITCH_HOTPATH_DIAGNOSTICS"
             cat build-switch-deps/toolchain.txt
             cat "$SWITCH_VULKAN_SDK/share/mesa-switch/build-info.txt"
           } > build-switch/artifacts/build-info.txt
@@ -160,6 +165,40 @@ jobs:
         with:
           name: vita3k-switch-${{ github.sha }}
           path: build-switch/artifacts/
+          if-no-files-found: error
+          retention-days: 14
+
+      # Only the render-hotspot A/B experiment builds a second NRO; normal
+      # pull requests and merged pushes still compile exactly once.
+      - name: Build descriptor-cache OFF reference NRO for A/B
+        if: github.event_name == 'pull_request' && github.head_ref == 'perf/switch-render-hotspot-ab-20261027'
+        run: |
+          cmake -S . -B build-switch -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSWITCH_DESCRIPTOR_BIND_CACHE=OFF \
+            -DSWITCH_RENDER_HOTPATH_DIAGNOSTICS="$SWITCH_HOTPATH_DIAGNOSTICS" \
+            -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR" \
+            -DSWITCH_VULKAN_SDK="$SWITCH_VULKAN_SDK"
+          cmake --build build-switch --parallel "$VITA3K_BUILD_JOBS"
+          test -s build-switch/Vita3K.nro
+          cp build-switch/Vita3K.nro switch-launcher/romfs/emu/Vita3K.nro
+          make -C switch-launcher -j"$VITA3K_BUILD_JOBS"
+          test -s switch-launcher/Vita3K.nro
+          mkdir -p build-switch/artifacts-descriptor-off/core
+          cp switch-launcher/Vita3K.nro build-switch/artifacts-descriptor-off/Vita3K.nro
+          cp build-switch/Vita3K.nro build-switch/artifacts-descriptor-off/core/Vita3K.nro
+          sed 's/SWITCH_DESCRIPTOR_BIND_CACHE=ON/SWITCH_DESCRIPTOR_BIND_CACHE=OFF/' \
+            build-switch/artifacts/build-info.txt > build-switch/artifacts-descriptor-off/build-info.txt
+          cd build-switch/artifacts-descriptor-off
+          sha256sum Vita3K.nro core/Vita3K.nro > SHA256SUMS
+
+      - name: Upload descriptor-cache OFF reference NRO
+        if: github.event_name == 'pull_request' && github.head_ref == 'perf/switch-render-hotspot-ab-20261027'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vita3k-switch-descriptor-cache-off-${{ github.sha }}
+          path: build-switch/artifacts-descriptor-off/
           if-no-files-found: error
           retention-days: 14
 

@@ -78,6 +78,18 @@ enum class SwitchCpuFineMetric : uint8_t {
     DrawSetup, DrawPipelineLookup, DrawPipelineBind, DrawUniforms,
     DrawDescriptors, DrawIndexVertex, DrawEmit,
     DrawSkippedMask, DrawSkippedPipeline,
+    // Additional sub-stages are sampled with the same random decision as the
+    // enclosing Draw/Texture operation; counts are always exact.
+    TextureSurfaceLookup, TextureCacheOperation, TextureDescriptorState,
+    DrawDescriptorResolve, DrawDescriptorUpdate, DrawDescriptorBind,
+    DrawIndexData, DrawVertexData,
+    // Counter-only: never use these entries to estimate elapsed time.
+    DescBindSkipped, DescBindPartial, DescBindFull, DescBindUnconditional,
+    DescVertSetRefresh, DescFragSetRefresh, DescPoolGrow,
+    DescVertUpdate, DescFragUpdate,
+    TextureColorHit, TextureDepthHit, TextureCacheFallback,
+    TextureDescriptorChanged, TextureDescriptorReused,
+    IndexRangeScanned, IndexRangeReused,
     Count
 };
 constexpr size_t SWITCH_CPU_FINE_STATE_COUNT = 18;
