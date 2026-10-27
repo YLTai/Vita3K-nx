@@ -46,7 +46,7 @@ you have copied the entire original session.
 
 Directory: `sdmc:/switch/vita3k/logs/`
 
-For **each** run send the four CSVs with the **same
+For **each** run send the five CSVs with the **same
 `<title>-<epoch>-<session>` suffix**:
 
 | Name | What it measures |
@@ -54,7 +54,8 @@ For **each** run send the four CSVs with the **same
 | `cpu-threads-*.csv` | Per-thread total kernel CPU tick deltas; new `guest-jit` rows. Treat per-core percent columns as unreliable on known Horizon kernels. |
 | `render-phases-*.csv` | Existing render/LSFG summaries plus batch queue wait, sync wait, command-handler wall time, Vulkan queue lock/submit/present, swapchain acquire/fence, and synchronous one-time helper. |
 | `lsfg-state-*.csv` | Requested, compatible, bypass and per-window source/generated counts. |
-| `frame-events-*.csv` | Raw timestamped software events for renderer loop and GXM `NewFrame`, source-present calls and generated-return counts. |
+| `frame-events-*.csv` | Raw timestamped software events for renderer loop and GXM `NewFrame`, source-present calls, generated-return counts and sparse slow GXM handlers. |
+| `gxm-opcodes-*.csv` | 1 Hz per-opcode counts and sampled handler wall time. Draw/SetState time is sampled 1/16, all other handlers are fully timed. See [round-two instructions](switch-gxm-opcode-diagnostics.md). |
 
 Also send **`build-info.txt`**, the test's **A/B/C label**, exact
 clock/power mode, handheld/docked, resolution, settings, cache status,
@@ -93,7 +94,7 @@ A short matching capture/video is useful for actual display cadence.
   ring overflowed before the frontend drained it. Repeat with a stable
   game/foreground session; do not report exact percentiles for such a run.
 
-`elapsed_ms` uses the same per-session system-tick origin in all four CSVs.
+`elapsed_ms` uses the same per-session system-tick origin in all five CSVs.
 For `frame-events` this is **event time**, whereas the other CSVs are 1 Hz
 window samples. The `sequence` field records the order in which events
 entered the buffer; cross-thread timestamps can have tiny ordering changes.
