@@ -918,6 +918,7 @@ void PipelineCache::compiler_thread(MemState &mem) {
         const PipelineFragmentProgram fragment_program = request->get_fragment_program();
         const vk::Pipeline pipeline = compile_pipeline(request->type, request->render_pass, vertex_program, fragment_program, *request->get_record(), request->hints, request->has_casts, request->with_raw_attachment, mem);
         request->pipeline->store(pipeline, std::memory_order_release);
+        cpu_profile.checkpoint();
 
         if (pipeline) {
             const auto time_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
