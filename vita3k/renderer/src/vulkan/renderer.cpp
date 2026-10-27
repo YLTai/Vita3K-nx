@@ -59,6 +59,8 @@
 // owns the GLSL type singleton. Native Vita3K does not have that owner.
 extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName);
 #include <xxhash.h>
+#include <switch/arm/counter.h>
+#include <util/switch_thread.h>
 // libnx cache maintenance, declared directly to keep <switch.h> macros out.
 extern "C" {
 void armDCacheClean(void *addr, size_t size);
@@ -403,35 +405,70 @@ VKState::VKState(int gpu_idx)
 }
 
 void VKState::submit_general(const vk::SubmitInfo &submit_info, vk::Fence fence, const char *stage) {
+#ifdef __SWITCH__
+    const uint64_t lock_start = armGetSystemTick();
+#endif
     const std::lock_guard<std::mutex> lock(general_queue_mutex);
+#ifdef __SWITCH__
+    switch_cpu_profile_render_phase(SwitchCpuProfilePhase::VkQueueMutexWait,
+        lock_start, armGetSystemTick());
+    const uint64_t submit_start = armGetSystemTick();
+#endif
     try {
         general_queue.submit(submit_info, fence);
     } catch (const vk::SystemError &error) {
         LOG_CRITICAL("Vulkan {} failed: {}", stage, error.what());
         throw;
     }
+#ifdef __SWITCH__
+    switch_cpu_profile_render_phase(SwitchCpuProfilePhase::VkQueueSubmit,
+        submit_start, armGetSystemTick());
+#endif
 }
 
 void VKState::submit_general_sequence(const std::vector<vk::CommandBuffer> &commands, vk::Fence fence) {
     assert(!commands.empty());
     // Keep uploads and rendering separate, with no worker submissions between them.
+#ifdef __SWITCH__
+    const uint64_t lock_start = armGetSystemTick();
+#endif
     const std::lock_guard<std::mutex> lock(general_queue_mutex);
+#ifdef __SWITCH__
+    switch_cpu_profile_render_phase(SwitchCpuProfilePhase::VkQueueMutexWait,
+        lock_start, armGetSystemTick());
+#endif
     for (size_t i = 0; i < commands.size(); ++i) {
         vk::SubmitInfo submit_info{};
         submit_info.setCommandBuffers(commands[i]);
+#ifdef __SWITCH__
+        const uint64_t submit_start = armGetSystemTick();
+#endif
         try {
             general_queue.submit(submit_info, i + 1 == commands.size() ? fence : vk::Fence{});
         } catch (const vk::SystemError &error) {
             LOG_CRITICAL("Vulkan scene submission {}/{} failed: {}", i + 1, commands.size(), error.what());
             throw;
         }
+#ifdef __SWITCH__
+        switch_cpu_profile_render_phase(SwitchCpuProfilePhase::VkQueueSubmit,
+            submit_start, armGetSystemTick());
+#endif
     }
 }
 
 vk::Result VKState::present_general(const vk::PresentInfoKHR &present_info) {
+#ifdef __SWITCH__
+    const uint64_t lock_start = armGetSystemTick();
+#endif
     const std::lock_guard<std::mutex> lock(general_queue_mutex);
 #ifdef __SWITCH__
-    return lsfg::present(*this, present_info);
+    switch_cpu_profile_render_phase(SwitchCpuProfilePhase::VkQueueMutexWait,
+        lock_start, armGetSystemTick());
+    const uint64_t present_start = armGetSystemTick();
+    const vk::Result result = lsfg::present(*this, present_info);
+    switch_cpu_profile_render_phase(SwitchCpuProfilePhase::VkQueuePresent,
+        present_start, armGetSystemTick());
+    return result;
 #else
     return general_queue.presentKHR(&present_info);
 #endif
@@ -441,7 +478,15 @@ vk::Result VKState::submit_and_present_general(const vk::SubmitInfo &submit_info
     vk::Fence fence, const vk::PresentInfoKHR &present_info) {
     // Present waits on a semaphore signalled by this submission. Keep the pair
     // atomic with respect to worker-thread uploads and surface synchronisation.
+#ifdef __SWITCH__
+    const uint64_t lock_start = armGetSystemTick();
+#endif
     const std::lock_guard<std::mutex> lock(general_queue_mutex);
+#ifdef __SWITCH__
+    switch_cpu_profile_render_phase(SwitchCpuProfilePhase::VkQueueMutexWait,
+        lock_start, armGetSystemTick());
+    const uint64_t submit_start = armGetSystemTick();
+#endif
     try {
         general_queue.submit(submit_info, fence);
     } catch (const vk::SystemError &error) {
@@ -449,7 +494,13 @@ vk::Result VKState::submit_and_present_general(const vk::SubmitInfo &submit_info
         throw;
     }
 #ifdef __SWITCH__
-    return lsfg::present(*this, present_info);
+    switch_cpu_profile_render_phase(SwitchCpuProfilePhase::VkQueueSubmit,
+        submit_start, armGetSystemTick());
+    const uint64_t present_start = armGetSystemTick();
+    const vk::Result result = lsfg::present(*this, present_info);
+    switch_cpu_profile_render_phase(SwitchCpuProfilePhase::VkQueuePresent,
+        present_start, armGetSystemTick());
+    return result;
 #else
     return general_queue.presentKHR(&present_info);
 #endif
@@ -480,13 +531,26 @@ VKState::OneTimeCommand VKState::create_one_time_command() {
 void VKState::submit_one_time_command(OneTimeCommand command, const char *stage) {
     // command.command_pool_lock stays held until vkutil has submitted, waited,
     // and freed the command buffer from the shared pool.
+#ifdef __SWITCH__
+    const uint64_t lock_start = armGetSystemTick();
+#endif
     const std::lock_guard<std::mutex> queue_lock(general_queue_mutex);
+#ifdef __SWITCH__
+    switch_cpu_profile_render_phase(SwitchCpuProfilePhase::VkQueueMutexWait,
+        lock_start, armGetSystemTick());
+    const uint64_t wait_start = armGetSystemTick();
+#endif
     try {
         vkutil::end_single_time_command(device, general_queue, one_time_command_pool, command.buffer);
     } catch (const vk::SystemError &error) {
         LOG_CRITICAL("Vulkan {} failed: {}", stage, error.what());
         throw;
     }
+#ifdef __SWITCH__
+    // Synchronous helper includes GPU/fence waiting, unlike submit().
+    switch_cpu_profile_render_phase(SwitchCpuProfilePhase::VkOneTimeSubmitWait,
+        wait_start, armGetSystemTick());
+#endif
 }
 
 bool VKState::init() {

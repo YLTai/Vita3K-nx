@@ -19,6 +19,8 @@
 
 #ifdef __SWITCH__
 #include "renderer/vulkan/lsfg.h"
+#include <switch/arm/counter.h>
+#include <util/switch_thread.h>
 #endif
 #include "renderer/vulkan/state.h"
 #include "util/log.h"
@@ -510,9 +512,19 @@ bool ScreenRenderer::acquire_swapchain_image() {
         return false;
     }
 
-    if (swapchain)
+    if (swapchain) {
+#ifdef __SWITCH__
+        const uint64_t acquire_start = armGetSystemTick();
+#endif
         acquire_result = state.device.acquireNextImageKHR(swapchain,
             next_image_timeout, image_acquired_semaphores[current_frame], vk::Fence(), &swapchain_image_idx);
+#ifdef __SWITCH__
+        switch_cpu_profile_render_phase(SwitchCpuProfilePhase::SwapchainAcquire,
+            acquire_start, armGetSystemTick());
+        if (acquire_result == vk::Result::eTimeout || acquire_result == vk::Result::eNotReady)
+            switch_cpu_profile_frame_event("swapchain_acquire_timeout");
+#endif
+    }
 
     const bool has_acquired_image = acquire_result == vk::Result::eSuccess || acquire_result == vk::Result::eSuboptimalKHR;
     if (!has_acquired_image) {
@@ -538,7 +550,14 @@ bool ScreenRenderer::acquire_swapchain_image() {
         need_rebuild = !surface_matches_window_size();
 
     // wait for the previous frame using this image to finish
+#ifdef __SWITCH__
+    const uint64_t fence_wait_start = armGetSystemTick();
+#endif
     auto result = state.device.waitForFences(fences[swapchain_image_idx], VK_TRUE, frame_fence_timeout);
+#ifdef __SWITCH__
+    switch_cpu_profile_render_phase(SwitchCpuProfilePhase::SwapchainFenceWait,
+        fence_wait_start, armGetSystemTick());
+#endif
     if (result != vk::Result::eSuccess) {
         LOG_ERROR("Could not wait for fences.");
         return false;

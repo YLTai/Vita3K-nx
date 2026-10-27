@@ -91,6 +91,11 @@ static int SDLCALL thread_function(void *data) {
     // thread ran at the process default, level with the render and audio threads.
     switch_apply_guest_thread_priority(thread->priority);
     switch_apply_guest_thread_affinity(thread->affinity_mask);
+#ifdef __SWITCH__
+    // Include actual guest/JIT CPU threads in the 1 Hz total-tick sampler.
+    // Their token distinguishes instances without storing a transient name.
+    SwitchCpuProfileThread guest_cpu_profile("guest-jit");
+#endif
 #ifdef TRACY_ENABLE
     if (!thread->name.empty()) {
         tracy::SetThreadName(thread->name.c_str());
