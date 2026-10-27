@@ -38,6 +38,23 @@ typedef struct LsfgNxCreateInfo {
   bool performance_mode;
 } LsfgNxCreateInfo;
 
+/* Optional profiling hook. Times are armGetSystemTick() values on Switch.
+ * This never alters LSFG scheduling or synchronization. Stage values must
+ * stay aligned with SwitchCpuProfilePhase in util/switch_thread.h. */
+typedef enum LsfgNxDebugStage {
+  LSFG_NX_DEBUG_SLOT_FENCE_WAIT = 0,
+  LSFG_NX_DEBUG_RECORD_COMPUTE = 1,
+  LSFG_NX_DEBUG_QUEUE_SUBMIT = 2,
+  LSFG_NX_DEBUG_PRESENT_GENERATED = 3,
+  LSFG_NX_DEBUG_ACQUIRE_IMAGE = 4,
+  LSFG_NX_DEBUG_RESTORE_RECORD = 5,
+  LSFG_NX_DEBUG_PRESENT_ORIGINAL = 6,
+  LSFG_NX_DEBUG_CAPTURE_RECORD = 7
+} LsfgNxDebugStage;
+typedef void (*LsfgNxDebugCallback)(uint32_t stage, uint64_t start_tick,
+                                     uint64_t end_tick);
+void lsfg_nx_set_debug_callback(LsfgNxDebugCallback callback);
+
 LsfgNxRuntime *lsfg_nx_create(const LsfgNxCreateInfo *info);
 void lsfg_nx_destroy(LsfgNxRuntime *runtime);
 

@@ -5,6 +5,7 @@
 #include <renderer/presentation_rate.h>
 #include <renderer/vulkan/lsfg.h>
 #include <renderer/vulkan/state.h>
+#include <util/switch_thread.h>
 
 #include <dialog/state.h>
 
@@ -21,7 +22,14 @@
 #include "lsfg_bridge.h"
 
 #ifdef __SWITCH__
+#include <switch/arm/counter.h>
 extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName);
+// The bridge is independent of Vita3K; bridge timings are forwarded through
+// this optional callback without creating a dependency on the util library.
+extern "C" void vita3k_lsfg_profile_callback(uint32_t stage, uint64_t begin_tick,
+                                             uint64_t end_tick) {
+  switch_cpu_profile_lsfg_stage(stage, begin_tick, end_tick);
+}
 #endif
 
 namespace renderer::vulkan::lsfg
@@ -64,7 +72,14 @@ void DestroyRuntimeLocked()
   if (!s_state.runtime)
     return;
 
+#ifdef __SWITCH__
+  const auto destroy_begin = armGetSystemTick();
+#endif
   lsfg_nx_destroy(s_state.runtime);
+#ifdef __SWITCH__
+  switch_cpu_profile_render_phase(SwitchCpuProfilePhase::LsfgDestroy,
+                                  destroy_begin, armGetSystemTick());
+#endif
   s_state.runtime = nullptr;
 }
 
@@ -202,6 +217,9 @@ void disable_session(const char* reason)
 bool register_swapchain(VKState& state, vk::SwapchainKHR swapchain,
                         vk::Extent2D extent, const std::vector<vk::Image>& images)
 {
+#ifdef __SWITCH__
+  lsfg_nx_set_debug_callback(&vita3k_lsfg_profile_callback);
+#endif
   std::lock_guard lock{s_state.mutex};
   DestroyRuntimeLocked();
   s_state.initialization_attempted = false;
@@ -268,6 +286,8 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
                           s_state.state == &state &&
                           raw_present_info.swapchainCount == 1 && raw_present_info.pSwapchains &&
                           raw_present_info.pSwapchains[0] == s_state.swapchain;
+  switch_cpu_profile_lsfg_state(enabled, compatible,
+                                enabled && s_state.rate_decision == 1);
 
   const auto present_normally = [&]() {
     const vk::Result result = PresentNormally(state, present_info);
@@ -374,7 +394,14 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
         .flow_scale = flow_scale,
         .performance_mode = s_state.performance_mode,
     };
+#ifdef __SWITCH__
+    const auto create_begin = armGetSystemTick();
+#endif
     s_state.runtime = lsfg_nx_create(&create_info);
+#ifdef __SWITCH__
+    switch_cpu_profile_render_phase(SwitchCpuProfilePhase::LsfgCreate,
+                                    create_begin, armGetSystemTick());
+#endif
     if (!s_state.runtime)
     {
       s_state.enabled.store(false, std::memory_order_release);
@@ -408,7 +435,11 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
   }
   else
   {
-    s_state.output_rate.record(lsfg_nx_get_present_count(s_state.runtime) - presented_before);
+    const uint64_t output_delta =
+        lsfg_nx_get_present_count(s_state.runtime) - presented_before;
+    s_state.output_rate.record(output_delta);
+    if (output_delta > 1)
+      switch_cpu_profile_lsfg_generated(static_cast<uint32_t>(output_delta - 1));
   }
   return static_cast<vk::Result>(result);
 }

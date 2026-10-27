@@ -78,3 +78,51 @@ use an independent core utilization monitor for a system-wide view.
 Profiling is deliberately always on in this temporary diagnostic branch;
 do not merge it into production releases without adding a user-facing toggle
 or a compile-time opt-out.
+
+## LSFG-specific diagnostics (v2)
+
+The profiling build now writes **three** CSVs per title in the same log
+directory. In addition to the two files above, it writes:
+
+- `lsfg-state-<title>-<epoch>-<run>.csv`
+
+The `render-phases` CSV preserves the original schema and adds these stages
+(with one row per stage per second, including zero-count rows):
+
+| Phase | What it actually times |
+| --- | --- |
+| `lsfg_record_compute` | CPU cost of recording frame-generation compute passes |
+| `lsfg_capture_record` | CPU time recording original image capture |
+| `lsfg_restore_record` | CPU time recording the restored original frame copy |
+| `lsfg_queue_submit` | CPU time submitting LSFG command buffers (not GPU execution time) |
+| `lsfg_present_generated` | CPU wall time inside the generated-frame QueuePresentKHR |
+| `lsfg_present_original` | CPU wall time inside the original-frame QueuePresentKHR |
+| `lsfg_acquire_image` | CPU wall time in AcquireNextImageKHR after presenting a generated frame |
+| `lsfg_slot_fence_wait` | CPU wall time waiting for a reusable LSFG frame slot |
+| `lsfg_create` | LSFG runtime initialization |
+| `lsfg_destroy` | LSFG runtime destruction (includes possible DeviceWaitIdle) |
+
+The `lsfg-state` CSV samples `requested`, `compatible`,
+`high_fps_passthrough`, `source_present_calls`, `generated_frames`, and
+`actually_generated`. A user requesting LSFG *does not prove it actually
+generated frames*: use `generated_frames > 0` together with the stage counts.
+This allows comparing LSFG Off/On within a recording without assuming the
+toggle time from large swap-window spikes. Short changes within a one-second
+sample may be coalesced; the file does not capture exact toggle timestamps.
+
+The per-thread CSV also now contains raw per-core tick counters, the kernel
+`TickCountInfo_Total` counter, return codes of both queries, and an
+independent low-frequency total-tick reading made from inside selected
+workers themselves (`self_*` columns). These fields test whether the original
+near-zero thread CPU percentages were a kernel sampling/accounting artifact.
+An absent self sample reports -1.0 percent, **not** 0% load. If kernel counters
+still disagree with an external total-core meter, do not infer total CPU load
+from these values until the discrepancy is understood.
+
+All timings are CPU wall time or kernel CPU ticks, **not Vulkan GPU
+timestamps**. The LSFG instrumentation changes neither the fence semantics,
+command submission order, nor the number of shaders or presented frames.
+
+For comparisons, capture at least 30 seconds LSFG Off, 30 seconds LSFG
+generating frames, and another Off interval in a reproducible scene with
+fixed clocks. Submit all three CSVs and the regular Vita3K log.

@@ -99,6 +99,7 @@ void VKContext::wait_thread_function(const MemState &mem) {
 
     while (true) {
         auto wait_request = state.request_queue.pop();
+        cpu_profile.checkpoint();
 
         if (!wait_request)
             break;

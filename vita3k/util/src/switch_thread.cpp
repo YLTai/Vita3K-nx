@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <iterator>
 #include <cstdio>
 #include <ctime>
 #include <mutex>
@@ -179,9 +180,19 @@ struct CpuProfileEntry {
     s32 priority = -1;
     u64 affinity = 0;
     std::array<u64, 4> previous{};
+    u64 previous_total = 0;
     u64 previous_wall = 0;
     std::array<u64, 4> final{};
+    u64 final_total = 0;
     u64 final_wall = 0;
+    Result last_core_rc = 0;
+    Result last_total_rc = 0;
+    u64 self_total = 0;
+    u64 self_wall = 0;
+    u64 previous_self_total = 0;
+    u64 previous_self_wall = 0;
+    Result self_rc = 0xFFFFFFFF;
+    u32 self_core = 0xFFFFFFFF;
     bool valid = false;
     bool exited = false;
 };
@@ -196,7 +207,7 @@ struct CpuPhaseStats {
 
 std::mutex cpu_profile_mutex;
 std::vector<CpuProfileEntry> cpu_profile_threads;
-std::array<CpuPhaseStats, 3> cpu_profile_phases;
+std::array<CpuPhaseStats, static_cast<size_t>(SwitchCpuProfilePhase::Count)> cpu_profile_phases;
 std::atomic<bool> cpu_profile_enabled{ false };
 std::atomic<u64> cpu_profile_next_tick{ 0 };
 std::FILE *cpu_profile_threads_file = nullptr;
@@ -206,19 +217,29 @@ uint64_t cpu_profile_token = 0;
 uint64_t cpu_profile_session_index = 0;
 unsigned cpu_profile_sample_index = 0;
 
-bool cpu_profile_read_ticks(Handle handle, std::array<u64, 4> &out) {
+bool cpu_profile_read_ticks(
+    Handle handle, std::array<u64, 4> &out, u64 &total_out,
+    Result &core_rc, Result &total_rc) {
     if (handle == INVALID_HANDLE)
         return false;
     std::array<u64, 4> read{};
+    core_rc = 0;
+    bool any_core_succeeded = false;
     for (unsigned core = 0; core < 4; ++core) {
-        // This libnx InfoType is available on Horizon 13.0.0+.
-        // Four sequential reads are not perfectly atomic but are sufficient
-        // for a one-second diagnostic window.
-        if (R_FAILED(svcGetInfo(&read[core], InfoType_ThreadTickCount, handle, core)))
-            return false;
+        const Result rc = svcGetInfo(&read[core], InfoType_ThreadTickCount,
+            handle, core);
+        if (R_FAILED(rc)) {
+            if (R_SUCCEEDED(core_rc))
+                core_rc = rc;
+        } else {
+            any_core_succeeded = true;
+        }
     }
+    total_rc = svcGetInfo(&total_out, InfoType_ThreadTickCount,
+        handle, TickCountInfo_Total);
+    // Preserve errors and raw values instead of treating failure as 0%.
     out = read;
-    return true;
+    return any_core_succeeded || R_SUCCEEDED(total_rc);
 }
 
 double cpu_profile_to_ms(u64 ticks) {
@@ -246,16 +267,25 @@ void cpu_profile_poll_locked(bool final_sample) {
 
     for (auto &entry : cpu_profile_threads) {
         std::array<u64, 4> current{};
+        u64 current_total = 0;
+        Result core_rc = 0;
+        Result total_rc = 0;
         const bool valid = entry.exited
             ? entry.valid
-            : cpu_profile_read_ticks(entry.handle, current);
+            : cpu_profile_read_ticks(entry.handle, current, current_total,
+                core_rc, total_rc);
         const u64 sample_wall = entry.exited ? entry.final_wall : now;
-        if (entry.exited)
+        if (entry.exited) {
             current = entry.final;
+            current_total = entry.final_total;
+            core_rc = entry.last_core_rc;
+            total_rc = entry.last_total_rc;
+        }
         if (!valid)
             continue;
         if (!entry.valid) {
             entry.previous = current;
+            entry.previous_total = current_total;
             entry.previous_wall = sample_wall;
             entry.valid = true;
             continue;
@@ -266,6 +296,21 @@ void cpu_profile_poll_locked(bool final_sample) {
         double core_ms[4]{};
         double core_pct[4]{};
         double total_pct = 0.0;
+        const u64 total_delta = current_total >= entry.previous_total
+            ? current_total - entry.previous_total : 0;
+        const double kernel_total_pct = R_SUCCEEDED(total_rc)
+            ? 100.0 * static_cast<double>(total_delta) /
+                static_cast<double>(window_ticks) : -1.0;
+        u64 self_delta = 0;
+        double self_pct = -1.0;
+        if (R_SUCCEEDED(entry.self_rc) && entry.self_wall > entry.previous_self_wall) {
+            self_delta = entry.self_total >= entry.previous_self_total
+                ? entry.self_total - entry.previous_self_total : 0;
+            self_pct = 100.0 * static_cast<double>(self_delta) /
+                static_cast<double>(entry.self_wall - entry.previous_self_wall);
+            entry.previous_self_total = entry.self_total;
+            entry.previous_self_wall = entry.self_wall;
+        }
         for (unsigned core = 0; core < 4; ++core) {
             const u64 delta = current[core] >= entry.previous[core]
                 ? current[core] - entry.previous[core] : 0;
@@ -277,16 +322,35 @@ void cpu_profile_poll_locked(bool final_sample) {
         std::fprintf(cpu_profile_threads_file,
             "%.2f,%.2f,%llu,%s,%d,0x%llx,"
             "%.3f,%.3f,%.3f,%.3f,"
-            "%.2f,%.2f,%.2f,%.2f,%.2f,%s\n",
+            "%.2f,%.2f,%.2f,%.2f,%.2f,%s,"
+            "%llu,%llu,%llu,%llu,%llu,%llu,%.4f,"
+            "0x%x,0x%x,%llu,%.4f,0x%x,%u,%llu\n",
             elapsed_ms, cpu_profile_to_ms(window_ticks),
             static_cast<unsigned long long>(entry.token), entry.label,
             static_cast<int>(entry.priority),
             static_cast<unsigned long long>(entry.affinity),
             core_ms[0], core_ms[1], core_ms[2], core_ms[3],
             core_pct[0], core_pct[1], core_pct[2], core_pct[3],
-            total_pct, entry.exited ? "exit" : "running");
+            total_pct, entry.exited ? "exit" : "running",
+            static_cast<unsigned long long>(current[0]),
+            static_cast<unsigned long long>(current[1]),
+            static_cast<unsigned long long>(current[2]),
+            static_cast<unsigned long long>(current[3]),
+            static_cast<unsigned long long>(current_total),
+            static_cast<unsigned long long>(total_delta),
+            kernel_total_pct,
+            static_cast<unsigned>(core_rc),
+            static_cast<unsigned>(total_rc),
+            static_cast<unsigned long long>(self_delta),
+            self_pct,
+            static_cast<unsigned>(entry.self_rc),
+            static_cast<unsigned>(entry.self_core),
+            static_cast<unsigned long long>(armGetSystemTickFreq()));
         entry.previous = current;
+        entry.previous_total = current_total;
         entry.previous_wall = sample_wall;
+        entry.last_core_rc = core_rc;
+        entry.last_total_rc = total_rc;
     }
 
     cpu_profile_threads.erase(
@@ -295,8 +359,13 @@ void cpu_profile_poll_locked(bool final_sample) {
         cpu_profile_threads.end());
 
     static constexpr const char *names[] = {
-        "process_batches", "render_frame", "swap_window"
+        "process_batches", "render_frame", "swap_window",
+        "lsfg_slot_fence_wait", "lsfg_record_compute", "lsfg_queue_submit",
+        "lsfg_present_generated", "lsfg_acquire_image", "lsfg_restore_record",
+        "lsfg_present_original", "lsfg_capture_record",
+        "lsfg_create", "lsfg_destroy"
     };
+    static_assert(std::size(names) == static_cast<size_t>(SwitchCpuProfilePhase::Count));
     for (size_t i = 0; i < cpu_profile_phases.size(); ++i) {
         auto &phase = cpu_profile_phases[i];
         const u64 count = phase.count.exchange(0, std::memory_order_relaxed);
@@ -314,6 +383,7 @@ void cpu_profile_poll_locked(bool final_sample) {
             static_cast<unsigned long long>(slow_30));
     }
 
+    switch_cpu_profile_lsfg_poll(elapsed_ms, final_sample);
     cpu_profile_next_tick.store(now + armGetSystemTickFreq(),
         std::memory_order_release);
     // No per-frame writes. Flush periodically to bound data lost on crashes.
@@ -328,6 +398,7 @@ void cpu_profile_close_locked() {
     cpu_profile_enabled.store(false, std::memory_order_release);
     if (cpu_profile_threads_file && cpu_profile_phases_file)
         cpu_profile_poll_locked(true);
+    switch_cpu_profile_lsfg_end_session();
     if (cpu_profile_threads_file) {
         std::fclose(cpu_profile_threads_file);
         cpu_profile_threads_file = nullptr;
@@ -354,12 +425,45 @@ SwitchCpuProfileThread::SwitchCpuProfileThread(const char *label) {
     svcGetThreadPriority(&entry.priority, entry.handle);
     s32 preferred_core = -1;
     svcGetThreadCoreMask(&preferred_core, &entry.affinity, entry.handle);
-    entry.valid = cpu_profile_read_ticks(entry.handle, entry.previous);
+    entry.valid = cpu_profile_read_ticks(entry.handle, entry.previous,
+        entry.previous_total, entry.last_core_rc, entry.last_total_rc);
     entry.previous_wall = armGetSystemTick();
     std::lock_guard<std::mutex> lock(cpu_profile_mutex);
     entry.token = ++cpu_profile_token;
     token_ = entry.token;
     cpu_profile_threads.push_back(entry);
+}
+
+void SwitchCpuProfileThread::checkpoint() {
+    if (!token_ || !cpu_profile_enabled.load(std::memory_order_acquire))
+        return;
+    const u64 now = armGetSystemTick();
+    if (now < next_checkpoint_tick_)
+        return;
+    next_checkpoint_tick_ = now + armGetSystemTickFreq();
+
+    u64 cpu_ticks = 0;
+    const Result rc = svcGetInfo(&cpu_ticks, InfoType_ThreadTickCount,
+        CUR_THREAD_HANDLE, TickCountInfo_Total);
+    const u32 core = svcGetCurrentProcessorNumber();
+
+    std::lock_guard<std::mutex> lock(cpu_profile_mutex);
+    const auto it = std::find_if(cpu_profile_threads.begin(),
+        cpu_profile_threads.end(), [this](const CpuProfileEntry &entry) {
+            return entry.token == token_;
+        });
+    if (it == cpu_profile_threads.end())
+        return;
+    if (R_SUCCEEDED(rc) && it->self_wall == 0) {
+        it->previous_self_wall = now;
+        it->previous_self_total = cpu_ticks;
+    }
+    if (R_SUCCEEDED(rc)) {
+        it->self_total = cpu_ticks;
+        it->self_wall = now;
+    }
+    it->self_core = core;
+    it->self_rc = rc;
 }
 
 SwitchCpuProfileThread::~SwitchCpuProfileThread() {
@@ -375,8 +479,14 @@ SwitchCpuProfileThread::~SwitchCpuProfileThread() {
     if (cpu_profile_enabled.load(std::memory_order_relaxed)) {
         // Capture before threadGetCurHandle() becomes invalid at thread exit.
         std::array<u64, 4> end{};
-        if (cpu_profile_read_ticks(it->handle, end)) {
+        u64 total = 0;
+        Result core_rc = 0;
+        Result total_rc = 0;
+        if (cpu_profile_read_ticks(it->handle, end, total, core_rc, total_rc)) {
             it->final = end;
+            it->final_total = total;
+            it->last_core_rc = core_rc;
+            it->last_total_rc = total_rc;
             it->final_wall = armGetSystemTick();
             it->exited = true;
             return;
@@ -424,7 +534,10 @@ SwitchCpuProfileSession::SwitchCpuProfileSession(const char *title_id) {
     }
     std::fputs("elapsed_ms,window_ms,thread_id,label,priority,affinity_mask,"
         "core0_ms,core1_ms,core2_ms,core3_ms,"
-        "core0_pct,core1_pct,core2_pct,core3_pct,total_pct,state\n",
+        "core0_pct,core1_pct,core2_pct,core3_pct,total_pct,state,"
+        "raw_core0,raw_core1,raw_core2,raw_core3,raw_total,"
+        "delta_total_ticks,kernel_total_pct,core_query_rc,total_query_rc,"
+        "self_delta_ticks,self_total_pct,self_query_rc,self_core,tick_frequency\n",
         cpu_profile_threads_file);
     std::fputs("elapsed_ms,phase,count,total_wall_ms,avg_wall_ms,"
         "max_wall_ms,over_16_7ms,over_33_3ms\n", cpu_profile_phases_file);
@@ -435,10 +548,12 @@ SwitchCpuProfileSession::SwitchCpuProfileSession(const char *title_id) {
         armGetSystemTickFreq(), std::memory_order_relaxed);
     cpu_profile_sample_index = 0;
     for (auto &entry : cpu_profile_threads) {
-        entry.valid = cpu_profile_read_ticks(entry.handle, entry.previous);
+        entry.valid = cpu_profile_read_ticks(entry.handle, entry.previous,
+            entry.previous_total, entry.last_core_rc, entry.last_total_rc);
         entry.previous_wall = armGetSystemTick();
     }
     cpu_profile_enabled.store(true, std::memory_order_release);
+    switch_cpu_profile_lsfg_begin_session(safe_id, epoch, index);
     LOG_WARN("[cpu-profile] Per-thread CPU log: {}", cpu_path);
     LOG_WARN("[cpu-profile] Render wall-time log: {}", phase_path);
 }

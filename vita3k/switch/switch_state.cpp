@@ -123,6 +123,7 @@ void preemption_watchdog(EmuEnvState &emuenv) {
             watched.quanta++;
             preempt(*thread->cpu, watched.quanta >= PREEMPT_RELEASE_AFTER);
         }
+        cpu_profile.checkpoint();
     }
 }
 } // namespace
