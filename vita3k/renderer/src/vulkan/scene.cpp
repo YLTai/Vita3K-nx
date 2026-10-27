@@ -40,8 +40,10 @@ namespace renderer::vulkan {
 // the GPU or performs file I/O. Stopwatch overhead is excluded from most
 // nested spans but can still perturb performance slightly.
 struct DrawFineStageTimer {
-    const bool sampled = switch_cpu_profile_fine_sample();
-    uint64_t previous = sampled ? armGetSystemTick() : 0;
+    const bool sampled;
+    uint64_t previous;
+    explicit DrawFineStageTimer(bool enabled = switch_cpu_profile_fine_sample())
+        : sampled(enabled), previous(enabled ? armGetSystemTick() : 0) {}
 
     void lap(SwitchCpuFineMetric stage) {
         const uint64_t now = sampled ? armGetSystemTick() : 0;
@@ -190,6 +192,9 @@ static vk::DescriptorSet retrieve_descriptor(VKContext &context, bool is_vertex,
         return frame_descriptor.sets[frame_descriptor.descriptors_idx++];
 
     // we have no more frame descriptor available, create a bunch of new one for this specific layout
+#ifdef __SWITCH__
+    switch_cpu_profile_fine_record(SwitchCpuFineMetric::DescPoolGrow, false, 0);
+#endif
     vk::DescriptorPoolSize pool_size{
         .type = vk::DescriptorType::eCombinedImageSampler,
         .descriptorCount = textures_count * DESCRIPTOR_PACK_SIZE * MAX_FRAMES_RENDERING
@@ -225,7 +230,10 @@ static vk::DescriptorSet retrieve_descriptor(VKContext &context, bool is_vertex,
     return frame_descriptor.sets[frame_descriptor.descriptors_idx++];
 }
 
-static void draw_bind_descriptors(VKContext &context, MemState &mem) {
+static void draw_bind_descriptors(VKContext &context, MemState &mem, [[maybe_unused]] bool sampled) {
+#ifdef __SWITCH__
+    DrawFineStageTimer descriptor_timer(sampled);
+#endif
     VKState &state = context.state;
 
     std::array<vk::DescriptorSet, 4> descriptors;
@@ -246,15 +254,25 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem) {
 
     {
         if (need_vert_descr) {
+#ifdef __SWITCH__
+            switch_cpu_profile_fine_record(SwitchCpuFineMetric::DescVertSetRefresh, false, 0);
+#endif
             context.last_vert_texture_descriptor = retrieve_descriptor(context, true, vertex_textures_count);
         }
         descriptors[2] = context.last_vert_texture_descriptor;
 
         if (need_frag_descr) {
+#ifdef __SWITCH__
+            switch_cpu_profile_fine_record(SwitchCpuFineMetric::DescFragSetRefresh, false, 0);
+#endif
             context.last_frag_texture_descriptor = retrieve_descriptor(context, false, fragment_texture_count);
         }
         descriptors[3] = context.last_frag_texture_descriptor;
     }
+
+#ifdef __SWITCH__
+    descriptor_timer.lap(SwitchCpuFineMetric::DrawDescriptorResolve);
+#endif
 
     // bind textures
     std::array<vk::WriteDescriptorSet, 16> write_descrs;
@@ -277,6 +295,9 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem) {
             write_descrs[i].setImageInfo(context.vertex_textures[i].sampler ? context.vertex_textures[i] : default_image_info);
         }
         state.device.updateDescriptorSets(vertex_textures_count, write_descrs.data(), 0, nullptr);
+#ifdef __SWITCH__
+        switch_cpu_profile_fine_record(SwitchCpuFineMetric::DescVertUpdate, false, 0);
+#endif
     }
 
     // fragment
@@ -291,7 +312,14 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem) {
             write_descrs[i].setImageInfo(context.fragment_textures[i].sampler ? context.fragment_textures[i] : default_image_info);
         }
         state.device.updateDescriptorSets(fragment_texture_count, write_descrs.data(), 0, nullptr);
+#ifdef __SWITCH__
+        switch_cpu_profile_fine_record(SwitchCpuFineMetric::DescFragUpdate, false, 0);
+#endif
     }
+
+#ifdef __SWITCH__
+    descriptor_timer.lap(SwitchCpuFineMetric::DrawDescriptorUpdate);
+#endif
 
     const uint32_t dynamic_offset_count = state.features.enable_memory_mapping ? 2U : 4U;
     const std::array<uint32_t, 4> dynamic_offsets = {
@@ -305,8 +333,23 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem) {
         context.fragment_uniform_stream_ring_buffer.data_offset
     };
 
+#if defined(__SWITCH__) && defined(VITA3K_SWITCH_DISABLE_DESCRIPTOR_BIND_CACHE)
+    // A/B reference behavior: rebind every descriptor without consulting the
+    // cache. This does not skip updates, uploads, barriers or any draw command.
+    context.render_cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline_layout,
+        0, static_cast<uint32_t>(descriptors.size()), descriptors.data(),
+        dynamic_offset_count, dynamic_offsets.data());
+    switch_cpu_profile_fine_record(SwitchCpuFineMetric::DescBindUnconditional, false, 0);
+#else
     const auto bind = context.descriptor_binding_cache.update(pipeline_layout,
         descriptors, dynamic_offsets, dynamic_offset_count);
+#ifdef __SWITCH__
+    const auto kind = bind.set_count == 0 ? SwitchCpuFineMetric::DescBindSkipped
+        : (bind.first_set == 0 && bind.set_count == descriptors.size())
+            ? SwitchCpuFineMetric::DescBindFull
+            : SwitchCpuFineMetric::DescBindPartial;
+    switch_cpu_profile_fine_record(kind, false, 0);
+#endif
     if (bind.set_count != 0) {
         // All dynamic descriptors are in set 0. A texture-only change must not
         // resend their offsets, and a uniform-only change need not rebind the
@@ -316,6 +359,10 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem) {
             bind.set_count, descriptors.data() + bind.first_set, offset_count,
             offset_count ? dynamic_offsets.data() : nullptr);
     }
+#endif
+#ifdef __SWITCH__
+    descriptor_timer.lap(SwitchCpuFineMetric::DrawDescriptorBind);
+#endif
 }
 
 // vertex count is only used with double buffer mapping
@@ -603,12 +650,19 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
 #endif
 
     // create, update and bind descriptors (uniforms and textures)
-    draw_bind_descriptors(context, mem);
+#ifdef __SWITCH__
+    draw_bind_descriptors(context, mem, fine_timer.sampled);
+#else
+    draw_bind_descriptors(context, mem, false);
+#endif
 #ifdef __SWITCH__
     fine_timer.lap(SwitchCpuFineMetric::DrawDescriptors);
 #endif
 
     // Upload index data.
+#ifdef __SWITCH__
+    DrawFineStageTimer index_vertex_timer(fine_timer.sampled);
+#endif
     vk::IndexType index_type = (format == SCE_GXM_INDEX_FORMAT_U16) ? vk::IndexType::eUint16 : vk::IndexType::eUint32;
     const size_t index_size = (format == SCE_GXM_INDEX_FORMAT_U16) ? 2 : 4;
 
@@ -618,6 +672,9 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         if (context.state.need_cpu_buffer_sync()) {
             TrappedBuffer *trapped_buffer = context.state.buffer_trapping.access_buffer(indices.address(), count * index_size, mem);
             if (trapped_buffer->extra == ~0) {
+#ifdef __SWITCH__
+                switch_cpu_profile_fine_record(SwitchCpuFineMetric::IndexRangeScanned, false, 0);
+#endif
                 // store the max element in extra
                 if (format == SCE_GXM_INDEX_FORMAT_U16) {
                     uint16_t *data = indices.cast<uint16_t>().get(mem);
@@ -626,6 +683,10 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
                     uint32_t *data = indices.cast<uint32_t>().get(mem);
                     trapped_buffer->extra = *std::max_element(&data[0], &data[count]);
                 }
+            } else {
+#ifdef __SWITCH__
+                switch_cpu_profile_fine_record(SwitchCpuFineMetric::IndexRangeReused, false, 0);
+#endif
             }
             max_index = trapped_buffer->extra;
         }
@@ -636,9 +697,13 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         context.render_cmd.bindIndexBuffer(context.index_stream_ring_buffer.handle(), context.index_stream_ring_buffer.data_offset, index_type);
     }
 
+#ifdef __SWITCH__
+    index_vertex_timer.lap(SwitchCpuFineMetric::DrawIndexData);
+#endif
     // bind the vertex streams
     bind_vertex_streams(context, mem, instance_count, max_index);
 #ifdef __SWITCH__
+    index_vertex_timer.lap(SwitchCpuFineMetric::DrawVertexData);
     fine_timer.lap(SwitchCpuFineMetric::DrawIndexVertex);
 #endif
 
