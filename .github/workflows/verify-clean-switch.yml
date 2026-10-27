@@ -3,6 +3,8 @@ name: Verify clean db030b5 Switch render affinity
 on:
   push:
     branches: [ci/verify-prefer-core3-db030b5]
+  pull_request:
+    branches: [perf/render-prefer-core3-clean-db030b5]
 
 permissions:
   contents: read
