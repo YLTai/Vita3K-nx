@@ -336,6 +336,7 @@ static void render_loop(renderer::State &state, DisplayState &display, GxmState 
                 present_start, armGetSystemTick());
 #endif
             state.async_flip_requested.store(false, std::memory_order_relaxed);
+            cpu_profile.checkpoint();
 
     #ifdef TRACY_ENABLE
             FrameMark;
