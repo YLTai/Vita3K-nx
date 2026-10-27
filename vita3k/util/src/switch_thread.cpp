@@ -196,7 +196,7 @@ struct CpuPhaseStats {
 
 std::mutex cpu_profile_mutex;
 std::vector<CpuProfileEntry> cpu_profile_threads;
-std::array<CpuPhaseStats, 3> cpu_profile_phases;
+std::array<CpuPhaseStats, static_cast<size_t>(SwitchCpuProfilePhase::Count)> cpu_profile_phases;
 std::atomic<bool> cpu_profile_enabled{ false };
 std::atomic<u64> cpu_profile_next_tick{ 0 };
 std::FILE *cpu_profile_threads_file = nullptr;
@@ -295,8 +295,13 @@ void cpu_profile_poll_locked(bool final_sample) {
         cpu_profile_threads.end());
 
     static constexpr const char *names[] = {
-        "process_batches", "render_frame", "swap_window"
+        "process_batches", "render_frame", "swap_window",
+        "lsfg_slot_fence_wait", "lsfg_record_compute", "lsfg_queue_submit",
+        "lsfg_present_generated", "lsfg_acquire_image", "lsfg_restore_record",
+        "lsfg_present_original", "lsfg_capture_record",
+        "lsfg_create", "lsfg_destroy"
     };
+    static_assert(std::size(names) == static_cast<size_t>(SwitchCpuProfilePhase::Count));
     for (size_t i = 0; i < cpu_profile_phases.size(); ++i) {
         auto &phase = cpu_profile_phases[i];
         const u64 count = phase.count.exchange(0, std::memory_order_relaxed);
@@ -314,6 +319,7 @@ void cpu_profile_poll_locked(bool final_sample) {
             static_cast<unsigned long long>(slow_30));
     }
 
+    switch_cpu_profile_lsfg_poll(elapsed_ms, final_sample);
     cpu_profile_next_tick.store(now + armGetSystemTickFreq(),
         std::memory_order_release);
     // No per-frame writes. Flush periodically to bound data lost on crashes.
@@ -328,6 +334,7 @@ void cpu_profile_close_locked() {
     cpu_profile_enabled.store(false, std::memory_order_release);
     if (cpu_profile_threads_file && cpu_profile_phases_file)
         cpu_profile_poll_locked(true);
+    switch_cpu_profile_lsfg_end_session();
     if (cpu_profile_threads_file) {
         std::fclose(cpu_profile_threads_file);
         cpu_profile_threads_file = nullptr;
@@ -439,6 +446,7 @@ SwitchCpuProfileSession::SwitchCpuProfileSession(const char *title_id) {
         entry.previous_wall = armGetSystemTick();
     }
     cpu_profile_enabled.store(true, std::memory_order_release);
+    switch_cpu_profile_lsfg_begin_session(safe_id, epoch, index);
     LOG_WARN("[cpu-profile] Per-thread CPU log: {}", cpu_path);
     LOG_WARN("[cpu-profile] Render wall-time log: {}", phase_path);
 }
