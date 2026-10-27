@@ -133,16 +133,19 @@ message(STATUS "Switch: using OpenSSL 4.0.1 at ${SWITCH_OPENSSL_DIR}")
 
 # Features that make no sense / are unavailable on Switch.
 set(USE_DISCORD_RICH_PRESENCE OFF CACHE BOOL "" FORCE)  # x86_64/APPLE only anyway
-# The port is now past early bring-up. Match the Ticu Release configuration and
-# let GCC optimize across Vita3K's many static libraries; this particularly
-# helps the small CPU/JIT/HLE helpers on the serial guest execution path.
-set(USE_LTO RELEASE_ONLY CACHE STRING "" FORCE)
+# Preserve Release LTO for performance comparisons, but honor
+# -DUSE_LTO=NEVER for quick iteration (LTO link-time optimization dominates
+# the edit/build loop and cannot be cached by ccache).
+set(USE_LTO RELEASE_ONLY CACHE STRING "Use interprocedural optimization/link time optimization")
 
 # CMake selects -flto=auto for GCC, but Ninja does not provide GNU make's
 # jobserver and devkitA64 consequently runs the LTRANS partitions serially.
-# Bound the Release link to eight workers explicitly. This changes build
-# parallelism only; the objects remain regular GCC LTO objects.
-add_link_options("$<$<CONFIG:Release>:-flto=8>")
+# Bound the Release link to eight workers when LTO is enabled.
+if(NOT USE_LTO STREQUAL "NEVER")
+	add_link_options("$<$<CONFIG:Release>:-flto=8>")
+else()
+	message(STATUS "Switch: LTO disabled for faster development builds")
+endif()
 
 # ---------------------------------------------------------------------------
 # Unified Mesa NVK/Nouveau/Zink static graphics SDK
