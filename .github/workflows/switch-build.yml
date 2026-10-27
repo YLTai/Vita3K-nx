@@ -44,8 +44,6 @@ jobs:
       TZ: UTC
       # Release builds retain LTO; dispatch input or repository variable can opt out.
       SWITCH_LTO_MODE: ${{ (inputs.fast_dev || vars.VITA3K_SWITCH_FAST_DEV == 'true') && 'NEVER' || 'RELEASE_ONLY' }}
-      CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_COMPILERCHECK: content
       CCACHE_COMPRESS: 'true'
       CCACHE_MAXSIZE: 2G
@@ -76,6 +74,11 @@ jobs:
           echo "$DEVKITA64/bin" >> "$GITHUB_PATH"
           echo "$DEVKITPRO/tools/bin" >> "$GITHUB_PATH"
           echo "$DEVKITPRO/portlibs/switch/bin" >> "$GITHUB_PATH"
+          # github.workspace can be a host path in container jobs. Use the
+          # container's actual workspace so ccache and actions/cache both
+          # address the same mounted .ccache directory.
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           sdk_version=$(sed -n 's/^SDK_VERSION=//p' scripts/prepare-switch-vulkan-sdk.sh)
           openssl_version=$(sed -n 's/^OPENSSL_VERSION=//p' scripts/prepare-switch-openssl.sh)
           test -n "$sdk_version" && test -n "$openssl_version"
@@ -105,6 +108,8 @@ jobs:
           ccache --max-size="$CCACHE_MAXSIZE"
           ccache --zero-stats
           ccache --version | head -1
+          echo "Workspace: $GITHUB_WORKSPACE"
+          ccache --show-config | grep -E '(cache_dir|base_dir) ='
 
       # Check pinned submodules before spending time building the SDKs.
       - name: Apply Switch submodule patches

@@ -16,7 +16,8 @@ enum class Metric : uint8_t {
     IndexScan, VertexBind, CacheClean, CacheFlush,
     DescriptorResolve, DescriptorUpdate, DescriptorBind,
     PipelineLookup, PipelineCompile, QueueSubmit, QueuePresent,
-    RenderLoop, DrawBack, CollectorPoll, Count
+    RenderLoop, DrawBack, CollectorPoll,
+    TextureHashUnchanged, TextureHashChanged, TextureHashSceneReused, Count
 };
 enum class Event : uint16_t {
     RenderBegin = 1, RenderEnd, GxmNewFrame, BatchConsume,
@@ -30,6 +31,10 @@ uint64_t frequency();
 bool active(Domain domain);
 void count(Metric metric, uint64_t bytes = 0);
 void event(Event event, uint32_t correlation = 0, uint32_t value = 0);
+void nid_sample(uint32_t nid, uint32_t sampled_wall_us);
+void tag_thread(const char *label);
+void cpu_checkpoint();
+bool legacy_csv_enabled();
 void begin_session(const char *title_id);
 void end_session();
 void poll();
@@ -55,6 +60,7 @@ public:
 private:
     Metric metric_;
     uint64_t begin_ = 0;
+    void *slot_ = nullptr;
 };
 
 #else
@@ -64,6 +70,10 @@ inline uint64_t frequency() { return 1; }
 inline bool active(Domain) { return false; }
 inline void count(Metric, uint64_t = 0) {}
 inline void event(Event, uint32_t = 0, uint32_t = 0) {}
+inline void nid_sample(uint32_t, uint32_t) {}
+inline void tag_thread(const char *) {}
+inline void cpu_checkpoint() {}
+inline bool legacy_csv_enabled() { return true; }
 inline void begin_session(const char *) {}
 inline void end_session() {}
 inline void poll() {}

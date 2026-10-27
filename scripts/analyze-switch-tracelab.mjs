@@ -52,10 +52,24 @@ async function main() {
     const measurements = csv(await readFile(join(dir, 'hotspots.csv'), 'utf8'));
     const frames = csv(await readFile(join(dir, 'frames.csv'), 'utf8'))
         .filter(f => Number(f.elapsed_ms) >= start && Number(f.elapsed_ms) <= end);
-    const intervals = frames.map(f => Number(f.interval_ms))
-        .filter((value, i) => value > 0 && i > 0);
+    // A render frame is only adjacent to its predecessor when IDs are consecutive.
+    // Old TraceLab sessions dropped event-ring entries; treating gaps as one
+    // giant frame caused fictitious 200-300ms stalls.
+    const intervals = [];
+    let frameIdGaps = 0;
+    for (let i = 1; i < frames.length; ++i) {
+        if (Number(frames[i].render_frame_id) !== Number(frames[i - 1].render_frame_id) + 1) {
+            ++frameIdGaps;
+            continue;
+        }
+        const delta = Number(frames[i].elapsed_ms) - Number(frames[i - 1].elapsed_ms);
+        if (delta > 0) intervals.push(delta);
+    }
     const frameStats = {
         count: frames.length,
+        recorded_total: manifest.frames_recorded,
+        frame_id_gaps: frameIdGaps,
+        frame_buffer_overflow: manifest.frames_overflow ?? null,
         measured_intervals: intervals.length,
         mean_interval_ms: intervals.length
             ? intervals.reduce((a, b) => a + b, 0) / intervals.length : null,
@@ -75,24 +89,28 @@ async function main() {
         const metric = row.metric;
         const item = totals.get(metric) ?? {
             metric, calls: 0, bytes: 0, samples: 0,
-            sampled_wall_ms: 0, estimated_wall_ms: 0,
+            sampled_wall_ms: 0, estimated_wall_ms: null,
             max_sampled_us: 0
         };
         item.calls += Number(row.calls);
         item.bytes += Number(row.bytes);
         item.samples += Number(row.sampled_calls);
         item.sampled_wall_ms += Number(row.sampled_wall_ms);
-        // This extrapolation describes the same metric only; nested
-        // metrics overlap and must NEVER be summed into a frame budget.
-        item.estimated_wall_ms += Number(row.estimated_wall_ms);
+        // Do not sum per-window extrapolations: windows with zero sampled
+        // calls must not silently contribute a false zero to the estimate.
+        // Pool all samples within the selected interval before extrapolating.
         item.max_sampled_us = Math.max(item.max_sampled_us, Number(row.max_sampled_us));
         totals.set(metric, item);
     }
     const hotspots = [...totals.values()]
         .filter(row => row.calls > 0)
-        .sort((a, b) => b.estimated_wall_ms - a.estimated_wall_ms);
-    // The binary event stream carries sampled HLE NIDs (not full guest call
-    // stacks). Count them without assuming one sample equals one call.
+        .map(row => ({
+            ...row,
+            estimated_wall_ms: row.samples
+                ? row.sampled_wall_ms * row.calls / row.samples : null
+        }))
+        .sort((a,b) => (b.estimated_wall_ms ?? -1) - (a.estimated_wall_ms ?? -1));
+
     const traceData = await readFile(join(dir, 'trace.bin'));
     if (traceData.length < 24 || traceData.toString('ascii', 0, 6) !== 'TLABv1')
         throw new Error('Invalid TraceLab trace.bin header');
@@ -102,6 +120,7 @@ async function main() {
     if (traceVersion !== 1 || traceEntrySize !== 24 || !traceHz ||
         (traceData.length - 24) % traceEntrySize)
         throw new Error('Unsupported or truncated TraceLab trace.bin');
+
     const hleByNid = new Map();
     let earliestTick = Infinity;
     let longFrames = 0;
@@ -110,18 +129,44 @@ async function main() {
         earliestTick = Math.min(earliestTick, tick);
         const kind = traceData.readUInt16LE(i + 16);
         if (kind === 6) ++longFrames;
+        // Historical v1 trace.bin: some HLE NIDs were individually logged.
         if (kind !== 5) continue;
         const nid = traceData.readUInt32LE(i + 8);
         const microseconds = traceData.readUInt32LE(i + 12);
         const name = '0x' + nid.toString(16).padStart(8, '0');
-        const item = hleByNid.get(name) ?? {nid:name,samples:0,sampled_wall_ms:0,max_sampled_us:0};
+        const item = hleByNid.get(name) ?? {
+            nid:name, samples:0, sampled_wall_ms:0, max_sampled_us:0
+        };
         ++item.samples;
         item.sampled_wall_ms += microseconds / 1000;
         item.max_sampled_us = Math.max(item.max_sampled_us, microseconds);
         hleByNid.set(name, item);
     }
+
+    // Schema v2: the complete per-NID sampled aggregates are exported to
+    // nid-samples.csv, avoiding millions of high-frequency trace events.
+    let nidWindow = 'historical trace events (potentially dropped)';
+    if (manifest.schema_version >= 2) {
+        const nidRows = csv(await readFile(join(dir, 'nid-samples.csv'), 'utf8'));
+        hleByNid.clear();
+        for (const row of nidRows) {
+            const key = row.nid;
+            const item = hleByNid.get(key) ?? {
+                nid:key, samples:0, sampled_wall_ms:0, max_sampled_us:0
+            };
+            item.samples += Number(row.samples);
+            item.sampled_wall_ms += Number(row.sampled_wall_ms);
+            item.max_sampled_us = Math.max(item.max_sampled_us, Number(row.max_sampled_us));
+            hleByNid.set(key, item);
+        }
+        nidWindow = 'full session (not restricted to --start-ms/--end-ms)';
+    }
     const hle_nids = [...hleByNid.values()]
         .sort((a,b) => b.sampled_wall_ms - a.sampled_wall_ms).slice(0, 25);
+    let threads = [];
+    if (manifest.schema_version >= 2)
+        threads = csv(await readFile(join(dir, 'threads.csv'), 'utf8'));
+
     const report = {
         title: manifest.title,
         measurement: 'Render loop intervals, not physical display scans or game simulation FPS',
@@ -129,9 +174,13 @@ async function main() {
         frames: frameStats,
         hotspots,
         hle_nids,
+        hle_nids_scope: nidWindow,
+        threads,
         trace: {
             long_render_intervals_over_66ms: longFrames,
             events_dropped: manifest.events_dropped,
+            nid_samples_overflow: manifest.nid_samples_overflow ?? null,
+            window_rows_overflow: manifest.window_rows_overflow ?? null,
             trace_bytes: manifest.trace_bytes,
             gpu_timestamps: manifest.gpu_timestamps,
             caveat: 'GPU execution duration is not measured. Per-metric estimates are sampled CPU-side wall time and often overlap.'
@@ -141,7 +190,7 @@ async function main() {
     console.log(JSON.stringify(report, null, 2));
 
     if (htmlPath) {
-        const rows = hotspots.map(item => `<tr><td>${escapeHtml(item.metric)}</td><td>${item.calls}</td><td>${item.bytes}</td><td>${item.samples}</td><td>${item.estimated_wall_ms.toFixed(3)}</td></tr>`).join('');
+        const rows = hotspots.map(item => `<tr><td>${escapeHtml(item.metric)}</td><td>${item.calls}</td><td>${item.bytes}</td><td>${item.samples}</td><td>${item.estimated_wall_ms === null ? 'n/a' : item.estimated_wall_ms.toFixed(3)}</td></tr>`).join('');
         const html = `<!doctype html><meta charset="utf-8"><title>Vita3K TraceLab</title>
 <style>body{font:15px system-ui;margin:3rem auto;max-width:980px;padding:0 1rem;color:#222}
 table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ddd;padding:.6rem;text-align:right}
@@ -151,7 +200,7 @@ td:first-child,th:first-child{text-align:left}small{color:#666}</style>
 P50/P95/P99 intervals: ${frameStats.p50_ms?.toFixed(2) ?? 'n/a'} /
 ${frameStats.p95_ms?.toFixed(2) ?? 'n/a'} /
 ${frameStats.p99_ms?.toFixed(2) ?? 'n/a'} ms.</p>
-<p>Trace events dropped: ${manifest.events_dropped}; GPU timestamps: ${escapeHtml(manifest.gpu_timestamps)}.</p>
+<p>Trace events dropped: ${manifest.events_dropped}; frame-ID gaps: ${frameIdGaps}; GPU timestamps: ${escapeHtml(manifest.gpu_timestamps)}.</p>
 <small>CPU-side wall-time estimates may overlap and include preemption/driver waits.
 Do not add phases or treat rendered-loop intervals as game simulation FPS.</small>
 <h2>Hotspots</h2><table><thead><tr><th>Metric</th><th>Calls</th><th>Bytes</th><th>Samples</th><th>Estimated wall ms</th></tr></thead><tbody>${rows}</tbody></table>`;

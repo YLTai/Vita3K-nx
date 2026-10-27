@@ -179,6 +179,9 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
         } else {
             CommandHelper helper(cmd);
 #ifdef __SWITCH__
+            if (!switch_cpu_profile_recording()) {
+                handler(state, mem, config, helper, features, command_list.context);
+            } else {
             auto &timing = opcode_window[opcode];
             ++timing.calls;
             // Draw and SetState dominate command counts. Sample each on a
@@ -212,6 +215,7 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
                     ++timing.sampled_over_33ms;
             } else {
                 handler(state, mem, config, helper, features, command_list.context);
+            }
             }
 #else
             handler(state, mem, config, helper, features, command_list.context);
@@ -321,6 +325,8 @@ static void render_loop(renderer::State &state, DisplayState &display, GxmState 
     // than the higher priorities reserved for short hardware helper threads.
     switch_pin_render_thread("render thread");
     SwitchCpuProfileThread cpu_profile("render");
+    tracelab::tag_thread("render");
+    tracelab::cpu_checkpoint();
 
     if (state.precompile_requested) {
         // Compiling the shader cache is CPU bound and only ever draws a progress
@@ -447,6 +453,7 @@ static void render_loop(renderer::State &state, DisplayState &display, GxmState 
             state.async_flip_requested.store(false, std::memory_order_relaxed);
             tracelab::event(tracelab::Event::RenderEnd, render_frame_id);
             cpu_profile.checkpoint();
+            tracelab::cpu_checkpoint();
 
     #ifdef TRACY_ENABLE
             FrameMark;

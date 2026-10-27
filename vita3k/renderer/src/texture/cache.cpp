@@ -742,6 +742,7 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
             info->last_hashed_scene = memo_scene;
 #endif
             if (verified_this_scene) {
+                tracelab::count(tracelab::Metric::TextureHashSceneReused);
                 upload = false;
             } else {
                 const uint64_t previous_hash = info->hash;
@@ -751,6 +752,8 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
                     info->hash = hash_texture_data(gxm_texture, info->texture_size, mem) ^ 1;
 
                 upload = previous_hash != info->hash;
+                tracelab::count(upload ? tracelab::Metric::TextureHashChanged
+                    : tracelab::Metric::TextureHashUnchanged);
             }
         } else {
             range_protect_begin = align(gxm_texture.data_addr << 2, mem.host_page_size);

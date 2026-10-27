@@ -470,6 +470,8 @@ void guest_sched_forget_cpu(CPUState *cpu) {
 
 
 void ThreadState::run_loop() {
+    tracelab::tag_thread("guest");
+    tracelab::cpu_checkpoint();
     bool guest_returned = false;
 
     struct CpuStateGuard {
@@ -579,13 +581,16 @@ void ThreadState::run_loop() {
                     kernel.call_import(*cpu, nid, id);
                     if (hle.sampled()) {
                         const uint32_t us = hle.elapsed_us();
-                        static thread_local uint32_t nid_sequence = 0;
-                        if (us >= 1000 || ((++nid_sequence & 3u) == 0))
-                            tracelab::event(tracelab::Event::HleNidSample, nid, us);
+                        tracelab::nid_sample(nid, us);
                     }
                 }
                 current_import_nid.store(0, std::memory_order_relaxed);
                 clear_exclusive(*cpu);
+                // A once-in-4096-call throttle keeps the per-thread kernel
+                // CPU-tick checkpoints inexpensive even for chatty GXM HLE.
+                static thread_local uint32_t cpu_check_counter = 0;
+                if ((++cpu_check_counter & 4095u) == 0)
+                    tracelab::cpu_checkpoint();
             }
 
             // The token is held across the HLE call; give it up on timeslice or preemption.

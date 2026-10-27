@@ -895,6 +895,8 @@ vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(con
 void PipelineCache::compiler_thread(MemState &mem) {
     switch_allow_helper_core("shader compiler thread");
     SwitchCpuProfileThread cpu_profile("shader-compiler");
+    tracelab::tag_thread("shader-compiler");
+    tracelab::cpu_checkpoint();
     moodycamel::ConsumerToken consumer_token(pipeline_compile_queue);
 
     CompileRequest *queued_request;
@@ -910,6 +912,7 @@ void PipelineCache::compiler_thread(MemState &mem) {
         tracelab::event(tracelab::Event::PipelineCompiled, pipeline ? 1u : 0u);
         request->pipeline->store(pipeline, std::memory_order_release);
         cpu_profile.checkpoint();
+        tracelab::cpu_checkpoint();
 
         if (pipeline) {
             const auto time_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();

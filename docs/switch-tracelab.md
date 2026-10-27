@@ -1,102 +1,129 @@
-# Vita3K-nx TraceLab diagnostic build
+# Vita3K-nx TraceLab v2 — RAM-first diagnostic capture
 
-This is an **instrumented** Switch NRO for determining where heavy 3D
-scenes spend their time. It **does not** change CPU scheduling, renderer
-correctness, memory cache rules, or GPU command ordering. The
-`ci/switch-build` workflow now produces one NRO artifact containing both
-the launcher and instrumented core; the retired descriptor-cache and
-core-3-only A/B reference builds have been removed.
+This edition is intended for **slow TF/microSD cards**. It separates high
+frequency measurements from storage completely: during an active game session,
+the new TraceLab collects compact atomic counters, per-thread bounded event
+queues and bounded RAM snapshots. It performs **no SD-card writes while the
+game is running**. All output is written in batches when the game exits
+normally, after guest/render workers have stopped.
 
-The build configures `-DSWITCH_TRACELAB=ON`. For an ordinary local
-Switch build, TraceLab is **OFF** unless enabled explicitly. Legacy
-diagnostics remain available to make comparisons with earlier recordings.
+The previous six-CSV profiler was a second source of SD-card stalls.
+**It is now disabled by default in TraceLab builds**, including when
+`mode=off`. It can be explicitly re-enabled if an old diagnostic comparison
+requires its thread and stage CSVs.
 
-## Run
+## Config file
 
-1. Install the resulting single top-level `Vita3K.nro` artifact as before.
-   The launcher bundles an emulator; do not accidentally run a stale core
-   extracted from an older launcher.
-2. Optionally create `sdmc:/switch/vita3k/tracelab.cfg` with the contents:
+Create or edit `sdmc:/switch/vita3k/tracelab.cfg`, for example:
 
-   ```ini
-   # Read once when each game session starts. This file is separate from
-   # config.yml, which the launcher rewrites.
-   mode=auto
-   ```
-
-3. Launch the same title/save and move to the reproducible heavy scene.
-   Disable LSFG when profiling native/source-frame performance.
-4. After shader warm-up, record a fixed scene for 90–120 seconds and **exit
-   normally** so the last buffers and summary are written.
-5. Copy the new session directory from
-   `sdmc:/switch/vita3k/logs/tracelab-<title>-<epoch>-<run>/`.
-   The older `cpu-threads`, `render-phases`, `gxm-state-draw`, etc.
-   CSV files remain in `sdmc:/switch/vita3k/logs/`.
-
-**No source edit or rebuild is needed to change diagnostic modes**;
-edit the .cfg file before launching the next game session.
-
-| Mode | Data collected |
-| --- | --- |
-| `off` | Disable new TraceLab counters and trace (older profilers are separate) |
-| `light` | Lightweight counter/event telemetry; no sampled stage stopwatch |
-| `cpu` | Guest JIT, high-frequency HLE and scheduler stopwatch sampling |
-| `render` | GXM, texture, vertex/index, descriptor, pipeline and submit sampling |
-| `auto` | **Default**: CPU + render sampled timing, frame events and long-frame markers |
-| `deep` | Like auto but samples approximately 1/4 instead of 1/16; higher overhead |
-
-The sampler uses a per-thread pseudorandom sequence. Stage calls are counted
-exactly *within available slots*; sampled wall time and extrapolations are
-**estimates**, not proof of CPU execution time. Do not add nested stages.
-
-## TraceLab output
-
-```text
-tracelab-<title>-<epoch>-<run>/
-  hotspots.csv   # 1 Hz per-thread-group counters and sampled wall time
-  frames.csv     # render_loop completion timestamps and adjacent intervals
-  trace.bin      # bounded binary cross-thread events, max 64 MiB
-  manifest.json  # source title, mode, timebase, dropped-event count, context
-  summary.json   # full-session totals for all named metrics
+```ini
+# Read at the beginning of every game session; no rebuild needed.
+mode=auto
+legacy_csv=off
 ```
 
-`hotspots.csv` columns:
+| Setting | Purpose |
+| --- | --- |
+| `mode=off` | No TraceLab counters, timers or exports; suitable for a matched-build baseline |
+| `mode=light` | Counter-only stage totals, render frames and sparse event trace; no sampled stage timers |
+| `mode=cpu` | Counters plus sampled CPU/JIT/HLE phase wall time |
+| `mode=render` | Counters plus sampled GXM/renderer/Vulkan stage wall time |
+| `mode=auto` | **Default**: both groups; random ~1/32 stopwatch samples |
+| `mode=deep` | Both groups; random ~1/8 stopwatch samples plus render-begin and per-batch events |
+| `legacy_csv=on` | Also run old profiler: six older files, frequent synchronous writes and more overhead |
 
-- `elapsed_ms`: since this TraceLab session began
-- `thread_slot`: TraceLab producer slot, **not** a kernel/guest TID
-- `metric`: stable diagnostic metric name
-- `calls`, `bytes`: exact counter totals for the interval if the slot
-  is registered (byte counts are approximate source/work ranges for some stages)
-- `sampled_calls`: stopwatch samples contributing to the following durations
-- `sampled_wall_ms`: total elapsed **wall-clock** for the measured subset
-- `estimated_wall_ms`: sampled wall sum scaled by calls/sample count;
-  per-metric extrapolation only, **not additive**
-- `max_sampled_us`: maximum sampled elapsed time
+The configuration is independent of the launcher's regenerated `config.yml`.
+Start with `auto` and `legacy_csv=off`. Do **not** use `deep` for FPS
+comparison; it has more overhead. For recording old per-core CPU tick and
+fine-grain render phase CSVs, run a separate session with `legacy_csv=on`.
+Never compare different profiler modes as if they were identical hardware loads.
 
-`frames.csv` records the render loop’s completion cadence. It is **not**
-PS Vita simulated FPS, independent GXM frame count, Vulkan GPU execution time,
-or physical display scanout. The existing `frame-events` and `lsfg-state`
-logs help distinguish these events. TraceLab marks source-side long render
-intervals of at least 66 ms.
+## What is recorded
 
-The binary `trace.bin` begins with `TLABv1\0\0`, little-endian schema
-version 1, record size (24), and the ARM counter frequency. Each record has
-`tick:u64, correlation:u32, value:u32, kind:u16, thread_slot:u16, reserved:u32`.
-Event types: render begin/end, GXM new-frame command, batch consumed,
-sampled HLE NID+elapsed microseconds, 66ms render-loop stall, shader
-pipeline compiled, JIT cache recycled. The buffer is bounded, never
-holds a file lock in a hot thread, and reports dropped events. The trace
-records do **not** pair GXM scenes and GPU submissions one-to-one.
+TraceLab measures these categories: Dynarmic JIT Run and code-cache recycling;
+sampled HLE calls grouped by NID; Guest scheduling acquisition/yield; GXM
+front-end Draw and uniform/state preparation; command pool and batch handling;
+texture lookups, hashing, hash changed/unchanged/scene-reused outcomes, uploads;
+index scans and vertex binds; External Host cache clean/flush byte ranges;
+descriptor set resolve/update/bind; pipeline lookup and worker compilation;
+Vulkan queue submit/present; render loop timing; and the collector's own CPU
+side polling cost.
 
-The 1 Hz collector performs all SD writing on the Switch frontend/main
-thread; renderer, shader and guest threads only update per-producer counters
-and append to single-producer bounded rings. The `collector_poll` metric
-tracks sampled collector wall cost. Dropped-event counts, trace size and
-missing collector snapshots should be used to assess profiler quality.
+New counters for texture hash outcomes are **observational only**: the cache
+invalidation, hashing, GPU sync and upload behavior remain unchanged.
 
-## Analysis on PC
+`threads.csv` additionally captures available Horizon **total CPU tick**
+deltas from in-thread checkpoints, rather than relying on the known-unreliable
+per-core percentages. A label identifies guest, render, frontend, or shader
+worker when available. CPU times may miss up to the final checkpoint period
+and cannot independently separate HLE waiting from actual computation.
 
-Requires Node.js (no npm packages):
+### A complete session directory
+
+After *normal exit*, look under
+`sdmc:/switch/vita3k/logs/tracelab-<TITLE>-<epoch>-<run>/`:
+
+```text
+manifest.json      schema=2, modes, timebase, frame counts, overflow flags
+hotspots.csv       ~1 Hz counter and random-sampled stopwatch snapshots
+frames.csv         independently recorded render-loop completion timestamps
+nid-samples.csv    sampled HLE NIDs aggregated in RAM by producer thread
+threads.csv        self CPU total tick checkpoints for each producer
+trace.bin          sparse binary events, sorted by CPU tick on normal exit
+summary.json       full-session metric totals and sample tick sums
+```
+
+**No files are written by TraceLab while the game is running.** File creation,
+CSV formatting and `fwrite` happen during normal exit and may be slow on a
+slow TF card. This trade-off preserves gameplay measurement fidelity.
+**A crash or forced HOME exit may lose the entire in-RAM TraceLab session.**
+Legacy CSVs, if enabled, have their old write/flush behavior.
+
+### Bounded RAM usage and data integrity
+
+TraceLab bounds its allocation sizes (per-session, not continually growing):
+
+- Up to 64 registered producer slots.
+- Up to 1024 pending events per slot; up to 65,536 preserved trace events
+  (~1.5 MiB of binary trace payload).
+- Up to 32,768 independently recorded render-loop completions
+  (~512 KiB in RAM, about 22 minutes at 25/s).
+- Up to 32,768 metric-window rows (compact in-memory records).
+- Up to 128 distinct sampled NIDs per producer; rare overflow is explicitly counted.
+
+`manifest.json` records `frames_overflow`, `events_dropped`,
+`window_rows_overflow` and `nid_samples_overflow`. If nonzero, report the
+lost coverage rather than inventing a complete percentile or hotspot ranking.
+
+The RenderEnd timestamp now goes into its **own fixed frame array**, not
+through the event queue. Missing non-frame trace events therefore do not
+silently produce huge fake frame intervals. Only frames beyond the declared
+frame array limit are omitted from `frames.csv`.
+
+### Interpreting measurements
+
+- `hotspots.csv` retains the v1 schema for compatibility; `thread_slot=0`
+  means the new RAM aggregator has **merged all producers** for that metric
+  in that time window. Exact per-thread CPU checkpoints are in `threads.csv`.
+- `estimated_wall_ms` of a 1-second row is meaningful only if
+  `sampled_calls > 0`. The PC analyzer now **pools samples across all selected
+  windows before extrapolating**, instead of summing zero-sample windows as zero.
+- Timings are CPU-side **wall time** and may include blocking, preemption or
+  driver waits. GXM, texture, and draw nested spans overlap; do not add them.
+- NID summary data is **full-session only**. A report with
+  `--start-ms/--end-ms` filters frame and hotspot windows but must still
+  label the HLE NID table as full-session.
+- Trace events contain GXM NewFrame commands, batch consumption, render-end,
+  long-frame markers, shader pipeline events and JIT cache recycling.
+  High-frequency HLE events are **not** emitted by default.
+- `render_loop` is not simulated PSV FPS, independent unique game frames,
+  or physical panel scanout. GPU execution timestamp is **unmeasured**.
+- The collector's `collector_poll` metric now covers RAM aggregation only;
+  output writes occur after measurement ends.
+
+## PC analysis
+
+Requires Node.js but no npm dependencies:
 
 ```sh
 node scripts/analyze-switch-tracelab.mjs ./tracelab-PCSD00035-... \
@@ -104,37 +131,30 @@ node scripts/analyze-switch-tracelab.mjs ./tracelab-PCSD00035-... \
   --html report.html --trace-json events.json > report.json
 ```
 
-`report.json` ranks per-metric sampled wall-cost estimates, includes
-the render-loop P50/P95/P99 intervals and records trace quality flags.
-The optional `events.json` can be opened in Chrome tracing-compatible
-viewers; the trace converter uses a common CPU clock origin and preserves
-the thread-slot ID.
+The analyzer supports **old schema v1** traces as well, using contiguous
+frame IDs to filter missing-event gaps. For v2 it reports pooled hotspot
+estimates, independent frame interval statistics, aggregated NID samples
+(full session), and thread CPU checkpoint data.
 
-**Data integrity:** The generated logs do not prove GPU inactivity. GPU
-timestamps are explicitly marked `unmeasured` until the NVK queue-families’
-timestamp validity and asynchronous query retrieval are validated. The
-existing Horizon per-core CPU tick reports can disagree with kernel total
-ticks; treat them cautiously. Use the existing `cpu-threads` total tick/self
-checkpoint reports for CPU-run-time context, never subtract them from wall
-time and label the remainder pure scheduler waiting.
+## First validation run
 
-## Reproducibility / debugging limitations
+1. Build/deploy the updated debug NRO, using the same Vulkan/NVK backend.
+2. Start with `mode=auto`, `legacy_csv=off` and LSFG disabled.
+3. Warm the shader cache; measure 90–120 seconds in a repeatable heavy scene.
+4. Exit the game normally and allow the TF card to finish saving.
+5. Verify `frames_overflow=0`, `events_dropped=0` or near zero,
+   `window_rows_overflow=0`, and that `frames.csv` IDs are continuous.
+6. Check that `collector_poll` elapsed time is significantly lower than
+   the earlier 175 ms sampled average from the SD-writing collector.
+7. Re-run using `mode=off` (also with `legacy_csv=off`) to estimate the
+   remaining TraceLab runtime impact on source-frame cadence.
 
-- Keep the same title, save, scene/camera route, resolution, clock, driver,
-  thermal/power mode, shader cache warmness and LSFG setting for A/B tests.
-- Compare **the same TraceLab mode** (especially not `deep` against `off`).
-  A separate `off` recording within the same instrumented build helps
-  quantify overhead. Release+LTO remains necessary for final FPS decisions.
-- TraceLab is not a complete guest PC sampler, Vulkan GPU timer, fault-based
-  page-write tracker or kernel scheduler trace. It supplies correlations and
-  actionable counters; a measured hotspot may still block in a driver call.
-- High-frequency HLE samples store NIDs, not addresses or raw payloads. 
-  No per-Draw text logging or SD writes are performed in the hot path.
-- Abnormal exits can leave incomplete files or lose the most recent
-  unflushed rows. There is a maximum of 64 producer slots and 64 MiB
-  trace payload per session; excess data is counted as dropped.
-- For deeper Vulkan profiling, a separate timestamp experiment is needed;
-  do not claim a GPU utilization percentage from these diagnostics.
+Once the diagnostic fidelity is validated, examine `texture_hash_unchanged`,
+`texture_hash_changed` and `texture_hash_scene_reused` alongside
+`texture_hash` and `dcache_clean` bytes/time. A high unchanged ratio can
+motivate a **separate** cache-version tracking experiment, but it does not
+by itself make it safe to remove memory coherence operations.
 
-See `docs/switch-steady-state-diagnostics.md` for meanings of the legacy
-six CSV files.
+This change does not include experimental GPU timestamps, asynchronous
+network streaming, unsafe cache-skipping optimizations or new scheduler
+affinity rules.

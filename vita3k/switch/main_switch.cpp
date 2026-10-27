@@ -1489,6 +1489,7 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
     do {
         relaunch_requested = false;
         tracelab::Session trace_session(launch_request.app_path.c_str());
+        tracelab::tag_thread("frontend");
         tracelab::metadata("backend", emuenv->cfg.current_config.backend_renderer.c_str());
         SwitchCpuProfileSession cpu_profile(launch_request.app_path.c_str());
         SwitchFrameHost frame_host(nwindow);
