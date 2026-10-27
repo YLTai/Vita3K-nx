@@ -307,7 +307,7 @@ void reset_command_list(CommandList &command_list) {
 static void render_loop(renderer::State &state, DisplayState &display, GxmState &gxm, MemState &mem, Config &config) {
     // Rendering is sustained work, so use core 3's preemptive priority rather
     // than the higher priorities reserved for short hardware helper threads.
-    switch_pin_to_hardware_priority("render thread", 63);
+    switch_pin_render_thread("render thread");
     SwitchCpuProfileThread cpu_profile("render");
 
     if (state.precompile_requested) {
