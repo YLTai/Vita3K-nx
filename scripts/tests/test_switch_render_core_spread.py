@@ -21,6 +21,20 @@ assert "BACKGROUND_PRIORITY = 63;" in impl
 assert "GUEST_PRIORITY_HIGHEST = 45;" in impl
 assert "GUEST_PRIORITY_LOWEST = 56;" in impl
 assert "ALL_CORE_MASK = 0b1111u;" in impl
+# Core-3 preference is a scheduling hint, never an exclusive pin.
+assert "option(SWITCH_RENDER_PREFER_CORE3" in cmake
+assert "VITA3K_SWITCH_RENDER_PREFER_CORE3=1" in cmake
+assert "#ifdef VITA3K_SWITCH_RENDER_PREFER_CORE3" in body
+assert "svcSetThreadCoreMask(CUR_THREAD_HANDLE, 3, ALL_CORE_MASK)" in body
+assert body.index("svcSetThreadPriority(") < body.index(
+    "svcSetThreadCoreMask(CUR_THREAD_HANDLE, 3, ALL_CORE_MASK)"
+), "lower priority before enabling preferred core"
+assert body.index("svcSetThreadCoreMask(CUR_THREAD_HANDLE, 3, ALL_CORE_MASK)") < body.index(
+    "svcSetThreadCoreMask(CUR_THREAD_HANDLE, IDEAL_CORE_DONT_CARE, ALL_CORE_MASK)"
+), "failed preferred-core request must retry the existing unbiased policy"
+assert "if (R_SUCCEEDED(preferred_rc))" in body
+assert 'switch_pin_to_hardware_priority(what, BACKGROUND_PRIORITY);' in body
+
 assert "svcSetThreadPriority(CUR_THREAD_HANDLE, BACKGROUND_PRIORITY)" in body
 assert "svcSetThreadCoreMask(CUR_THREAD_HANDLE, IDEAL_CORE_DONT_CARE, ALL_CORE_MASK)" in body
 assert body.index("svcSetThreadPriority(") < body.index("svcSetThreadCoreMask("), (
