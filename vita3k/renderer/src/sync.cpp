@@ -31,6 +31,10 @@
 
 #include <renderer/functions.h>
 #include <util/tracy.h>
+#ifdef __SWITCH__
+#include <switch/arm/counter.h>
+#include <util/switch_thread.h>
+#endif
 
 namespace renderer {
 static void wait_for_submitted_work(State &state) {
@@ -54,11 +58,18 @@ static void wait_for_submitted_work(State &state) {
         while (!state.render_abort.load(std::memory_order_relaxed)
             && !vk_state.device_lost.load(std::memory_order_acquire)) {
             vk::Result result;
+#ifdef __SWITCH__
+            const uint64_t wait_start = armGetSystemTick();
+#endif
             try {
                 result = vk_state.device.waitForFences(frame.rendered_fences, VK_TRUE, 100'000'000ULL);
             } catch (const vk::SystemError &) {
                 result = vk::Result::eErrorDeviceLost;
             }
+#ifdef __SWITCH__
+            switch_cpu_profile_render_phase(SwitchCpuProfilePhase::VkSubmittedFenceWait,
+                wait_start, armGetSystemTick());
+#endif
             if (result == vk::Result::eSuccess)
                 break;
             if (result == vk::Result::eTimeout)
@@ -74,8 +85,17 @@ static void wait_for_submitted_work(State &state) {
 COMMAND(handle_nop) {
     TRACY_FUNC_COMMANDS(handle_nop);
     int code_to_finish = helper.pop<int>();
-    if (helper.pop<bool>())
+    if (helper.pop<bool>()) {
+#ifdef __SWITCH__
+        const uint64_t wait_start = armGetSystemTick();
+#endif
         wait_for_submitted_work(renderer);
+#ifdef __SWITCH__
+        // Includes any Vulkan fence waits plus the surrounding helper logic.
+        switch_cpu_profile_render_phase(SwitchCpuProfilePhase::GxmNopCompletionWait,
+            wait_start, armGetSystemTick());
+#endif
+    }
 
     // An aborted waiter may already have released its status storage.
     const std::lock_guard<std::mutex> lock(renderer.command_finish_one_mutex);
@@ -103,6 +123,9 @@ COMMAND(handle_wait_sync_object) {
     const uint32_t timestamp = helper.pop<uint32_t>();
 
 #ifdef __SWITCH__
+    // Unlike process_batches' outer readiness test, this is a blocking wait
+    // INSIDE a GXM command handler. It is part of opcode execution wall time.
+    const uint64_t sync_wait_start = armGetSystemTick();
     // Guest threads are suspended while the quick menu is open, so nothing can
     // signal this object. Give the wait up while paused so the render thread can
     // draw the menu; the guest resubmits on resume.
@@ -111,6 +134,8 @@ COMMAND(handle_wait_sync_object) {
             || renderer.render_abort.load(std::memory_order_relaxed))
             break;
     }
+    switch_cpu_profile_render_phase(SwitchCpuProfilePhase::GxmCommandSyncWait,
+        sync_wait_start, armGetSystemTick());
 #else
     renderer::wishlist(sync, timestamp);
 #endif

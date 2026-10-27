@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 
 // Do not include <switch.h> here: its Mutex and Semaphore names collide with
 // Vita3K kernel types. The implementation owns the libnx dependency.
@@ -46,9 +47,24 @@ enum class SwitchCpuProfilePhase : uint8_t {
     BatchQueueWait, BatchSyncWait, BatchCommandExecution,
     VkQueueMutexWait, VkQueueSubmit, VkQueuePresent,
     SwapchainAcquire, SwapchainFenceWait, VkOneTimeSubmitWait,
-    Count
+    GxmCommandSyncWait, GxmNopCompletionWait, VkSubmittedFenceWait,
+    GxmStopRecording, Count
 };
 void switch_cpu_profile_render_phase(SwitchCpuProfilePhase phase, uint64_t begin_tick, uint64_t end_tick);
+
+// Exact opcode call counts; hot Draw/SetState durations are sampled every 16
+// calls. Counters are local to the render thread until merged once per
+// process_batches() invocation, avoiding per-command shared atomics.
+constexpr size_t SWITCH_CPU_OPCODE_COUNT = 20;
+struct SwitchCpuOpcodeStats {
+    uint64_t calls = 0;
+    uint64_t sampled_calls = 0;
+    uint64_t sampled_ticks = 0;
+    uint64_t sampled_max_ticks = 0;
+    uint64_t sampled_over_16ms = 0;
+    uint64_t sampled_over_33ms = 0;
+};
+void switch_cpu_profile_opcode_merge(const SwitchCpuOpcodeStats *stats, size_t count);
 // Stage values 0..7 correspond to LsfgNxDebugStage in lsfg_bridge.h.
 void switch_cpu_profile_lsfg_stage(uint32_t stage, uint64_t begin_tick, uint64_t end_tick);
 void switch_cpu_profile_lsfg_state(bool requested, bool compatible, bool passthrough);
@@ -112,6 +128,7 @@ inline SwitchCpuProfileSession::SwitchCpuProfileSession(const char *) {}
 inline SwitchCpuProfileSession::~SwitchCpuProfileSession() {}
 inline void SwitchCpuProfileSession::poll() {}
 inline void switch_cpu_profile_render_phase(SwitchCpuProfilePhase, uint64_t, uint64_t) {}
+inline void switch_cpu_profile_opcode_merge(const SwitchCpuOpcodeStats *, size_t) {}
 inline void switch_cpu_profile_lsfg_stage(uint32_t, uint64_t, uint64_t) {}
 inline void switch_cpu_profile_lsfg_state(bool, bool, bool) {}
 inline void switch_cpu_profile_lsfg_generated(uint32_t) {}
