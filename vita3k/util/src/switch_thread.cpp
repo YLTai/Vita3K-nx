@@ -702,6 +702,21 @@ SwitchCpuProfileSession::SwitchCpuProfileSession(const char *title_id) {
         LOG_WARN("[cpu-profile] Could not open GXM opcode CSV under {}", dir);
     }
 
+    char fine_path[192]{};
+    std::snprintf(fine_path, sizeof(fine_path),
+        "%s/gxm-state-draw-%s-%lld-%llu.csv", dir, safe_id, epoch,
+        static_cast<unsigned long long>(index));
+    cpu_profile_fine_file = std::fopen(fine_path, "w");
+    if (cpu_profile_fine_file) {
+        std::fputs("elapsed_ms,metric_id,metric,measurement,calls,sampled_calls,"
+            "sampled_wall_ms,estimated_total_wall_ms,avg_sampled_wall_ms,"
+            "max_sampled_wall_ms,sampled_over_16_7ms,sampled_over_33_3ms\n",
+            cpu_profile_fine_file);
+        LOG_WARN("[cpu-profile] GXM state and Vulkan Draw detail CSV: {}", fine_path);
+    } else {
+        LOG_WARN("[cpu-profile] Could not open GXM state/Draw detail CSV under {}", dir);
+    }
+
     cpu_profile_reset_phases();
     cpu_profile_session_tick = armGetSystemTick();
     cpu_profile_next_tick.store(cpu_profile_session_tick +
@@ -751,6 +766,64 @@ void switch_cpu_profile_opcode_merge(const SwitchCpuOpcodeStats *stats, size_t c
             !dst.sampled_max_ticks.compare_exchange_weak(old_max, source.sampled_max_ticks,
                 std::memory_order_relaxed)) {}
     }
+}
+
+// Called only from the render thread, with a lightweight PRNG instead of
+// sampling every Nth command. Fixed periodic sampling could accidentally
+// measure the same state in every repeated multi-pass frame.
+bool switch_cpu_profile_fine_sample() {
+    if (!cpu_profile_enabled.load(std::memory_order_relaxed))
+        return false;
+    thread_local uint32_t random_state =
+        static_cast<uint32_t>(armGetSystemTick()) | 1u;
+    random_state ^= random_state << 13;
+    random_state ^= random_state >> 17;
+    random_state ^= random_state << 5;
+    return (random_state & 15u) == 0u;
+}
+
+void switch_cpu_profile_fine_record(SwitchCpuFineMetric metric, bool sampled, uint64_t sampled_ticks) {
+    if (!cpu_profile_enabled.load(std::memory_order_relaxed))
+        return;
+    const size_t index = static_cast<size_t>(metric);
+    if (index >= cpu_fine_local.size())
+        return;
+    auto &stats = cpu_fine_local[index];
+    ++stats.calls;
+    if (!sampled)
+        return;
+    ++stats.sampled_calls;
+    stats.sampled_ticks += sampled_ticks;
+    if (sampled_ticks > stats.sampled_max_ticks)
+        stats.sampled_max_ticks = sampled_ticks;
+    if (sampled_ticks > armGetSystemTickFreq() / 60)
+        ++stats.sampled_over_16ms;
+    if (sampled_ticks > armGetSystemTickFreq() / 30)
+        ++stats.sampled_over_33ms;
+}
+
+void switch_cpu_profile_fine_flush() {
+    if (!cpu_profile_enabled.load(std::memory_order_relaxed)) {
+        cpu_fine_local.fill({});
+        return;
+    }
+    const std::lock_guard<std::mutex> lock(cpu_fine_snapshot_mutex);
+    for (size_t i = 0; i < cpu_fine_local.size(); ++i) {
+        const auto &source = cpu_fine_local[i];
+        if (!source.calls)
+            continue;
+        auto &dst = cpu_profile_fine[i];
+        dst.calls.fetch_add(source.calls, std::memory_order_relaxed);
+        dst.sampled_calls.fetch_add(source.sampled_calls, std::memory_order_relaxed);
+        dst.sampled_ticks.fetch_add(source.sampled_ticks, std::memory_order_relaxed);
+        dst.sampled_over_16ms.fetch_add(source.sampled_over_16ms, std::memory_order_relaxed);
+        dst.sampled_over_33ms.fetch_add(source.sampled_over_33ms, std::memory_order_relaxed);
+        u64 old_max = dst.sampled_max_ticks.load(std::memory_order_relaxed);
+        while (source.sampled_max_ticks > old_max &&
+            !dst.sampled_max_ticks.compare_exchange_weak(old_max, source.sampled_max_ticks,
+                std::memory_order_relaxed)) {}
+    }
+    cpu_fine_local.fill({});
 }
 
 void switch_cpu_profile_render_phase(
