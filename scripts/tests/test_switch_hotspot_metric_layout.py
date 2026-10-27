@@ -59,6 +59,9 @@ assert "i >= static_cast<size_t>(SwitchCpuFineMetric::DescBindSkipped)" in impl
 # The OFF reference must still bind all descriptor sets and dynamic offsets.
 assert "option(SWITCH_DESCRIPTOR_BIND_CACHE" in cmake
 assert "VITA3K_SWITCH_DISABLE_DESCRIPTOR_BIND_CACHE=1" in cmake
+assert "SWITCH_RENDER_HOTPATH_DIAGNOSTICS" in cmake
+assert "VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS=1" in cmake
+assert "defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)" in scene
 assert "defined(VITA3K_SWITCH_DISABLE_DESCRIPTOR_BIND_CACHE)" in scene
 assert "DescBindUnconditional" in scene
 assert "dynamic_offset_count, dynamic_offsets.data()" in scene
