@@ -56,7 +56,7 @@ void switch_cpu_profile_lsfg_generated(uint32_t frames);
 // An inexpensive timestamped event; queued in RAM and written by the 1 Hz frontend poll.
 // Event names must be string literals (their pointers remain valid until the next poll).
 void switch_cpu_profile_frame_event(const char *name, uint64_t value = 0);
-void switch_cpu_profile_lsfg_begin_session(const char *safe_title_id, int64_t epoch, uint64_t session);
+void switch_cpu_profile_lsfg_begin_session(const char *safe_title_id, int64_t epoch, uint64_t session, uint64_t origin_tick);
 void switch_cpu_profile_lsfg_poll(double elapsed_ms, bool final_sample);
 void switch_cpu_profile_lsfg_end_session();
 
@@ -116,7 +116,7 @@ inline void switch_cpu_profile_lsfg_stage(uint32_t, uint64_t, uint64_t) {}
 inline void switch_cpu_profile_lsfg_state(bool, bool, bool) {}
 inline void switch_cpu_profile_lsfg_generated(uint32_t) {}
 inline void switch_cpu_profile_frame_event(const char *, uint64_t) {}
-inline void switch_cpu_profile_lsfg_begin_session(const char *, int64_t, uint64_t) {}
+inline void switch_cpu_profile_lsfg_begin_session(const char *, int64_t, uint64_t, uint64_t) {}
 inline void switch_cpu_profile_lsfg_poll(double, bool) {}
 inline void switch_cpu_profile_lsfg_end_session() {}
 inline void switch_pin_to_app_cores(const char *) {}
