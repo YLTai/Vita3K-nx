@@ -33,6 +33,9 @@ enum class Metric : uint8_t {
     TextureSceneEpochRewind, TextureSceneEpochCollision,
     TextureHashAggressiveSkipped, TextureHashAggressiveAudits,
     TextureHashAggressiveQuarantines, TextureHashAggressiveUnverified,
+    GuestJitFastWrites, GuestJitTexturePageWrites,
+    GuestJitSlowWrites, GuestJitSlowTexturePageWrites,
+    GuestTexturePagesRegistered,
     Count
 };
 enum class Event : uint16_t {
@@ -64,6 +67,20 @@ void unsafe_texture_hash_recheck_unverified();
 // Independent, read-only interval used to classify would-be Hash skips.
 // Diagnostic classifications never change cache/hash validity.
 uint32_t texture_hash_probe_interval();
+// Optional, read-only per-title ARM64 JIT experiment.
+// 0: compile original JIT stores; 1: count successful fast stores;
+// 2: also count fast stores whose starting 4 KiB page has EVER been
+// sampled as a texture during this title. Not a safe dirty tracker.
+// Per-Jit counters are updated ONLY by that JIT and flushed after Run.
+struct GuestWriteCounters {
+    uint64_t fast = 0;
+    uint64_t ever_texture_page = 0;
+};
+uint32_t guest_write_probe_mode();
+const uint8_t *guest_write_probe_texture_pages();
+void guest_write_probe_mark_texture(uint64_t guest_address, uint64_t size);
+bool guest_write_probe_page_is_texture(uint32_t guest_address);
+void count_many(Metric metric, uint64_t calls);
 void unsafe_texture_hash_audit_mismatch();
 void unsafe_texture_hash_audit_incomplete();
 void begin_session(const char *title_id);
@@ -110,6 +127,15 @@ inline uint32_t unsafe_texture_hash_recheck_interval() { return 0; }
 inline void unsafe_texture_hash_recheck_mismatch() {}
 inline void unsafe_texture_hash_recheck_unverified() {}
 inline uint32_t texture_hash_probe_interval() { return 0; }
+struct GuestWriteCounters {
+    uint64_t fast = 0;
+    uint64_t ever_texture_page = 0;
+};
+inline uint32_t guest_write_probe_mode() { return 0; }
+inline const uint8_t *guest_write_probe_texture_pages() { return nullptr; }
+inline void guest_write_probe_mark_texture(uint64_t, uint64_t) {}
+inline bool guest_write_probe_page_is_texture(uint32_t) { return false; }
+inline void count_many(Metric, uint64_t) {}
 inline void unsafe_texture_hash_audit_mismatch() {}
 inline void unsafe_texture_hash_audit_incomplete() {}
 inline void begin_session(const char *) {}

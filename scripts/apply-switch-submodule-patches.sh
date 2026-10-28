@@ -43,6 +43,18 @@ apply_one "external/concurrentqueue" \
 apply_one "external/dynarmic" \
     "dynarmic-switch.patch" \
     "86458a0bd369d63ba4c2ef812cacbb6c9080c065"
+
+# The original Switch patch has already dirtied this submodule. Apply the
+# additive write-probe experiment separately, without running apply_one's
+# clean-tree guard again. The reverse check preserves idempotency.
+write_probe_patch="$PATCH_DIR/dynarmic-switch-write-probe.patch"
+if git -C "$ROOT/external/dynarmic" apply --reverse --check "$write_probe_patch" >/dev/null 2>&1; then
+    printf 'already applied: dynarmic write probe\n'
+else
+    git -C "$ROOT/external/dynarmic" apply --check "$write_probe_patch"
+    git -C "$ROOT/external/dynarmic" apply "$write_probe_patch"
+    printf 'applied: dynarmic write probe\n'
+fi
 apply_one "external/ffmpeg" \
     "ffmpeg-switch.patch" \
     "02f4f2691b0efffff8923235baf146a87fc37263"

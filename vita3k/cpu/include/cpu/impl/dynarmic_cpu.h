@@ -23,6 +23,9 @@
 #include <atomic>
 
 #include <cpu/impl/interface.h>
+#ifdef __SWITCH__
+#include <util/switch_tracelab.h>
+#endif
 
 #include <memory>
 #include <vector>
@@ -46,6 +49,13 @@ class DynarmicCPU : public CPUInterface {
 #ifdef __SWITCH__
     // Set by the watchdog before it halts this core; read once the halt lands.
     std::atomic<bool> preempt_release_core{ false };
+
+    // Only this JIT's owner thread mutates these words, via generated A64
+    // STRs. The host reads/flushed them after Jit::Run has returned.
+    tracelab::GuestWriteCounters write_probe_counters_{};
+    uint64_t write_probe_last_fast_ = 0;
+    uint64_t write_probe_last_texture_ = 0;
+    void flush_write_probe();
 #endif
     bool break_ = false;
 

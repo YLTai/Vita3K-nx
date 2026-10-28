@@ -1,0 +1,97 @@
+diff --git a/src/dynarmic/interface/A32/config.h b/src/dynarmic/interface/A32/config.h
+--- a/src/dynarmic/interface/A32/config.h
++++ b/src/dynarmic/interface/A32/config.h
+@@ -162,8 +162,17 @@
+     /// Note: page_table[addr >> bits] will still be checked to verify active pages.
+     ///       So there might be wrongly faulted pages which maps to nullptr.
+     ///       This can be avoided by carefully allocating the memory region.
+     bool absolute_offset_page_table = false;
++
++#ifdef __SWITCH__
++    // Diagnostic-only JIT-generated STR counters. When null (the default)
++    // no extra instructions are emitted for normal memory writes.
++    // Counters belong to the single thread executing this JIT.
++    std::uint64_t* switch_write_probe_total = nullptr;
++    std::uint64_t* switch_write_probe_texture = nullptr;
++    const std::uint8_t* switch_write_probe_pages = nullptr;
++#endif
+     /// Masks out the first N bits in host pointers from the page table.
+     /// The intention behind this is to allow users of Dynarmic to pack attributes in the
+     /// same integer and update the pointer attribute pair atomically.
+     /// If the configured value is 3, all pointers will be forcefully aligned to 8 bytes.
+diff --git a/src/dynarmic/backend/arm64/emit_arm64.h b/src/dynarmic/backend/arm64/emit_arm64.h
+--- a/src/dynarmic/backend/arm64/emit_arm64.h
++++ b/src/dynarmic/backend/arm64/emit_arm64.h
+@@ -127,8 +127,14 @@
+     size_t page_table_address_space_bits;
+     int page_table_pointer_mask_bits;
+     bool silently_mirror_page_table;
+     bool absolute_offset_page_table;
++
++#ifdef __SWITCH__
++    u64* switch_write_probe_total = nullptr;
++    u64* switch_write_probe_texture = nullptr;
++    const u8* switch_write_probe_pages = nullptr;
++#endif
+     u8 detect_misaligned_access_via_page_table;
+     bool only_detect_misalignment_via_page_table_on_page_boundary;
+ 
+     // Fastmem
+diff --git a/src/dynarmic/backend/arm64/a32_address_space.cpp b/src/dynarmic/backend/arm64/a32_address_space.cpp
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -384,8 +384,13 @@
+         .page_table_address_space_bits = 32,
+         .page_table_pointer_mask_bits = conf.page_table_pointer_mask_bits,
+         .silently_mirror_page_table = true,
+         .absolute_offset_page_table = conf.absolute_offset_page_table,
++#ifdef __SWITCH__
++        .switch_write_probe_total = conf.switch_write_probe_total,
++        .switch_write_probe_texture = conf.switch_write_probe_texture,
++        .switch_write_probe_pages = conf.switch_write_probe_pages,
++#endif
+         .detect_misaligned_access_via_page_table = conf.detect_misaligned_access_via_page_table,
+         .only_detect_misalignment_via_page_table_on_page_boundary = conf.only_detect_misalignment_via_page_table_on_page_boundary,
+ 
+         .fastmem_pointer = conf.fastmem_pointer,
+diff --git a/src/dynarmic/backend/arm64/emit_arm64_memory.cpp b/src/dynarmic/backend/arm64/emit_arm64_memory.cpp
+--- a/src/dynarmic/backend/arm64/emit_arm64_memory.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64_memory.cpp
+@@ -462,8 +462,37 @@
+ 
+     const auto [Xbase, Xoffset] = InlinePageTableEmitVAddrLookup<bitsize>(code, ctx, Xaddr, fallback);
+     EmitMemoryStr<bitsize>(code, Rvalue->index(), Xbase, Xoffset, ordered);
+ 
++#ifdef __SWITCH__
++    // Successful A32 inline page-table store: use a per-JIT plain u64 counter,
++    // never an expensive cross-thread atomic or a C++ callback per STR.
++    // Callback-only/unmapped writes are counted separately by Vita3K.
++    if (ctx.conf.switch_write_probe_total) {
++        code.MOV(Xscratch0, mcl::bit_cast<u64>(ctx.conf.switch_write_probe_total));
++        code.LDR(Xscratch1, Xscratch0);
++        code.ADD(Xscratch1, Xscratch1, 1);
++        code.STR(Xscratch1, Xscratch0);
++
++        if (ctx.conf.switch_write_probe_texture && ctx.conf.switch_write_probe_pages) {
++            // The bitmap is monotonic during one title: one byte per 4 KiB
++            // guest page, 4 GiB address space. Only the starting page is
++            // classified (cross-page stores are not distinguished here).
++            oaknut::Label untracked;
++            code.UBFX(Xscratch1, Xaddr, 12, 20);
++            code.MOV(Xscratch0, mcl::bit_cast<u64>(ctx.conf.switch_write_probe_pages));
++            code.ADD(Xscratch0, Xscratch0, Xscratch1);
++            code.LDRB(Wscratch1, Xscratch0);
++            code.CBZ(Wscratch1, untracked);
++            code.MOV(Xscratch0, mcl::bit_cast<u64>(ctx.conf.switch_write_probe_texture));
++            code.LDR(Xscratch1, Xscratch0);
++            code.ADD(Xscratch1, Xscratch1, 1);
++            code.STR(Xscratch1, Xscratch0);
++            code.l(untracked);
++        }
++    }
++#endif
++
+     ctx.deferred_emits.emplace_back([&code, &ctx, inst, Xaddr = *Xaddr, Rvalue = *Rvalue, ordered, fallback, end] {
+         code.l(*fallback);
+         if constexpr (bitsize == 128) {
+             code.MOV(Xscratch0, Xaddr);

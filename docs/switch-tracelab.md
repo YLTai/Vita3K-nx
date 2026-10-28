@@ -137,6 +137,100 @@ estimates, independent frame interval statistics, aggregated NID samples
 (full session), and thread CPU checkpoint data.
 
 
+## Dynarmic ARM64 Guest write-count experiment (safe Hash, 1 NRO)
+
+The `PCSD00035` heavy scene previously spent ~9.7 ms/render loop
+on full texture Hash. The intentionally unsafe 64-use skip trial
+improved throughput by ~13%, but revealed content mismatches.
+This new experiment measures **whether a software write barrier would eat
+that potential gain** without relying on stale texture data.
+
+**Important:** All three runs use the SAME NRO with FULL Hash.
+The write-count experiment automatically sets both
+`unsafe_texture_hash_recheck_interval` and
+`unsafe_texture_hash_skip_interval` to zero when enabled, even if a
+previously-used `64` value is left in the config. Keep both at zero
+for the baseline as well.
+
+Save this common config to `sdmc:/switch/vita3k/tracelab.cfg`:
+
+```ini
+mode=auto
+legacy_csv=off
+texture_hash_probe_interval=0
+unsafe_texture_hash_skip_interval=0
+unsafe_texture_hash_recheck_interval=0
+guest_write_probe=off
+```
+
+Change **only the last value**, restart the same game, and replay the
+same heavy scene and duration:
+
+| Mode | `guest_write_probe` | Dynarmic JIT work |
+| --- | --- | --- |
+| A | `off` | Original fast page-table STR instructions, **no extra JIT instructions** |
+| B | `count` | Count successful direct-JIT stores with a per-JIT non-atomic u64 counter |
+| C | `texture` | Same total counter **plus** one bitmap lookup and a separate counter if the starting 4 KiB page has ever been used as a texture in this session |
+
+The 4 GiB Guest address space uses a **1 MiB monotonic byte-per-page map**
+(1,048,576 × 4 KiB), allocated only in C mode. TextureCache
+registers pages **only on cache misses**, avoiding an O(texture_size)
+walk on every draw. A page remains registered even after the texture
+is evicted. The C-mode count is therefore an approximate *upper bound*
+on CPU writes to currently relevant texture pages, not a live dirty
+tracker or evidence that the texture contents changed.
+
+The new instrumentation is in
+`patches/submodules/dynarmic-switch-write-probe.patch`.
+It only modifies the ARM64 page-table write fast path on Switch and
+emits the extra instructions at JIT compilation **only when enabled**.
+Callback-only and exclusive Guest writes are counted separately by
+Vita3K's existing slow-path memory callbacks. Fast-path counts use
+plain per-JIT counters, flushed to per-thread RAM aggregates only when
+`jit->Run()`/`jit->Step()` returns. No SD writes occur during gameplay.
+
+The following metrics are available in `hotspots.csv`, `summary.json`,
+and the PC `guest_write_probe` analysis object:
+
+| Metric | What it counts |
+| --- | --- |
+| `guest_jit_fast_writes` | Successful native page-table Guest STR operations |
+| `guest_jit_texture_page_writes` | Fast writes whose **starting page** is in the ever-texture-page bitmap |
+| `guest_jit_slow_writes` | Successful callback/fallback/exclusive Guest writes |
+| `guest_jit_slow_texture_page_writes` | Callback writes to a registered texture page |
+| `guest_texture_pages_registered` | Unique pages ever marked by a texture cache miss |
+
+The manifest records `guest_write_probe_mode` (0/1/2)
+and `guest_write_probe_texture_pages` (number of distinct registered pages).
+Since mode A deliberately does not instrument Guest stores, its
+write-count values are zero **by design**, not evidence the CPU did not
+write memory.
+
+### Interpretation and limitations
+
+Compare 100–170 seconds of the *same* `PCSD00035` heavy scene with
+unchanged clocks, save state, rendering settings, LSFG and shader cache.
+Measure A → B to estimate the cost of **counting all Guest writes** and
+B → C to estimate the extra cost of **checking texture page relevance**.
+Use frame-time P50/P95/P99, render loops per second, JIT code cache
+recycles, and the write counts per render loop. Do not treat these as
+real display FPS or a controlled CPU microbenchmark.
+
+**Do not use these counters to skip Hash**: HLE pointer writes, GPU
+shader/surface writes and aliased-memory invalidations are not tracked
+by this experiment. A 64/128-bit unaligned store may cross a page
+boundary; only its first page is classified. In addition, JIT
+callback slow-path stores may be attempted on unmapped ranges; the
+slow count records only successfully completed stores. Out-of-range
+guest descriptors are ignored when registering texture pages.
+
+If C is expensive, a targeted/once-dirty JIT barrier is still possible,
+but requires a *different* design and complete HLE/GPU coherence before
+it can replace full Hash. The current experiment intentionally makes
+**zero cache correctness decisions**.
+
+---
+
 ## Aggressive cross-scene hash reuse A/B (UNSAFE; intended for heavy scenes)
 
 The measured PCSD00035 heavy scene has roughly **nine scene boundaries per

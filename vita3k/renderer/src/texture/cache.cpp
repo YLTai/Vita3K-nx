@@ -739,6 +739,13 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
         if (info->texture_size > 0 && !is_valid_addr_range(mem, gxm_texture.data_addr << 2, (gxm_texture.data_addr << 2) + info->texture_size))
             info->texture_size = gxm::texture_size_first_mip(gxm_texture);
 #ifdef __SWITCH__
+        // Ever-observed texture input pages, not an authoritative writable/
+        // active page set. Mark only on LRU cache misses (never per draw);
+        // the JIT checks this monotonic guest-page bitmap in probe mode 2.
+        // Palettes, HLE pointer writes, GPU writes and aliased memory are
+        // outside this read-only experiment.
+        tracelab::guest_write_probe_mark_texture(
+            uint64_t{gxm_texture.data_addr} << 2, info->texture_size);
         // A miss cannot benefit from an already-warmed cache slot. Retain
         // the count and byte range to test LRU churn in heavy scenes.
         if (tracelab::texture_hash_probe_interval())

@@ -15,6 +15,8 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <memory>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
@@ -54,7 +56,10 @@ constexpr std::array<const char *, kMetrics> kNames = {
     "texture_scene_boundary", "texture_scene_context_switch",
     "texture_scene_epoch_rewind", "texture_scene_epoch_collision",
     "texture_hash_aggressive_skipped", "texture_hash_aggressive_audits",
-    "texture_hash_aggressive_quarantines", "texture_hash_aggressive_unverified"
+    "texture_hash_aggressive_quarantines", "texture_hash_aggressive_unverified",
+    "guest_jit_fast_writes", "guest_jit_texture_page_writes",
+    "guest_jit_slow_writes", "guest_jit_slow_texture_page_writes",
+    "guest_texture_pages_registered"
 };
 static_assert(kNames.size() == kMetrics);
 
@@ -131,6 +136,9 @@ struct Options {
     bool legacy_csv = false;
     uint32_t unsafe_hash_skip_interval = 0;
     uint32_t unsafe_recheck_interval = 0;
+    // 0: no JIT instructions, 1: count fast stores, 2: count + ever-texture
+    // page lookup. The probe never changes actual guest RAM or Hash validity.
+    uint32_t guest_write_probe = 0;
     // Probe-only classification: zero disables reason counters, not hashing.
     uint32_t hash_probe_interval = 8;
 };
@@ -158,6 +166,11 @@ std::atomic<bool> aggressive_mismatch_seen{false};
 std::atomic<bool> aggressive_unverified_seen{false};
 uint32_t aggressive_requested_interval = 0;
 std::atomic<uint32_t> hash_probe_interval{0};
+constexpr uint32_t kGuestPageCount = 1u << 20; // 4 GiB / 4 KiB
+static_assert(sizeof(std::atomic<uint8_t>) == sizeof(uint8_t));
+std::unique_ptr<std::atomic<uint8_t>[]> guest_texture_pages;
+std::atomic<uint32_t> guest_write_probe_setting{0};
+std::atomic<uint32_t> guest_texture_page_count{0};
 std::atomic<bool> unsafe_hash_skip_mismatch{false};
 std::atomic<bool> unsafe_hash_skip_incomplete{false};
 uint32_t unsafe_hash_skip_requested = 0;
@@ -223,6 +236,10 @@ Options read_options() {
             else if (value == "8") opt.hash_probe_interval = 8;
             else if (value == "16") opt.hash_probe_interval = 16;
             else if (value == "32") opt.hash_probe_interval = 32;
+        } else if (key == "guest_write_probe") {
+            if (value == "count") opt.guest_write_probe = 1;
+            else if (value == "texture") opt.guest_write_probe = 2;
+            else opt.guest_write_probe = 0;
         } else if (key == "unsafe_texture_hash_recheck_interval") {
             // Alternative count-based experiment, independent of scene gaps.
             // Invalid input disables this deliberately risky setting.
@@ -514,6 +531,8 @@ bool export_session(uint64_t final_tick) {
             legacy_csv.load(std::memory_order_relaxed) ? "true" : "false",
             static_cast<unsigned long long>(frequency()), to_ms(final_tick - origin_tick));
         std::fprintf(file,
+            "  \"guest_write_probe_mode\": %u,\n"
+            "  \"guest_write_probe_texture_pages\": %u,\n"
             "  \"texture_hash_probe_interval\": %u,\n"
             "  \"unsafe_texture_hash_recheck_requested_interval\": %u,\n"
             "  \"unsafe_texture_hash_recheck_final_interval\": %u,\n"
@@ -523,6 +542,8 @@ bool export_session(uint64_t final_tick) {
             "  \"unsafe_texture_hash_skip_final_interval\": %u,\n"
             "  \"unsafe_texture_hash_audit_mismatch_detected\": %s,\n"
             "  \"unsafe_texture_hash_audit_incomplete\": %s,\n",
+            guest_write_probe_setting.load(std::memory_order_relaxed),
+            guest_texture_page_count.load(std::memory_order_relaxed),
             hash_probe_interval.load(std::memory_order_relaxed),
             aggressive_requested_interval,
             unsafe_recheck_interval.load(std::memory_order_relaxed),
@@ -582,6 +603,34 @@ void unsafe_texture_hash_recheck_unverified() {
 uint32_t texture_hash_probe_interval() {
     return hash_probe_interval.load(std::memory_order_relaxed);
 }
+uint32_t guest_write_probe_mode() {
+    return guest_write_probe_setting.load(std::memory_order_relaxed);
+}
+const uint8_t *guest_write_probe_texture_pages() {
+    return guest_write_probe_mode() == 2
+        ? reinterpret_cast<const uint8_t *>(guest_texture_pages.get()) : nullptr;
+}
+bool guest_write_probe_page_is_texture(uint32_t guest_address) {
+    if (guest_write_probe_mode() != 2 || !guest_texture_pages) return false;
+    return guest_texture_pages[guest_address >> 12].load(std::memory_order_relaxed) != 0;
+}
+void guest_write_probe_mark_texture(uint64_t address, uint64_t size) {
+    if (guest_write_probe_mode() != 2 || !guest_texture_pages || !size
+        || !address || address >= (uint64_t{1} << 32)
+        || size > (uint64_t{1} << 32) - address) return;
+    uint64_t newly_registered = 0;
+    const uint64_t first_page = address >> 12;
+    const uint64_t last_page = (address + size - 1) >> 12;
+    for (uint64_t page = first_page; page <= last_page; ++page) {
+        if (guest_texture_pages[page].exchange(1, std::memory_order_relaxed) == 0)
+            ++newly_registered;
+    }
+    if (newly_registered) {
+        guest_texture_page_count.fetch_add(static_cast<uint32_t>(newly_registered),
+            std::memory_order_relaxed);
+        count_many(Metric::GuestTexturePagesRegistered, newly_registered);
+    }
+}
 void unsafe_texture_hash_audit_mismatch() {
     // Disable the experiment globally for the rest of this game session.
     // The already skipped textures may have rendered stale content.
@@ -599,6 +648,14 @@ bool active(Domain domain) {
     // Light collects cheap counters for all domains, but does not sample time.
     (void)domain;
     return current_mode.load(std::memory_order_relaxed) != Mode::Off;
+}
+
+void count_many(Metric metric, uint64_t times) {
+    if (!times) return;
+    auto *slot = thread_slot();
+    if (!slot) return;
+    slot->metrics[static_cast<size_t>(metric)].calls.fetch_add(times,
+        std::memory_order_relaxed);
 }
 
 void count(Metric metric, uint64_t bytes) {
@@ -719,13 +776,30 @@ void begin_session(const char *title_id) {
     end_session();
     const auto options = read_options();
     legacy_csv.store(options.legacy_csv, std::memory_order_release);
+    uint32_t write_probe = options.mode == Mode::Off ? 0 : options.guest_write_probe;
+    if (write_probe == 2) {
+        if (!guest_texture_pages)
+            guest_texture_pages.reset(new (std::nothrow) std::atomic<uint8_t>[kGuestPageCount]{});
+        if (!guest_texture_pages) {
+            LOG_WARN("[tracelab] guest write texture-page bitmap allocation failed; using count-only mode");
+            write_probe = 1;
+        } else {
+            for (uint32_t i = 0; i < kGuestPageCount; ++i)
+                guest_texture_pages[i].store(0, std::memory_order_relaxed);
+        }
+    }
+    guest_texture_page_count.store(0, std::memory_order_relaxed);
+    guest_write_probe_setting.store(write_probe, std::memory_order_release);
     // An "off" diagnostic mode cannot silently enable unmonitored
     // inaccurate texture reuse. The experiment also requires a TraceLab
     // build, so normal release binaries always use full hashing.
-    const uint32_t aggressive_interval = options.mode == Mode::Off
+    // Write count A/B must preserve the original complete Hash behaviour.
+    // If an old unsafe_texture_hash_recheck_interval=64 is still in cfg,
+    // enabling the new probe automatically disarms it for this title.
+    const uint32_t aggressive_interval = options.mode == Mode::Off || write_probe
         ? 0 : options.unsafe_recheck_interval;
     aggressive_requested_interval = aggressive_interval;
-    const uint32_t opt_in_interval = options.mode == Mode::Off
+    const uint32_t opt_in_interval = options.mode == Mode::Off || write_probe
         || aggressive_interval != 0 ? 0 : options.unsafe_hash_skip_interval;
     unsafe_hash_skip_requested = opt_in_interval;
     unsafe_hash_skip_mismatch.store(false, std::memory_order_relaxed);
@@ -785,6 +859,8 @@ void begin_session(const char *title_id) {
         LOG_WARN("[tracelab] UNSAFE texture hash skipping enabled: may briefly render stale textures; audit interval={} scenes", opt_in_interval);
     if (aggressive_interval)
         LOG_WARN("[tracelab] AGGRESSIVE UNSAFE texture hashing: verify once per {} cached uses. A stale texture can render for several frames; changed textures are quarantined individually.", aggressive_interval);
+    if (write_probe)
+        LOG_WARN("[tracelab] guest JIT write probe={} (1=count,2=count+ever-texture pages); FULL texture hashing is forced", write_probe);
 }
 
 void poll() {

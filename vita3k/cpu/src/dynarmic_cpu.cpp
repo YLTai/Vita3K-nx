@@ -410,6 +410,13 @@ public:
         }
 
         *host = value;
+#ifdef __SWITCH__
+        if (tracelab::guest_write_probe_mode()) {
+            tracelab::count(tracelab::Metric::GuestJitSlowWrites);
+            if (tracelab::guest_write_probe_page_is_texture(addr))
+                tracelab::count(tracelab::Metric::GuestJitSlowTexturePageWrites);
+        }
+#endif
         if (cpu->log_mem) {
             LOG_TRACE("Write uint{}_t at addr: 0x{:x}, val = 0x{:x}", sizeof(T) * 8, addr, value);
         }
@@ -447,6 +454,15 @@ public:
         }
 
         auto result = Ptr<T>(addr).atomic_compare_and_swap(*parent->mem, value, expected);
+#ifdef __SWITCH__
+        // Exclusive writes currently use callback-only Dynarmic code even
+        // when the normal page-table store is JIT inlined.
+        if (result && tracelab::guest_write_probe_mode()) {
+            tracelab::count(tracelab::Metric::GuestJitSlowWrites);
+            if (tracelab::guest_write_probe_page_is_texture(addr))
+                tracelab::count(tracelab::Metric::GuestJitSlowTexturePageWrites);
+        }
+#endif
         if (cpu->log_mem) {
             LOG_TRACE("Write uint{}_t at addr: 0x{:x}, val = 0x{:x}, expected = 0x{:x}", sizeof(T) * 8, addr, value, expected);
         }
@@ -678,6 +694,17 @@ std::unique_ptr<Dynarmic::A32::Jit> DynarmicCPU::make_jit() {
     if (parent->mem->use_page_table) {
         config.page_table = (log_mem || !cpu_opt) ? nullptr : reinterpret_cast<decltype(config.page_table)>(parent->mem->page_table.get());
         config.absolute_offset_page_table = true;
+#ifdef __SWITCH__
+        // The session options are loaded before any guest JIT is created.
+        // Mode=off leaves these null and emits the original A64 fast path.
+        if (config.page_table && tracelab::guest_write_probe_mode()) {
+            config.switch_write_probe_total = &write_probe_counters_.fast;
+            if (tracelab::guest_write_probe_mode() == 2) {
+                config.switch_write_probe_texture = &write_probe_counters_.ever_texture_page;
+                config.switch_write_probe_pages = tracelab::guest_write_probe_texture_pages();
+            }
+        }
+#endif
     } else if (!log_mem && cpu_opt) {
         config.fastmem_pointer = std::bit_cast<uintptr_t>(parent->mem->memory.get());
     }
@@ -751,6 +778,24 @@ DynarmicCPU::~DynarmicCPU() = default;
 // of equal priority never runs. The watchdog halts such a thread here; the
 // return to the host yields, or sleeps, and hands the core over.
 constexpr int64_t PREEMPT_RELEASE_NS = 100'000;
+
+void DynarmicCPU::flush_write_probe() {
+    // Runs on the same CPU thread, ONLY after its generated code has stopped.
+    // The JIT never needs an atomic increment for each guest memory store.
+    const uint64_t all = write_probe_counters_.fast;
+    if (all > write_probe_last_fast_) {
+        tracelab::count_many(tracelab::Metric::GuestJitFastWrites,
+            all - write_probe_last_fast_);
+        write_probe_last_fast_ = all;
+    }
+    const uint64_t textures = write_probe_counters_.ever_texture_page;
+    if (textures > write_probe_last_texture_) {
+        tracelab::count_many(tracelab::Metric::GuestJitTexturePageWrites,
+            textures - write_probe_last_texture_);
+        write_probe_last_texture_ = textures;
+    }
+}
+
 void DynarmicCPU::preempt(const bool release_core) {
     preempt_release_core.store(release_core, std::memory_order_relaxed);
     jit->HaltExecution(Dynarmic::HaltReason::UserDefined7);
@@ -768,6 +813,8 @@ int DynarmicCPU::run() {
             halt_reason = jit->Run();
         }
 #ifdef __SWITCH__
+        if (tracelab::guest_write_probe_mode())
+            flush_write_probe();
         maybe_grow_code_cache();
         // A preemption request carries no other meaning, so it is consumed here
         // and never reaches the thread loop. Anything else raised alongside it -
@@ -795,6 +842,10 @@ int DynarmicCPU::run() {
 int DynarmicCPU::step() {
     parent->svc_called = false;
     jit->Step();
+#ifdef __SWITCH__
+    if (tracelab::guest_write_probe_mode())
+        flush_write_probe();
+#endif
     return 0;
 }
 

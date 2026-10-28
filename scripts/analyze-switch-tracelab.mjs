@@ -250,6 +250,35 @@ async function main() {
         disclaimer: 'Aggressive reuse-count hash skipping is NOT safe without complete guest CPU/HLE/GPU write tracking; audits detect some stale results only after display.'
     };
 
+    const guestWrite = manifest.guest_write_probe_mode === undefined ? {
+        available: false,
+        explanation: 'Older TraceLab recording has no JIT store experiment.'
+    } : (() => {
+        const fast = getCalls('guest_jit_fast_writes');
+        const tracked = getCalls('guest_jit_texture_page_writes');
+        const slow = getCalls('guest_jit_slow_writes');
+        const slowTracked = getCalls('guest_jit_slow_texture_page_writes');
+        const total = fast + slow;
+        const textureRelated = tracked + slowTracked;
+        return {
+            available: true,
+            mode: manifest.guest_write_probe_mode,
+            mode_name: ['off', 'count', 'texture'][manifest.guest_write_probe_mode] ?? 'unknown',
+            successful_fast_stores: fast,
+            successful_callback_stores: slow,
+            successful_all_counted_stores: total,
+            fast_stores_to_ever_texture_pages: tracked,
+            callback_stores_to_ever_texture_pages: slowTracked,
+            ever_texture_pages_registered: getCalls('guest_texture_pages_registered'),
+            ever_texture_pages_final: manifest.guest_write_probe_texture_pages,
+            related_store_fraction: total ? textureRelated / total : null,
+            writes_per_render_loop: measuredLoops ? total / measuredLoops : null,
+            texture_related_writes_per_render_loop: measuredLoops
+                ? textureRelated / measuredLoops : null,
+            caveat: 'Only guest JIT CPU stores are counted; ordinary stores use native JIT inline increments, fallback and exclusive stores use the C++ slow-path count. Texture-page membership is monotonic during the title (ever seen); it is NOT a page-dirty/coherence tracker and ignores HLE, GPU, aliases, palette-only inputs and the end page of cross-page stores. Off mode is the exact original JIT path.'
+        };
+    })();
+
     const report = {
         title: manifest.title,
         measurement: 'Render loop intervals, not physical display scans or game simulation FPS',
@@ -260,6 +289,7 @@ async function main() {
         texture_hash_experiment: experiment,
         texture_hash_probe: probe,
         texture_hash_aggressive: aggressive,
+        guest_write_probe: guestWrite,
         hle_nids_scope: nidWindow,
         threads,
         trace: {
@@ -276,6 +306,16 @@ async function main() {
     console.log(JSON.stringify(report, null, 2));
 
     if (htmlPath) {
+        const guestWriteHtml = guestWrite.available
+            ? `<h2>Guest JIT write-barrier cost experiment (complete texture Hash)</h2>
+<p>Probe mode: <b>${escapeHtml(guestWrite.mode_name)}</b>;
+fast stores: ${guestWrite.successful_fast_stores};
+callback/exclusive stores: ${guestWrite.successful_callback_stores};
+stores to ever-texture pages: ${guestWrite.fast_stores_to_ever_texture_pages + guestWrite.callback_stores_to_ever_texture_pages};
+unique texture pages: ${guestWrite.ever_texture_pages_final};
+writes per render loop: ${guestWrite.writes_per_render_loop === null ? 'n/a' : guestWrite.writes_per_render_loop.toFixed(1)}.</p>
+<small>${escapeHtml(guestWrite.caveat)}</small>`
+            : '';
         const probeRows = probe.available ? Object.entries(probe.reasons)
             .sort((a,b) => b[1].calls - a[1].calls)
             .map(([name,v]) => `<tr><td>${escapeHtml(name)}</td><td>${v.calls}</td><td>${v.bytes}</td></tr>`)
@@ -299,6 +339,7 @@ P50/P95/P99 intervals: ${frameStats.p50_ms?.toFixed(2) ?? 'n/a'} /
 ${frameStats.p95_ms?.toFixed(2) ?? 'n/a'} /
 ${frameStats.p99_ms?.toFixed(2) ?? 'n/a'} ms.</p>
 <p>Trace events dropped: ${manifest.events_dropped}; frame-ID gaps: ${frameIdGaps}; GPU timestamps: ${escapeHtml(manifest.gpu_timestamps)}.</p>
+${guestWriteHtml}
 <h2>Aggressive reuse-count Hash experiment (UNSAFE)</h2>
 <p>Requested every-Nth-check interval: ${aggressive.requested_interval || 'off'};
 skipped full hashes: ${aggressive.skipped_full_hashes};
