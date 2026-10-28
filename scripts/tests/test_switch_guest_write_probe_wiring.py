@@ -22,7 +22,7 @@ doc = (ROOT / "docs/switch-tracelab.md").read_text()
 patch = p.read_text()
 
 for key in ("switch_write_probe_total", "switch_write_probe_texture",
-            "switch_write_probe_pages"):
+            "switch_write_probe_pages", "switch_write_probe_taint"):
     assert key in a32_cfg, key + " missing UserConfig"
     assert key in arm_cfg, key + " missing EmitConfig"
     assert key in a32, key + " missing A32 config forwarding"
@@ -37,21 +37,35 @@ probe_pos = main.index("if (ctx.conf.switch_write_probe_total) {")
 fallback_pos = main.index("ctx.deferred_emits.emplace_back", store_pos)
 assert store_pos < probe_pos < fallback_pos
 assert "code.UBFX(Xscratch1, Xaddr, 12, 20)" in main
-assert "code.CBZ(Wscratch1, untracked)" in main
+assert "code.CBZ(Wscratch0, untracked)" in main
+assert "code.STLRB(Wscratch1, Xscratch0)" in main
+assert "ctx.conf.switch_write_probe_taint" in main
+assert "if (ctx.conf.switch_write_probe_pages &&" in main
 assert "code.l(untracked)" in main
 assert "mcl::bit_cast<u64>(ctx.conf.switch_write_probe_total)" in main
 
 # Uninstrumented runs never set the JIT counter pointer and can use the
 # exact original guest page-table STR path. Counted runs don't skip Hash.
-assert "if (config.page_table && tracelab::guest_write_probe_mode())" in cpu
+assert "if (config.page_table) {" in cpu
+assert "if (probe_mode == 1 || probe_mode == 2)" in cpu
+assert "else if (probe_mode == 3)" in cpu
 assert "config.switch_write_probe_total = &write_probe_counters_.fast;" in cpu
 assert "flush_write_probe();" in cpu
 assert "tracelab::count_many(tracelab::Metric::GuestJitSlowWrites" not in cpu
 assert "tracelab::guest_write_probe_mark_texture(" in cache
+assert "tracelab::guest_write_guard_range_tainted(" in cache
+assert "TextureHashGuardBlocked" in cache
+assert "tracelab::guest_write_guard_note_callback_write(" in cpu
+assert "config.switch_write_probe_taint =" in cpu
 assert trace.count('if (value == "count") opt.guest_write_probe = 1;') == 1
 assert trace.count('else if (value == "texture") opt.guest_write_probe = 2;') == 1
-assert "const uint32_t aggressive_interval = options.mode == Mode::Off || write_probe" in trace
-assert "const uint32_t opt_in_interval = options.mode == Mode::Off || write_probe" in trace
+assert trace.count('else if (value == "guard") opt.guest_write_probe = 3;') == 1
+assert "guest_write_guard_tainted_pages" in trace
+assert "guest_write_guard_range_tainted(" in trace
+assert "const bool requested_guard_failed =" in trace
+assert "options.guest_write_probe == 3 && write_probe != 3" in trace
+assert "|| requested_guard_failed ? 0 : options.unsafe_recheck_interval" in trace
+assert "|| options.guest_write_probe != 0 || aggressive_interval != 0" in trace
 assert "uint64_t* switch_write_probe_total" not in cpu
 
 # The counter names must remain in sync with the exported layout.
@@ -67,12 +81,14 @@ for name, label in {
     "GuestJitSlowWrites": "guest_jit_slow_writes",
     "GuestJitSlowTexturePageWrites": "guest_jit_slow_texture_page_writes",
     "GuestTexturePagesRegistered": "guest_texture_pages_registered",
+    "TextureHashGuardBlocked": "texture_hash_guard_blocked",
 }.items():
     assert name in enum_names, name
     assert labels[enum_names.index(name)] == label, name
     assert name in trace_h and label in trace, name
 
 assert "guest_write_probe=off" in doc
+assert "guest_write_probe=guard" in doc
 assert "guest_write_probe_mode" in trace
 assert "guest_write_probe_texture_pages" in trace
-print("Guest JIT write-count probe wiring OK (off/count/texture, full Hash).")
+print("Guest JIT write / sticky guard wiring OK (off/count/texture/guard; no default skip).")

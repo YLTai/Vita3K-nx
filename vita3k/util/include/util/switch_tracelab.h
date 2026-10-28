@@ -35,7 +35,7 @@ enum class Metric : uint8_t {
     TextureHashAggressiveQuarantines, TextureHashAggressiveUnverified,
     GuestJitFastWrites, GuestJitTexturePageWrites,
     GuestJitSlowWrites, GuestJitSlowTexturePageWrites,
-    GuestTexturePagesRegistered,
+    GuestTexturePagesRegistered, TextureHashGuardBlocked,
     Count
 };
 enum class Event : uint16_t {
@@ -80,6 +80,11 @@ uint32_t guest_write_probe_mode();
 const uint8_t *guest_write_probe_texture_pages();
 void guest_write_probe_mark_texture(uint64_t guest_address, uint64_t size);
 bool guest_write_probe_page_is_texture(uint32_t guest_address);
+// Experimental guard: sticky JIT-CPU-written status for texture pages.
+// Not a proof that HLE/GPU writes were seen; never enable it by default.
+uint8_t *guest_write_probe_tainted_pages();
+void guest_write_guard_note_callback_write(uint32_t guest_address, uint32_t size);
+bool guest_write_guard_range_tainted(uint64_t guest_address, uint64_t size);
 void count_many(Metric metric, uint64_t calls);
 void unsafe_texture_hash_audit_mismatch();
 void unsafe_texture_hash_audit_incomplete();
@@ -135,6 +140,9 @@ inline uint32_t guest_write_probe_mode() { return 0; }
 inline const uint8_t *guest_write_probe_texture_pages() { return nullptr; }
 inline void guest_write_probe_mark_texture(uint64_t, uint64_t) {}
 inline bool guest_write_probe_page_is_texture(uint32_t) { return false; }
+inline uint8_t *guest_write_probe_tainted_pages() { return nullptr; }
+inline void guest_write_guard_note_callback_write(uint32_t, uint32_t) {}
+inline bool guest_write_guard_range_tainted(uint64_t, uint64_t) { return false; }
 inline void count_many(Metric, uint64_t) {}
 inline void unsafe_texture_hash_audit_mismatch() {}
 inline void unsafe_texture_hash_audit_incomplete() {}

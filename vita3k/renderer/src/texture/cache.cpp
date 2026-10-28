@@ -903,16 +903,31 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
                     && texture::should_skip_by_reuse_count(
                         info->hash_throttle, memo_scene, aggressive_interval)
                     && valid_hash_range()) {
-                    // Unlike the scene-epoch gate, this skips up to N-1
-                    // *uses* after a confirmed stable hash. A full hash on
-                    // the Nth use audits even if the scene gap was >8.
-                    // This intentionally risks showing stale texture data.
-                    experimental_skip = true;
-                    texture::note_aggressive_hash_skip(info->hash_throttle);
-                    tracelab::count(tracelab::Metric::TextureHashAggressiveSkipped,
-                        info->texture_size);
-                    tracelab::count(tracelab::Metric::TextureHashUnsafeSkipped,
-                        info->texture_size);
+                    // Experimental mode "guard": a texture whose guest pages
+                    // have EVER been written by the JIT after texture
+                    // registration is NEVER eligible for hash skipping.
+                    // Other textures still use the normal N-use audit policy.
+                    // This is NOT complete guest/HLE/GPU coherence tracking.
+                    // A P4/P8 texture also depends on separate palette
+                    // memory, which the guest-page bitmap does not watch.
+                    // Keep these in full-hash mode when the guard is active.
+                    const bool guard_palette = tracelab::guest_write_probe_mode() == 3
+                        && gxm::is_paletted_format(gxm::get_base_format(
+                            gxm::get_format(gxm_texture)));
+                    const bool jit_guard_blocked = guard_palette
+                        || tracelab::guest_write_guard_range_tainted(
+                            uint64_t{gxm_texture.data_addr} << 2, info->texture_size);
+                    if (jit_guard_blocked) {
+                        tracelab::count(tracelab::Metric::TextureHashGuardBlocked,
+                            info->texture_size);
+                    } else {
+                        experimental_skip = true;
+                        texture::note_aggressive_hash_skip(info->hash_throttle);
+                        tracelab::count(tracelab::Metric::TextureHashAggressiveSkipped,
+                            info->texture_size);
+                        tracelab::count(tracelab::Metric::TextureHashUnsafeSkipped,
+                            info->texture_size);
+                    }
                 } else if (unsafe_interval && ordinary_texture
                     && texture::should_throttle_hash(info->hash_throttle,
                         memo_scene, unsafe_interval)

@@ -411,7 +411,10 @@ public:
 
         *host = value;
 #ifdef __SWITCH__
-        if (tracelab::guest_write_probe_mode()) {
+        const uint32_t probe_mode = tracelab::guest_write_probe_mode();
+        if (probe_mode == 3) {
+            tracelab::guest_write_guard_note_callback_write(addr, sizeof(T));
+        } else if (probe_mode) {
             tracelab::count(tracelab::Metric::GuestJitSlowWrites);
             if (tracelab::guest_write_probe_page_is_texture(addr))
                 tracelab::count(tracelab::Metric::GuestJitSlowTexturePageWrites);
@@ -457,10 +460,15 @@ public:
 #ifdef __SWITCH__
         // Exclusive writes currently use callback-only Dynarmic code even
         // when the normal page-table store is JIT inlined.
-        if (result && tracelab::guest_write_probe_mode()) {
-            tracelab::count(tracelab::Metric::GuestJitSlowWrites);
-            if (tracelab::guest_write_probe_page_is_texture(addr))
-                tracelab::count(tracelab::Metric::GuestJitSlowTexturePageWrites);
+        if (result) {
+            const uint32_t probe_mode = tracelab::guest_write_probe_mode();
+            if (probe_mode == 3) {
+                tracelab::guest_write_guard_note_callback_write(addr, sizeof(T));
+            } else if (probe_mode) {
+                tracelab::count(tracelab::Metric::GuestJitSlowWrites);
+                if (tracelab::guest_write_probe_page_is_texture(addr))
+                    tracelab::count(tracelab::Metric::GuestJitSlowTexturePageWrites);
+            }
         }
 #endif
         if (cpu->log_mem) {
@@ -697,11 +705,19 @@ std::unique_ptr<Dynarmic::A32::Jit> DynarmicCPU::make_jit() {
 #ifdef __SWITCH__
         // The session options are loaded before any guest JIT is created.
         // Mode=off leaves these null and emits the original A64 fast path.
-        if (config.page_table && tracelab::guest_write_probe_mode()) {
-            config.switch_write_probe_total = &write_probe_counters_.fast;
-            if (tracelab::guest_write_probe_mode() == 2) {
+        if (config.page_table) {
+            const uint32_t probe_mode = tracelab::guest_write_probe_mode();
+            if (probe_mode == 1 || probe_mode == 2)
+                config.switch_write_probe_total = &write_probe_counters_.fast;
+            if (probe_mode == 2) {
                 config.switch_write_probe_texture = &write_probe_counters_.ever_texture_page;
                 config.switch_write_probe_pages = tracelab::guest_write_probe_texture_pages();
+            } else if (probe_mode == 3) {
+                // Guard is intentionally different from diagnostic count:
+                // do NOT insert a global per-store increment on 1.8M
+                // normal guest stores per Render Loop.
+                config.switch_write_probe_pages = tracelab::guest_write_probe_texture_pages();
+                config.switch_write_probe_taint = tracelab::guest_write_probe_tainted_pages();
             }
         }
 #endif

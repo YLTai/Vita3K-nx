@@ -263,7 +263,7 @@ async function main() {
         return {
             available: true,
             mode: manifest.guest_write_probe_mode,
-            mode_name: ['off', 'count', 'texture'][manifest.guest_write_probe_mode] ?? 'unknown',
+            mode_name: ['off', 'count', 'texture', 'guard'][manifest.guest_write_probe_mode] ?? 'unknown',
             successful_fast_stores: fast,
             successful_callback_stores: slow,
             successful_all_counted_stores: total,
@@ -271,11 +271,16 @@ async function main() {
             callback_stores_to_ever_texture_pages: slowTracked,
             ever_texture_pages_registered: getCalls('guest_texture_pages_registered'),
             ever_texture_pages_final: manifest.guest_write_probe_texture_pages,
+            guard_tainted_pages_at_exit: manifest.guest_write_guard_tainted_pages ?? 0,
+            guard_full_hash_checks_forced: getCalls('texture_hash_guard_blocked'),
+            guard_full_hash_bytes_forced: getBytes('texture_hash_guard_blocked'),
             related_store_fraction: total ? textureRelated / total : null,
             writes_per_render_loop: measuredLoops ? total / measuredLoops : null,
             texture_related_writes_per_render_loop: measuredLoops
                 ? textureRelated / measuredLoops : null,
-            caveat: 'Only guest JIT CPU stores are counted; ordinary stores use native JIT inline increments, fallback and exclusive stores use the C++ slow-path count. Texture-page membership is monotonic during the title (ever seen); it is NOT a page-dirty/coherence tracker and ignores HLE, GPU, aliases, palette-only inputs and the end page of cross-page stores. Off mode is the exact original JIT path.'
+            caveat: manifest.guest_write_probe_mode === 3
+                ? 'UNSAFE JIT-only guard: there are NO global write counters in this mode. JIT stores to known texture pages set a sticky taint bit. Tainted textures use full Hash; untainted textures may still have changed due to HLE/GPU writes or aliases. Periodic audit mismatches remain possible.'
+                : 'Only guest JIT CPU stores are counted; ordinary stores use native JIT inline increments, fallback and exclusive stores use the C++ slow-path count. Texture-page membership is monotonic during the title (ever seen); it is NOT a page-dirty/coherence tracker and ignores HLE, GPU, aliases, palette-only inputs and the end page of cross-page stores. Off mode is the exact original JIT path.'
         };
     })();
 
@@ -313,7 +318,10 @@ fast stores: ${guestWrite.successful_fast_stores};
 callback/exclusive stores: ${guestWrite.successful_callback_stores};
 stores to ever-texture pages: ${guestWrite.fast_stores_to_ever_texture_pages + guestWrite.callback_stores_to_ever_texture_pages};
 unique texture pages: ${guestWrite.ever_texture_pages_final};
-writes per render loop: ${guestWrite.writes_per_render_loop === null ? 'n/a' : guestWrite.writes_per_render_loop.toFixed(1)}.</p>
+writes per render loop: ${guestWrite.writes_per_render_loop === null ? 'n/a' : guestWrite.writes_per_render_loop.toFixed(1)};
+sticky JIT-CPU-tainted pages: ${guestWrite.guard_tainted_pages_at_exit};
+Hash skip attempts blocked by taint: ${guestWrite.guard_full_hash_checks_forced};
+bytes forced back to full Hash: ${guestWrite.guard_full_hash_bytes_forced}.</p>
 <small>${escapeHtml(guestWrite.caveat)}</small>`
             : '';
         const probeRows = probe.available ? Object.entries(probe.reasons)

@@ -137,6 +137,83 @@ estimates, independent frame interval statistics, aggregated NID samples
 (full session), and thread CPU checkpoint data.
 
 
+## Direct optimization trial: JIT-CPU guarded texture reuse (UNSAFE)
+
+The PCSD00035 A/B/C logs from 2026-10-28 already answered the cost
+question. In the 100–170s heavy window, full-Hash render loops/second
+were 24.36 (JIT instrumentation OFF), 23.36 (count every Guest store),
+and 22.06 (count + texture-page lookup). Of ~2.835 **billion** direct JIT
+stores in C, only **611** landed on pages *ever* used as texture
+input during that heavy window (~0.000022%). Yet startup/menu periods
+showed millions of such writes.
+
+Rather than repeat three counter experiments, this is a **single new
+opt-in direct performance test**. Use the **same NRO** and the following
+config in `sdmc:/switch/vita3k/tracelab.cfg`:
+
+```ini
+mode=auto
+legacy_csv=off
+texture_hash_probe_interval=0
+unsafe_texture_hash_skip_interval=0
+unsafe_texture_hash_recheck_interval=64
+guest_write_probe=guard
+```
+
+`guard` differs from the old `texture` counting mode:
+
+- The JIT does **not** increment the global Guest-write counter.
+  It performs a lightweight page-membership lookup after each
+  successful direct Guest store; a store to a registered texture page
+  sets a **sticky one-byte taint** for that page using AArch64
+  release-store semantics. Guest fallback and exclusive writes set
+  the same taint through their existing callbacks.
+- Texture pages are registered only on cache misses (one byte per
+  4 KiB Guest page, 1 MiB table). The taint table is another 1 MiB.
+  Both tables are bounded RAM storage and reset on title startup.
+- A texture whose entire source range has remained **untainted by
+  observed JIT CPU writes** may still use the existing unsafe
+  every-64-uses Hash throttle. If **any** of its pages has a
+  sticky taint, every subsequent use performs the original full
+  Hash until the end of the title. No attempt is made to reset
+  the taint after that Hash. Palette P4/P8 textures always use full
+  Hash in guard mode, because the palette lives outside the watched
+  texture pixel range.
+- `texture_hash_guard_blocked` counts the opportunities in which
+  a tainted page forced a full Hash instead of a candidate skip.
+  `guest_write_guard_tainted_pages` in the manifest is the number
+  of unique tainted Guest pages at normal exit.
+- The original `off`/ `count`/ `texture` modes are preserved:
+  `off` is the original JIT path, and `count` / `texture`
+  still **force both unsafe Hash skipping knobs off**.
+
+The expected opportunity is to avoid the old `texture` mode's
+~9% heavy-scene slow-down from per-store counters while maintaining
+most of the ~13% speed-up measured with `64` alone. **This is a
+hypothesis, not a measured net speed-up.** There is no need to rerun
+the A/B/C counter experiment: make only **one new guard-mode run**,
+using the same warmed PCSD00035 save and scene, preferably logging
+100–170s and exiting normally. Compare this guard run with the
+existing A baseline (full Hash) and older 64-use trial (unsafe skip).
+Check both performance and visual behavior.
+
+**IMPORTANT — deliberately NOT lossless.** The JIT guard notices only
+successfully executed Guest CPU writes that it instruments, and only
+the starting page of fast-path stores. It does **not** trace all HLE
+pointer writes, GPU shader and surface writes, aliases, or palette-only
+inputs. A concurrent write/renderer race can also evade sampling without
+a complete synchronization protocol. The old 64-use post-fact audits
+still apply; a clean audit **cannot prove** that a skipped texture was
+unchanged. A black/flickering menu or any audit mismatch means this
+experimental mode is unsuitable for normal use. Keep these new
+behaviors OFF by default.
+
+To restore the original complete Hash behavior with the same NRO,
+set `guest_write_probe=off` and
+`unsafe_texture_hash_recheck_interval=0`.
+
+---
+
 ## Dynarmic ARM64 Guest write-count experiment (safe Hash, 1 NRO)
 
 The `PCSD00035` heavy scene previously spent ~9.7 ms/render loop
@@ -146,10 +223,12 @@ This new experiment measures **whether a software write barrier would eat
 that potential gain** without relying on stale texture data.
 
 **Important:** All three runs use the SAME NRO with FULL Hash.
-The write-count experiment automatically sets both
-`unsafe_texture_hash_recheck_interval` and
-`unsafe_texture_hash_skip_interval` to zero when enabled, even if a
-previously-used `64` value is left in the config. Keep both at zero
+The `count` and `texture` write-count experiments
+automatically set both `unsafe_texture_hash_recheck_interval` and
+`unsafe_texture_hash_skip_interval` to zero, even if an old `64`
+value is left in the config. The explicit `guard` mode described
+above is the sole exception: it intentionally allows unsafe counted
+Hash skipping, with additional CPU-JIT taint disqualification. Keep both at zero
 for the baseline as well.
 
 Save this common config to `sdmc:/switch/vita3k/tracelab.cfg`:
@@ -200,7 +279,7 @@ and the PC `guest_write_probe` analysis object:
 | `guest_jit_slow_texture_page_writes` | Callback writes to a registered texture page |
 | `guest_texture_pages_registered` | Unique pages ever marked by a texture cache miss |
 
-The manifest records `guest_write_probe_mode` (0/1/2)
+The manifest records `guest_write_probe_mode` (0/1/2/3)
 and `guest_write_probe_texture_pages` (number of distinct registered pages).
 Since mode A deliberately does not instrument Guest stores, its
 write-count values are zero **by design**, not evidence the CPU did not

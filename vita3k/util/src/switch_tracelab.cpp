@@ -59,7 +59,7 @@ constexpr std::array<const char *, kMetrics> kNames = {
     "texture_hash_aggressive_quarantines", "texture_hash_aggressive_unverified",
     "guest_jit_fast_writes", "guest_jit_texture_page_writes",
     "guest_jit_slow_writes", "guest_jit_slow_texture_page_writes",
-    "guest_texture_pages_registered"
+    "guest_texture_pages_registered", "texture_hash_guard_blocked"
 };
 static_assert(kNames.size() == kMetrics);
 
@@ -136,8 +136,9 @@ struct Options {
     bool legacy_csv = false;
     uint32_t unsafe_hash_skip_interval = 0;
     uint32_t unsafe_recheck_interval = 0;
-    // 0: no JIT instructions, 1: count fast stores, 2: count + ever-texture
-    // page lookup. The probe never changes actual guest RAM or Hash validity.
+    // 0: original JIT, 1: count all, 2: count + page lookup.
+    // 3: experimental sticky CPU-write guard on texture pages, no global
+    // per-store counter; permits the opted-in unsafe reuse-count throttle.
     uint32_t guest_write_probe = 0;
     // Probe-only classification: zero disables reason counters, not hashing.
     uint32_t hash_probe_interval = 8;
@@ -169,6 +170,7 @@ std::atomic<uint32_t> hash_probe_interval{0};
 constexpr uint32_t kGuestPageCount = 1u << 20; // 4 GiB / 4 KiB
 static_assert(sizeof(std::atomic<uint8_t>) == sizeof(uint8_t));
 std::unique_ptr<std::atomic<uint8_t>[]> guest_texture_pages;
+std::unique_ptr<std::atomic<uint8_t>[]> guest_tainted_pages;
 std::atomic<uint32_t> guest_write_probe_setting{0};
 std::atomic<uint32_t> guest_texture_page_count{0};
 std::atomic<bool> unsafe_hash_skip_mismatch{false};
@@ -239,6 +241,7 @@ Options read_options() {
         } else if (key == "guest_write_probe") {
             if (value == "count") opt.guest_write_probe = 1;
             else if (value == "texture") opt.guest_write_probe = 2;
+            else if (value == "guard") opt.guest_write_probe = 3;
             else opt.guest_write_probe = 0;
         } else if (key == "unsafe_texture_hash_recheck_interval") {
             // Alternative count-based experiment, independent of scene gaps.
@@ -533,6 +536,7 @@ bool export_session(uint64_t final_tick) {
         std::fprintf(file,
             "  \"guest_write_probe_mode\": %u,\n"
             "  \"guest_write_probe_texture_pages\": %u,\n"
+            "  \"guest_write_guard_tainted_pages\": %u,\n"
             "  \"texture_hash_probe_interval\": %u,\n"
             "  \"unsafe_texture_hash_recheck_requested_interval\": %u,\n"
             "  \"unsafe_texture_hash_recheck_final_interval\": %u,\n"
@@ -544,6 +548,14 @@ bool export_session(uint64_t final_tick) {
             "  \"unsafe_texture_hash_audit_incomplete\": %s,\n",
             guest_write_probe_setting.load(std::memory_order_relaxed),
             guest_texture_page_count.load(std::memory_order_relaxed),
+            [] {
+                if (guest_write_probe_setting.load(std::memory_order_relaxed) != 3
+                    || !guest_tainted_pages) return 0u;
+                uint32_t n = 0;
+                for (uint32_t page = 0; page < kGuestPageCount; ++page)
+                    n += guest_tainted_pages[page].load(std::memory_order_relaxed) != 0;
+                return n;
+            }(),
             hash_probe_interval.load(std::memory_order_relaxed),
             aggressive_requested_interval,
             unsafe_recheck_interval.load(std::memory_order_relaxed),
@@ -607,15 +619,44 @@ uint32_t guest_write_probe_mode() {
     return guest_write_probe_setting.load(std::memory_order_relaxed);
 }
 const uint8_t *guest_write_probe_texture_pages() {
-    return guest_write_probe_mode() == 2
+    const uint32_t mode = guest_write_probe_mode();
+    return mode == 2 || mode == 3
         ? reinterpret_cast<const uint8_t *>(guest_texture_pages.get()) : nullptr;
 }
+uint8_t *guest_write_probe_tainted_pages() {
+    return guest_write_probe_mode() == 3
+        ? reinterpret_cast<uint8_t *>(guest_tainted_pages.get()) : nullptr;
+}
 bool guest_write_probe_page_is_texture(uint32_t guest_address) {
-    if (guest_write_probe_mode() != 2 || !guest_texture_pages) return false;
+    if ((guest_write_probe_mode() != 2 && guest_write_probe_mode() != 3)
+        || !guest_texture_pages) return false;
     return guest_texture_pages[guest_address >> 12].load(std::memory_order_relaxed) != 0;
 }
+void guest_write_guard_note_callback_write(uint32_t address, uint32_t size) {
+    if (guest_write_probe_mode() != 3 || !guest_texture_pages
+        || !guest_tainted_pages || !size) return;
+    const uint64_t end = uint64_t{address} + size - 1;
+    for (uint64_t page = address >> 12; page <= (end >> 12) && page < kGuestPageCount; ++page) {
+        if (guest_texture_pages[page].load(std::memory_order_relaxed))
+            guest_tainted_pages[page].store(1, std::memory_order_release);
+    }
+}
+bool guest_write_guard_range_tainted(uint64_t address, uint64_t size) {
+    if (guest_write_probe_mode() != 3) return false;
+    // Fail closed: a missing guard map or invalid extent disables skipping.
+    if (!guest_tainted_pages || !guest_texture_pages || !address || !size
+        || address >= (uint64_t{1} << 32)
+        || size > (uint64_t{1} << 32) - address) return true;
+    const uint64_t first = address >> 12, last = (address + size - 1) >> 12;
+    for (uint64_t page = first; page <= last; ++page) {
+        if (guest_tainted_pages[page].load(std::memory_order_acquire))
+            return true;
+    }
+    return false;
+}
 void guest_write_probe_mark_texture(uint64_t address, uint64_t size) {
-    if (guest_write_probe_mode() != 2 || !guest_texture_pages || !size
+    if ((guest_write_probe_mode() != 2 && guest_write_probe_mode() != 3)
+        || !guest_texture_pages || !size
         || !address || address >= (uint64_t{1} << 32)
         || size > (uint64_t{1} << 32) - address) return;
     uint64_t newly_registered = 0;
@@ -777,15 +818,20 @@ void begin_session(const char *title_id) {
     const auto options = read_options();
     legacy_csv.store(options.legacy_csv, std::memory_order_release);
     uint32_t write_probe = options.mode == Mode::Off ? 0 : options.guest_write_probe;
-    if (write_probe == 2) {
+    if (write_probe == 2 || write_probe == 3) {
         if (!guest_texture_pages)
             guest_texture_pages.reset(new (std::nothrow) std::atomic<uint8_t>[kGuestPageCount]{});
-        if (!guest_texture_pages) {
-            LOG_WARN("[tracelab] guest write texture-page bitmap allocation failed; using count-only mode");
-            write_probe = 1;
+        if (write_probe == 3 && !guest_tainted_pages)
+            guest_tainted_pages.reset(new (std::nothrow) std::atomic<uint8_t>[kGuestPageCount]{});
+        if (!guest_texture_pages || (write_probe == 3 && !guest_tainted_pages)) {
+            LOG_WARN("[tracelab] guest write page bitmap allocation failed; guard/texture probe disabled");
+            write_probe = 0; // fail closed: do NOT run unsafe guarded skip
         } else {
-            for (uint32_t i = 0; i < kGuestPageCount; ++i)
+            for (uint32_t i = 0; i < kGuestPageCount; ++i) {
                 guest_texture_pages[i].store(0, std::memory_order_relaxed);
+                if (write_probe == 3)
+                    guest_tainted_pages[i].store(0, std::memory_order_relaxed);
+            }
         }
     }
     guest_texture_page_count.store(0, std::memory_order_relaxed);
@@ -793,14 +839,19 @@ void begin_session(const char *title_id) {
     // An "off" diagnostic mode cannot silently enable unmonitored
     // inaccurate texture reuse. The experiment also requires a TraceLab
     // build, so normal release binaries always use full hashing.
-    // Write count A/B must preserve the original complete Hash behaviour.
-    // If an old unsafe_texture_hash_recheck_interval=64 is still in cfg,
-    // enabling the new probe automatically disarms it for this title.
-    const uint32_t aggressive_interval = options.mode == Mode::Off || write_probe
-        ? 0 : options.unsafe_recheck_interval;
+    // Counting modes preserve FULL Hash. Guard mode is an explicitly unsafe
+    // alternative to the 64-use hash throttle: only JIT CPU writes are known.
+    // Also fail CLOSED if a requested guard cannot allocate its bitmap:
+    // never silently fall back to unguarded 64-use reuse.
+    const bool requested_guard_failed =
+        options.guest_write_probe == 3 && write_probe != 3;
+    const uint32_t aggressive_interval = options.mode == Mode::Off
+        || write_probe == 1 || write_probe == 2
+        || requested_guard_failed ? 0 : options.unsafe_recheck_interval;
     aggressive_requested_interval = aggressive_interval;
-    const uint32_t opt_in_interval = options.mode == Mode::Off || write_probe
-        || aggressive_interval != 0 ? 0 : options.unsafe_hash_skip_interval;
+    const uint32_t opt_in_interval = options.mode == Mode::Off
+        || options.guest_write_probe != 0 || aggressive_interval != 0
+        ? 0 : options.unsafe_hash_skip_interval;
     unsafe_hash_skip_requested = opt_in_interval;
     unsafe_hash_skip_mismatch.store(false, std::memory_order_relaxed);
     unsafe_hash_skip_incomplete.store(false, std::memory_order_relaxed);
@@ -859,8 +910,12 @@ void begin_session(const char *title_id) {
         LOG_WARN("[tracelab] UNSAFE texture hash skipping enabled: may briefly render stale textures; audit interval={} scenes", opt_in_interval);
     if (aggressive_interval)
         LOG_WARN("[tracelab] AGGRESSIVE UNSAFE texture hashing: verify once per {} cached uses. A stale texture can render for several frames; changed textures are quarantined individually.", aggressive_interval);
-    if (write_probe)
-        LOG_WARN("[tracelab] guest JIT write probe={} (1=count,2=count+ever-texture pages); FULL texture hashing is forced", write_probe);
+    if (write_probe == 1 || write_probe == 2)
+        LOG_WARN("[tracelab] guest JIT write probe={} (count or count+texture); FULL texture hashing is forced", write_probe);
+    if (write_probe == 3)
+        LOG_WARN("[tracelab] UNSAFE guest-write guard active: inline JIT page-taint, recheck interval={} (HLE/GPU not tracked)", aggressive_interval);
+    if (requested_guard_failed)
+        LOG_WARN("[tracelab] requested JIT guard unavailable; all unsafe Hash skipping disabled for this title");
 }
 
 void poll() {

@@ -142,6 +142,37 @@ int main(int argc, char **argv) {
     }
     tracelab::end_session();
 
+    // Direct-optimization mode: JIT guard without all-write counting.
+    // Keep the unsafe audit interval explicit and prove sticky pages block
+    // Hash skipping once any successful callback store has touched them.
+    {
+        std::ofstream cfg("sdmc:/switch/vita3k/tracelab.cfg");
+        cfg << "mode=auto\nlegacy_csv=off\n"
+               "guest_write_probe=guard\n"
+               "texture_hash_probe_interval=0\n"
+               "unsafe_texture_hash_skip_interval=8\n"
+               "unsafe_texture_hash_recheck_interval=64\n";
+    }
+    tracelab::begin_session("GUARD");
+    assert(tracelab::guest_write_probe_mode() == 3);
+    assert(tracelab::guest_write_probe_texture_pages() != nullptr);
+    assert(tracelab::guest_write_probe_tainted_pages() != nullptr);
+    assert(tracelab::unsafe_texture_hash_skip_interval() == 0);
+    assert(tracelab::unsafe_texture_hash_recheck_interval() == 64);
+    tracelab::guest_write_probe_mark_texture(0x12000, 0x1000);
+    assert(!tracelab::guest_write_guard_range_tainted(0x12000, 0x1000));
+    tracelab::guest_write_guard_note_callback_write(0x12000, 4);
+    assert(tracelab::guest_write_guard_range_tainted(0x12000, 0x1000));
+    assert(!tracelab::guest_write_guard_range_tainted(0x13000, 0x1000));
+    assert(!tracelab::guest_write_guard_range_tainted(0x1000, 0x1000));
+    tracelab::guest_write_guard_note_callback_write(0x13000, 4);
+    assert(!tracelab::guest_write_guard_range_tainted(0x13000, 0x1000));
+    assert(tracelab::guest_write_guard_range_tainted(0, 0x1000));
+    tracelab::count(tracelab::Metric::TextureHashGuardBlocked, 0x1000);
+    test_tick += 19200000ULL / 25;
+    tracelab::event(tracelab::Event::RenderEnd, 1);
+    tracelab::end_session();
+
     // Switching off all diagnostics does not create an extra session.
     {
         std::ofstream cfg("sdmc:/switch/vita3k/tracelab.cfg");
@@ -170,14 +201,15 @@ int main(int argc, char **argv) {
 
         logs = tmp / "sdmc:/switch/vita3k/logs"
         sessions = [p for p in logs.iterdir() if p.is_dir()]
-        assert len(sessions) == 2, sessions
+        assert len(sessions) == 3, sessions
         by_title = {
             json.loads((p / "manifest.json").read_text())["title"]: p
             for p in sessions
         }
-        assert set(by_title) == {"PCSD00035", "WRITE_PROBE"}, by_title
+        assert set(by_title) == {"PCSD00035", "WRITE_PROBE", "GUARD"}, by_title
         session = by_title["PCSD00035"]
         probe_session = by_title["WRITE_PROBE"]
+        guard_session = by_title["GUARD"]
         manifest = json.loads((session / "manifest.json").read_text())
         assert manifest["schema_version"] == 2, manifest
         assert manifest["guest_write_probe_mode"] == 0
@@ -224,6 +256,17 @@ int main(int argc, char **argv) {
         assert probe_metrics["guest_jit_texture_page_writes"]["calls"] == 75
         assert probe_metrics["guest_jit_slow_writes"]["calls"] == 30
 
+        guard_manifest = json.loads((guard_session / "manifest.json").read_text())
+        assert guard_manifest["guest_write_probe_mode"] == 3, guard_manifest
+        assert guard_manifest["guest_write_guard_tainted_pages"] == 1
+        assert guard_manifest["unsafe_texture_hash_recheck_requested_interval"] == 64
+        assert guard_manifest["unsafe_texture_hash_skip_requested_interval"] == 0
+        guard_report = json.loads((guard_session / "summary.json").read_text())
+        guard_metrics = {r["metric"]: r for r in guard_report["metrics"]}
+        assert guard_metrics["texture_hash_guard_blocked"]["calls"] == 1
+        assert guard_metrics["texture_hash_guard_blocked"]["bytes"] == 0x1000
+        assert guard_metrics["guest_jit_fast_writes"]["calls"] == 0
+
         # The PC report tool also checks the new RAM-first dataset when Node
         # is available, but Node is not a prerequisite for compiling the NRO.
         if shutil.which("node"):
@@ -245,8 +288,14 @@ int main(int argc, char **argv) {
             assert probe_analysis["guest_write_probe"]["mode_name"] == "texture"
             assert probe_analysis["guest_write_probe"]["successful_all_counted_stores"] == 1030
             assert probe_analysis["guest_write_probe"]["ever_texture_pages_registered"] == 3
+            guard_analysis = json.loads(subprocess.run(
+                ["node", str(script), str(guard_session)],
+                check=True, text=True, capture_output=True).stdout)
+            assert guard_analysis["guest_write_probe"]["mode_name"] == "guard"
+            assert guard_analysis["guest_write_probe"]["guard_tainted_pages_at_exit"] == 1
+            assert guard_analysis["guest_write_probe"]["guard_full_hash_checks_forced"] == 1
 
-        print("TraceLab host smoke test OK (RAM-only, 2 sessions, guest writes, NID aggregation)")
+        print("TraceLab host smoke test OK (RAM-only, 3 sessions, JIT guard taint, guest writes, NID aggregation)")
 
 
 if __name__ == "__main__":
