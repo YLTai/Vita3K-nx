@@ -71,7 +71,7 @@ int main(int argc, char **argv) {
     std::filesystem::create_directories("sdmc:/switch/vita3k");
     {
         std::ofstream cfg("sdmc:/switch/vita3k/tracelab.cfg");
-        cfg << "mode=auto\nlegacy_csv=off\n"
+        cfg << "mode=auto\nlegacy_csv=off\nmemory_validation=off\n"
                "unsafe_texture_hash_skip_interval=8\n"
                "unsafe_texture_hash_recheck_interval=8\n";
     }
@@ -115,7 +115,7 @@ int main(int argc, char **argv) {
     // if the user left 64 enabled in the same config file.
     {
         std::ofstream cfg("sdmc:/switch/vita3k/tracelab.cfg");
-        cfg << "mode=auto\nlegacy_csv=off\n"
+        cfg << "mode=auto\nlegacy_csv=off\nmemory_validation=off\n"
                "guest_write_probe=texture\n"
                "texture_hash_probe_interval=0\n"
                "unsafe_texture_hash_skip_interval=8\n"
@@ -147,7 +147,7 @@ int main(int argc, char **argv) {
     // Hash skipping once any successful callback store has touched them.
     {
         std::ofstream cfg("sdmc:/switch/vita3k/tracelab.cfg");
-        cfg << "mode=auto\nlegacy_csv=off\n"
+        cfg << "mode=auto\nlegacy_csv=off\nmemory_validation=off\n"
                "guest_write_probe=guard\n"
                "texture_hash_probe_interval=0\n"
                "unsafe_texture_hash_skip_interval=8\n"
@@ -172,6 +172,34 @@ int main(int argc, char **argv) {
     test_tick += 19200000ULL / 25;
     tracelab::event(tracelab::Event::RenderEnd, 1);
     tracelab::end_session();
+
+    // Validation overrides stale risky settings and per-store overhead. The
+    // export hook is deferred to end_session and shares its exact directory.
+    {
+        std::ofstream cfg("sdmc:/switch/vita3k/tracelab.cfg");
+        cfg << "mode=auto\nlegacy_csv=on\nmemory_validation=auto\n"
+               "guest_write_probe=guard\ntexture_hash_probe_interval=32\n"
+               "unsafe_texture_hash_skip_interval=8\n"
+               "unsafe_texture_hash_recheck_interval=64\n";
+    }
+    tracelab::begin_session("VALIDATION");
+    assert(!tracelab::legacy_csv_enabled());
+    assert(tracelab::guest_write_probe_mode() == 0);
+    assert(tracelab::texture_hash_probe_interval() == 0);
+    assert(tracelab::unsafe_texture_hash_skip_interval() == 0);
+    assert(tracelab::unsafe_texture_hash_recheck_interval() == 0);
+    static bool hook_called = false;
+    tracelab::set_export_hook([](const char *directory) {
+        assert(!hook_called);
+        assert(std::filesystem::exists(std::string(directory) + "/manifest.json"));
+        std::ofstream(std::string(directory) + "/hook.txt") << "deferred export";
+        hook_called = true;
+    });
+    tracelab::event(tracelab::Event::RenderEnd, 1);
+    tracelab::poll();
+    assert(!hook_called);
+    tracelab::end_session();
+    assert(hook_called);
 
     // Switching off all diagnostics does not create an extra session.
     {
@@ -201,12 +229,21 @@ int main(int argc, char **argv) {
 
         logs = tmp / "sdmc:/switch/vita3k/logs"
         sessions = [p for p in logs.iterdir() if p.is_dir()]
-        assert len(sessions) == 3, sessions
+        assert len(sessions) == 4, sessions
         by_title = {
             json.loads((p / "manifest.json").read_text())["title"]: p
             for p in sessions
         }
-        assert set(by_title) == {"PCSD00035", "WRITE_PROBE", "GUARD"}, by_title
+        assert set(by_title) == {"PCSD00035", "WRITE_PROBE", "GUARD", "VALIDATION"}, by_title
+        validation = by_title["VALIDATION"]
+        assert (validation / "hook.txt").read_text() == "deferred export"
+        validation_manifest = json.loads((validation / "manifest.json").read_text())
+        assert validation_manifest["metadata"]["memory_validation"] == "on"
+        assert validation_manifest["guest_write_probe_mode"] == 0
+        assert validation_manifest["texture_hash_probe_interval"] == 0
+        assert validation_manifest["unsafe_texture_hash_recheck_requested_interval"] == 0
+        assert validation_manifest["unsafe_texture_hash_skip_requested_interval"] == 0
+        assert not validation_manifest["legacy_csv"]
         session = by_title["PCSD00035"]
         probe_session = by_title["WRITE_PROBE"]
         guard_session = by_title["GUARD"]
@@ -295,7 +332,7 @@ int main(int argc, char **argv) {
             assert guard_analysis["guest_write_probe"]["guard_tainted_pages_at_exit"] == 1
             assert guard_analysis["guest_write_probe"]["guard_full_hash_checks_forced"] == 1
 
-        print("TraceLab host smoke test OK (RAM-only, 3 sessions, JIT guard taint, guest writes, NID aggregation)")
+        print("TraceLab host smoke test OK (RAM-only, 4 sessions, validation overrides/export, JIT guard, NIDs)")
 
 
 if __name__ == "__main__":

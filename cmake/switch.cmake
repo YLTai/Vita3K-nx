@@ -136,6 +136,18 @@ message(STATUS "Switch: using OpenSSL 4.0.1 at ${SWITCH_OPENSSL_DIR}")
 option(SWITCH_TRACELAB "Enable Vita3K Switch TraceLab diagnostics" OFF)
 if(SWITCH_TRACELAB)
     add_compile_definitions(VITA3K_SWITCH_TRACELAB=1)
+    execute_process(COMMAND dkp-pacman -Q libnx
+        OUTPUT_VARIABLE _validation_libnx_version
+        OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE _validation_libnx_result)
+    if(_validation_libnx_result EQUAL 0 AND _validation_libnx_version)
+        set(VITA3K_LIBNX_BUILD_VERSION "${_validation_libnx_version}")
+    endif()
+    execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE _validation_revision
+        OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE _validation_revision_result)
+    if(_validation_revision_result EQUAL 0)
+        set(VITA3K_MEMORY_VALIDATION_REVISION "${_validation_revision}")
+    endif()
 endif()
 
 # Features that make no sense / are unavailable on Switch.

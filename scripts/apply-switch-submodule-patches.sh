@@ -40,20 +40,46 @@ apply_one() {
 apply_one "external/concurrentqueue" \
     "concurrentqueue-switch.patch" \
     "9afb99746f0f5fc94ac8aef737053ae0481ba8d1"
-apply_one "external/dynarmic" \
-    "dynarmic-switch.patch" \
-    "86458a0bd369d63ba4c2ef812cacbb6c9080c065"
+# Later patches may change context used by an earlier patch's reverse check.
+# Verify the complete stack newest-first in a private temporary index, without
+# changing the real index or working tree. This also makes repeat CI builds
+# independent of how the individual hunks overlap.
+dynarmic_stack_applied() (
+    local temp_index_dir
+    temp_index_dir="$(mktemp -d)"
+    trap 'rm -rf -- "$temp_index_dir"' EXIT
+    export GIT_INDEX_FILE="$temp_index_dir/index"
+    git -C "$ROOT/external/dynarmic" read-tree HEAD
+    git -C "$ROOT/external/dynarmic" add -u -- .
+    local patch_name
+    for patch_name in dynarmic-switch-write-table.patch dynarmic-switch-write-probe.patch dynarmic-switch.patch; do
+        git -C "$ROOT/external/dynarmic" apply --cached --reverse "$PATCH_DIR/$patch_name" >/dev/null 2>&1 || exit 1
+    done
+)
 
-# The original Switch patch has already dirtied this submodule. Apply the
-# additive write-probe experiment separately, without running apply_one's
-# clean-tree guard again. The reverse check preserves idempotency.
-write_probe_patch="$PATCH_DIR/dynarmic-switch-write-probe.patch"
-if git -C "$ROOT/external/dynarmic" apply --reverse --check "$write_probe_patch" >/dev/null 2>&1; then
-    printf 'already applied: dynarmic write probe\n'
+dynarmic_head="$(git -C "$ROOT/external/dynarmic" rev-parse HEAD)"
+if [[ "$dynarmic_head" != "86458a0bd369d63ba4c2ef812cacbb6c9080c065" ]]; then
+    printf 'error: external/dynarmic is at unexpected commit %s\n' "$dynarmic_head" >&2
+    exit 1
+fi
+if dynarmic_stack_applied; then
+    printf 'already applied: dynarmic Switch/write-probe/write-table stack\n'
 else
-    git -C "$ROOT/external/dynarmic" apply --check "$write_probe_patch"
-    git -C "$ROOT/external/dynarmic" apply "$write_probe_patch"
-    printf 'applied: dynarmic write probe\n'
+    apply_one "external/dynarmic" \
+        "dynarmic-switch.patch" \
+        "86458a0bd369d63ba4c2ef812cacbb6c9080c065"
+    # The original patch has already dirtied this submodule. Only apply the
+    # additive layers, preserving the clean-tree check for the original patch.
+    for patch_name in dynarmic-switch-write-probe.patch dynarmic-switch-write-table.patch; do
+        patch_path="$PATCH_DIR/$patch_name"
+        if git -C "$ROOT/external/dynarmic" apply --reverse --check "$patch_path" >/dev/null 2>&1; then
+            printf 'already applied: %s\n' "$patch_name"
+        else
+            git -C "$ROOT/external/dynarmic" apply --check "$patch_path"
+            git -C "$ROOT/external/dynarmic" apply "$patch_path"
+            printf 'applied: %s\n' "$patch_name"
+        fi
+    done
 fi
 apply_one "external/ffmpeg" \
     "ffmpeg-switch.patch" \

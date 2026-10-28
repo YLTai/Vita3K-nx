@@ -18,6 +18,7 @@
 #include <renderer/vulkan/functions.h>
 
 #include <renderer/vulkan/gxm_to_vulkan.h>
+#include <renderer/vulkan/staging_publish.h>
 
 #include <vulkan/vulkan_format_traits.hpp>
 
@@ -25,6 +26,7 @@
 #include <gxm/types.h>
 #include <renderer/functions.h>
 #include <util/align.h>
+#include <util/switch_memory_validation.h>
 #include <util/switch_tracelab.h>
 #include <vkutil/vkutil.h>
 
@@ -627,13 +629,22 @@ void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, ui
     memcpy(upload_destination, text_data, upload_size);
 
 #ifdef __SWITCH__
-    // NVK can expose a cached CPU mapping even when the Vulkan allocation is
-    // reported as HOST_COHERENT. Clean it explicitly before the GPU copy reads
-    // the staging bytes.
-    armDCacheFlush(upload_destination, upload_size);
-#endif
+    // Snapshot once per upload so a phase change cannot mix the two policies.
+    // On pinned Mesa efaf009f454e35fc6bcf4357e52455e30bfc3356, VMA flush
+    // already cleans non-coherent staging mappings. The B phase removes only
+    // that duplicate platform operation; reported-coherent mappings keep their
+    // existing workaround. GPU barriers and copy lifetime are unchanged.
+    const auto publish = staging_publish_plan(staging_buffer.is_coherent,
+        switch_validation::deduplicate_staging_cache());
+    if (publish.platform_flush)
+        armDCacheFlush(upload_destination, upload_size);
+    if (publish.vulkan_flush)
+        staging_buffer.buffer.flush(upload_offset, upload_size);
+    switch_validation::note_staging_publish(upload_size, publish.deduplicated);
+#else
     if (!staging_buffer.is_coherent)
         staging_buffer.buffer.flush(upload_offset, upload_size);
+#endif
 
     vk::ImageSubresourceLayers layer{
         .aspectMask = vk::ImageAspectFlagBits::eColor,

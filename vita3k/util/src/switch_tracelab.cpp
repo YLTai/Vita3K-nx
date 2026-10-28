@@ -134,6 +134,7 @@ struct Window {
 struct Options {
     Mode mode = Mode::Auto;
     bool legacy_csv = false;
+    bool memory_validation = true;
     uint32_t unsafe_hash_skip_interval = 0;
     uint32_t unsafe_recheck_interval = 0;
     // 0: original JIT, 1: count all, 2: count + page lookup.
@@ -188,6 +189,7 @@ uint64_t trace_overflow = 0;
 uint64_t windows_overflow = 0;
 Mode session_mode = Mode::Off;
 std::string title_name;
+ExportHook export_hook = nullptr;
 
 constexpr const char *mode_label(Mode mode) {
     switch (mode) {
@@ -232,6 +234,9 @@ Options read_options() {
             else if (value == "auto") opt.mode = Mode::Auto;
         } else if (key == "legacy_csv") {
             opt.legacy_csv = value == "1" || value == "true" || value == "on";
+        } else if (key == "memory_validation") {
+            if (value == "off") opt.memory_validation = false;
+            else if (value == "on" || value == "auto") opt.memory_validation = true;
         } else if (key == "texture_hash_probe_interval") {
             if (value == "0") opt.hash_probe_interval = 0;
             else if (value == "4") opt.hash_probe_interval = 4;
@@ -583,6 +588,16 @@ bool export_session(uint64_t final_tick) {
         std::fputs("\n  }\n}\n", file);
         close_checked(file);
     }
+    if (export_hook) {
+        // Optional reports must not throw through Session's noexcept
+        // destructor or interrupt process teardown under memory pressure.
+        try {
+            export_hook(dir.c_str());
+        } catch (...) {
+            export_io_error = true;
+            LOG_ERROR("[tracelab] optional session report failed: {}", dir);
+        }
+    }
     if (export_io_error) {
         LOG_ERROR("[tracelab] one or more session files failed to write completely: {}", dir);
         return false;
@@ -815,7 +830,17 @@ void metadata(const char *key, const char *value) {
 
 void begin_session(const char *title_id) {
     end_session();
-    const auto options = read_options();
+    export_hook = nullptr;
+    auto options = read_options();
+    // A single validation NRO must not inherit old Hash64 or per-store
+    // instrumentation settings. Both A/B phases use the same reference path.
+    if (options.memory_validation && options.mode != Mode::Off) {
+        options.legacy_csv = false;
+        options.guest_write_probe = 0;
+        options.unsafe_hash_skip_interval = 0;
+        options.unsafe_recheck_interval = 0;
+        options.hash_probe_interval = 0;
+    }
     legacy_csv.store(options.legacy_csv, std::memory_order_release);
     uint32_t write_probe = options.mode == Mode::Off ? 0 : options.guest_write_probe;
     if (write_probe == 2 || write_probe == 3) {
@@ -904,6 +929,7 @@ void begin_session(const char *title_id) {
     next_poll_tick = origin_tick + frequency();
     generation.fetch_add(1, std::memory_order_release);
     current_mode.store(options.mode, std::memory_order_release);
+    metadata("memory_validation", options.memory_validation ? "on" : "off");
     LOG_WARN("[tracelab] mode={} deferred_io=on legacy_csv={} unsafe_texture_hash_skip_interval={} (writes only on normal exit)",
         mode_name(), options.legacy_csv, opt_in_interval);
     if (opt_in_interval)
@@ -916,6 +942,10 @@ void begin_session(const char *title_id) {
         LOG_WARN("[tracelab] UNSAFE guest-write guard active: inline JIT page-taint, recheck interval={} (HLE/GPU not tracked)", aggressive_interval);
     if (requested_guard_failed)
         LOG_WARN("[tracelab] requested JIT guard unavailable; all unsafe Hash skipping disabled for this title");
+}
+
+void set_export_hook(ExportHook hook) {
+    export_hook = hook;
 }
 
 void poll() {

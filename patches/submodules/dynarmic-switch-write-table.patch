@@ -1,0 +1,133 @@
+diff --git a/src/dynarmic/backend/arm64/a32_address_space.cpp b/src/dynarmic/backend/arm64/a32_address_space.cpp
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -250,6 +250,13 @@
+         if (conf.fastmem_pointer) {
+             code.MOV(Xfastmem, *conf.fastmem_pointer);
+         }
++#ifdef __SWITCH__
++        else if (conf.write_page_table) {
++            // X25 is already excluded from the allocator. It is idle in the
++            // validated page-table-only mode and can hold the store table.
++            code.MOV(Xfastmem, mcl::bit_cast<u64>(conf.write_page_table));
++        }
++#endif
+ 
+         if (conf.HasOptimization(OptimizationFlag::ReturnStackBuffer)) {
+             code.LDR(Xscratch0, l_return_to_dispatcher);
+@@ -289,6 +296,11 @@
+         if (conf.fastmem_pointer) {
+             code.MOV(Xfastmem, *conf.fastmem_pointer);
+         }
++#ifdef __SWITCH__
++        else if (conf.write_page_table) {
++            code.MOV(Xfastmem, mcl::bit_cast<u64>(conf.write_page_table));
++        }
++#endif
+ 
+         if (conf.HasOptimization(OptimizationFlag::ReturnStackBuffer)) {
+             code.LDR(Xscratch0, l_return_to_dispatcher);
+@@ -402,6 +414,7 @@
+         .silently_mirror_page_table = true,
+         .absolute_offset_page_table = conf.absolute_offset_page_table,
+ #ifdef __SWITCH__
++        .write_page_table_pointer = mcl::bit_cast<u64>(conf.write_page_table),
+         .switch_write_probe_total = conf.switch_write_probe_total,
+         .switch_write_probe_texture = conf.switch_write_probe_texture,
+         .switch_write_probe_pages = conf.switch_write_probe_pages,
+diff --git a/src/dynarmic/backend/arm64/a32_interface.cpp b/src/dynarmic/backend/arm64/a32_interface.cpp
+--- a/src/dynarmic/backend/arm64/a32_interface.cpp
++++ b/src/dynarmic/backend/arm64/a32_interface.cpp
+@@ -6,6 +6,7 @@
+ #include <atomic>
+ #include <memory>
+ #include <mutex>
++#include <stdexcept>
+ 
+ #include <boost/icl/interval_set.hpp>
+ #include <mcl/assert.hpp>
+@@ -182,8 +183,15 @@
+     std::uint64_t capacity_recycle_count = 0;
+ };
+ 
+-Jit::Jit(UserConfig conf)
+-        : impl(std::make_unique<Impl>(this, conf)) {}
++Jit::Jit(UserConfig conf) {
++#ifdef __SWITCH__
++    // Reject ambiguous X25 ownership before allocating a code-cache slice.
++    if (conf.write_page_table && (!conf.page_table || conf.fastmem_pointer)) {
++        throw std::invalid_argument("write_page_table requires page_table and excludes fastmem_pointer");
++    }
++#endif
++    impl = std::make_unique<Impl>(this, conf);
++}
+ 
+ Jit::~Jit() = default;
+ 
+diff --git a/src/dynarmic/backend/arm64/emit_arm64.h b/src/dynarmic/backend/arm64/emit_arm64.h
+--- a/src/dynarmic/backend/arm64/emit_arm64.h
++++ b/src/dynarmic/backend/arm64/emit_arm64.h
+@@ -130,6 +130,7 @@
+     bool absolute_offset_page_table;
+ 
+ #ifdef __SWITCH__
++    u64 write_page_table_pointer = 0;
+     u64* switch_write_probe_total = nullptr;
+     u64* switch_write_probe_texture = nullptr;
+     const u8* switch_write_probe_pages = nullptr;
+diff --git a/src/dynarmic/backend/arm64/emit_arm64_memory.cpp b/src/dynarmic/backend/arm64/emit_arm64_memory.cpp
+--- a/src/dynarmic/backend/arm64/emit_arm64_memory.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64_memory.cpp
+@@ -250,7 +250,7 @@
+ // May use Xscratch1 as scratch register
+ // Address to read/write = [ret0 + ret1], ret0 is always Xscratch0 and ret1 is either Xaddr or Xscratch1
+ // Trashes NZCV
+-template<size_t bitsize>
++template<size_t bitsize, bool is_write = false>
+ std::pair<oaknut::XReg, oaknut::XReg> InlinePageTableEmitVAddrLookup(oaknut::CodeGenerator& code, EmitContext& ctx, oaknut::XReg Xaddr, const SharedLabel& fallback) {
+     const size_t valid_page_index_bits = ctx.conf.page_table_address_space_bits - page_bits;
+     const size_t unused_top_bits = 64 - ctx.conf.page_table_address_space_bits;
+@@ -265,7 +265,14 @@
+         code.B(NE, *fallback);
+     }
+ 
+-    code.LDR(Xscratch0, Xpagetable, Xscratch0, LSL, 3);
++#ifdef __SWITCH__
++    // This choice is made at code-emission time. Ordinary stores retain the
++    // existing PTE load + CBZ sequence; no extra per-store membership lookup.
++    const auto table_reg = is_write && ctx.conf.write_page_table_pointer ? Xfastmem : Xpagetable;
++#else
++    const auto table_reg = Xpagetable;
++#endif
++    code.LDR(Xscratch0, table_reg, Xscratch0, LSL, 3);
+ 
+     if (ctx.conf.page_table_pointer_mask_bits != 0) {
+         const u64 mask = u64(~u64(0)) << ctx.conf.page_table_pointer_mask_bits;
+@@ -460,7 +467,7 @@
+ 
+     SharedLabel fallback = GenSharedLabel(), end = GenSharedLabel();
+ 
+-    const auto [Xbase, Xoffset] = InlinePageTableEmitVAddrLookup<bitsize>(code, ctx, Xaddr, fallback);
++    const auto [Xbase, Xoffset] = InlinePageTableEmitVAddrLookup<bitsize, true>(code, ctx, Xaddr, fallback);
+     EmitMemoryStr<bitsize>(code, Rvalue->index(), Xbase, Xoffset, ordered);
+ 
+ #ifdef __SWITCH__
+diff --git a/src/dynarmic/interface/A32/config.h b/src/dynarmic/interface/A32/config.h
+--- a/src/dynarmic/interface/A32/config.h
++++ b/src/dynarmic/interface/A32/config.h
+@@ -165,6 +165,15 @@
+     bool absolute_offset_page_table = false;
+ 
+ #ifdef __SWITCH__
++    // Optional store-only eligibility table. Reads keep using page_table; a
++    // null write entry takes MemoryWrite* while a non-null entry has exactly
++    // the same representation as page_table. The embedder owns both tables
++    // and must synchronize changes with every executing JIT. This is not a
++    // complete dirty tracker: aliases, cross-page writes and non-JIT writers
++    // remain the embedder's responsibility. Requires page_table and forbids
++    // fastmem_pointer because the ARM64 backend reuses its reserved X25.
++    std::array<std::uint8_t*, NUM_PAGE_TABLE_ENTRIES>* write_page_table = nullptr;
++
+     // Diagnostic-only JIT-generated STR counters. When null (the default)
+     // no extra instructions are emitted for normal memory writes.
+     // Counters belong to the single thread executing this JIT.

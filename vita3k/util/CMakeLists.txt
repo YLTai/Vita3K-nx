@@ -13,6 +13,8 @@ add_library(
 	src/switch_storage.cpp
 	src/switch_thread.cpp
 	src/switch_tracelab.cpp
+	src/switch_memory_validation.cpp
+	src/switch_memory_capabilities.cpp
 	src/switch_lsfg_profile.cpp
 	src/switch_vibration.cpp
 	src/tracy.cpp
@@ -31,6 +33,16 @@ endif()
 target_compile_definitions(util PRIVATE $<$<CONFIG:Debug,RelWithDebInfo>:TRACY_ENABLE>)
 
 if(SWITCH)
+    # Changing the build SHA must not invalidate every cached translation unit.
+    # Embed provenance only in the two report-producing sources.
+    if(SWITCH_TRACELAB AND VITA3K_MEMORY_VALIDATION_REVISION)
+        set_property(SOURCE src/switch_memory_validation.cpp APPEND PROPERTY
+            COMPILE_DEFINITIONS "VITA3K_MEMORY_VALIDATION_REVISION=\"${VITA3K_MEMORY_VALIDATION_REVISION}\"")
+    endif()
+    if(SWITCH_TRACELAB AND VITA3K_LIBNX_BUILD_VERSION)
+        set_property(SOURCE src/switch_memory_capabilities.cpp APPEND PROPERTY
+            COMPILE_DEFINITIONS "VITA3K_LIBNX_BUILD_VERSION=\"${VITA3K_LIBNX_BUILD_VERSION}\"")
+    endif()
     # Defaults ON for Switch: render may borrow idle app cores while guest
     # priorities and core-3 audio/display/Vulkan helpers always preempt it.
     # OFF restores the original core-3-only render affinity.

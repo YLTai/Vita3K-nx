@@ -1,5 +1,12 @@
 # Vita3K-nx TraceLab v2 — RAM-first diagnostic capture
 
+The current validation branch defaults to the [single-NRO memory validation
+suite](SWITCH_MEMORY_VALIDATION.md). It adds startup tests and an automatic
+ABBA/BAAB staging experiment. While `memory_validation=auto` or `on` is active,
+legacy CSV, per-store probes and unsafe Hash skips below are overridden to off.
+Use the validation guide for this build; the historical opt-in experiments in
+this document are not evidence of complete memory coherence.
+
 This edition is intended for **slow TF/microSD cards**. It separates high
 frequency measurements from storage completely: during an active game session,
 the new TraceLab collects compact atomic counters, per-thread bounded event

@@ -19,6 +19,7 @@
 
 #include <renderer/profile.h>
 #include <limits>
+#include <util/switch_memory_validation.h>
 #include <util/switch_tracelab.h>
 #include <renderer/texture_cache.h>
 
@@ -795,7 +796,11 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
         if (info->use_hash) {
             bool verified_this_scene = false;
 #ifdef __SWITCH__
-            verified_this_scene = memo_scene != 0 && info->last_hashed_scene == memo_scene
+            // Both validation phases need the same complete-hash reference.
+            // A context-local scene number is not a write/coherence version.
+            const bool strict_hash = switch_validation::strict_hash();
+            verified_this_scene = !strict_hash
+                && memo_scene != 0 && info->last_hashed_scene == memo_scene
                 && !import_textures && !export_textures;
             info->last_hashed_scene = memo_scene;
 #endif
@@ -805,8 +810,12 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
             } else {
                 bool experimental_skip = false;
 #ifdef __SWITCH__
-                const uint32_t unsafe_interval = tracelab::unsafe_texture_hash_skip_interval();
-                const uint32_t aggressive_interval = tracelab::unsafe_texture_hash_recheck_interval();
+                // Override even stale opt-in settings from an earlier trial;
+                // disabling only reuse-count skipping would leave other skips.
+                const uint32_t unsafe_interval = strict_hash
+                    ? 0 : tracelab::unsafe_texture_hash_skip_interval();
+                const uint32_t aggressive_interval = strict_hash
+                    ? 0 : tracelab::unsafe_texture_hash_recheck_interval();
                 const uint32_t probe_interval = tracelab::texture_hash_probe_interval();
                 // Validate source mapping at most once when a probe or the
                 // unsafe A/B mode is otherwise eligible. The original full

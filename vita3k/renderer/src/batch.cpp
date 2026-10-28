@@ -32,6 +32,7 @@
 #include <util/log.h>
 #include <util/switch_thread.h>
 #include <util/switch_tracelab.h>
+#include <util/switch_memory_validation.h>
 #ifdef __SWITCH__
 #include <switch.h>
 
@@ -452,6 +453,7 @@ static void render_loop(renderer::State &state, DisplayState &display, GxmState 
 #endif
             state.async_flip_requested.store(false, std::memory_order_relaxed);
             tracelab::event(tracelab::Event::RenderEnd, render_frame_id);
+            switch_validation::on_render_end(tracelab::ticks());
             cpu_profile.checkpoint();
             tracelab::cpu_checkpoint();
 

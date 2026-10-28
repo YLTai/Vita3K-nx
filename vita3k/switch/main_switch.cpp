@@ -28,6 +28,7 @@
 #include <app/functions.h>
 #include <app/state.h>
 #include <cpu/functions.h>
+#include <cpu/switch_memory_validation.h>
 #include <ctrl/functions.h>
 #include <emuenv/state.h>
 #include <ime/keyboard.h>
@@ -52,6 +53,8 @@
 #include <nids/functions.h>
 #include <util/switch_thread.h>
 #include <util/switch_tracelab.h>
+#include <util/switch_memory_validation.h>
+#include <util/switch_memory_capabilities.h>
 #include <util/switch_vibration.h>
 
 #include <fmt/format.h>
@@ -802,7 +805,10 @@ static SwitchControllerFrame switch_poll_controller(EmuEnvState &emuenv, PadStat
         status.style = style;
     }
 
-    if (!frame.connected || intercepted) {
+    constexpr u64 validation_buttons = HidNpadButton_L | HidNpadButton_R | HidNpadButton_Y;
+    const bool validation_chord = switch_validation::enabled()
+        && (frame.held & validation_buttons) == validation_buttons;
+    if (!frame.connected || intercepted || validation_chord) {
         vmouse.pressed = false;
         if (vmouse.cursor)
             vmouse.cursor->set_pressed(false);
@@ -1488,9 +1494,38 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
 
     do {
         relaunch_requested = false;
+        // Declaration order keeps the validation report alive until TraceLab
+        // exports, after session teardown has stopped every worker.
+        switch_validation::Session validation_session(launch_request.app_path.c_str());
         tracelab::Session trace_session(launch_request.app_path.c_str());
+        tracelab::set_export_hook(&switch_validation::write_report);
         tracelab::tag_thread("frontend");
         tracelab::metadata("backend", emuenv->cfg.current_config.backend_renderer.c_str());
+        if (switch_validation::enabled()) {
+            // Isolated allocations and JIT fixtures; no live Guest mappings.
+            try {
+                switch_validation::run_memory_capability_validation();
+            } catch (const std::exception &error) {
+                switch_validation::record("capability", "suite_exception", "fail", error.what());
+            }
+            try {
+                run_jit_memory_validation();
+            } catch (const std::exception &error) {
+                switch_validation::record("jit_selftest", "suite_exception", "fail", error.what());
+            }
+            // The isolated fixture is now destroyed. Close its idle shared
+            // pool before Guest allocation, including the pool's allocation-
+            // failure latch. A test must not consume production code capacity.
+            const auto test_pool = switch_shutdown_jit_code_pool();
+            char pool_detail[192];
+            std::snprintf(pool_detail, sizeof(pool_detail),
+                "live_slices=%llu close_result=0x%X regions_closed=%llu; before Guest start",
+                static_cast<unsigned long long>(test_pool.live_slices),
+                static_cast<unsigned>(test_pool.close_result),
+                static_cast<unsigned long long>(test_pool.regions_closed));
+            switch_validation::record("jit_selftest", "test_pool_cleanup",
+                test_pool.live_slices == 0 && test_pool.close_result == 0 ? "pass" : "fail", pool_detail);
+        }
         SwitchCpuProfileSession cpu_profile(launch_request.app_path.c_str());
         SwitchFrameHost frame_host(nwindow);
         std::optional<AppLaunchRequest> pending_launch_request;
@@ -1508,6 +1543,18 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
                 session_controller->stop(reason);
             } catch (const std::exception &error) {
                 LOG_ERROR("[shutdown] session teardown failed: {}", error.what());
+                relaunch_requested = false;
+                result.action = SwitchFrontendAction::ExitApplication;
+                // The validation report reads renderer-owned counters only
+                // after join. Earlier teardown stages can fail before the
+                // normal renderer stop; finish that prerequisite explicitly.
+                try {
+                    if (emuenv->renderer)
+                        renderer::stop_render_thread(*emuenv->renderer);
+                } catch (...) {
+                    tracelab::set_export_hook(nullptr);
+                    LOG_ERROR("[memory-validation] renderer did not stop; report export suppressed");
+                }
             }
             logging::set_crash_breadcrumb("shutting down SDL");
             LOG_WARN("[shutdown] shutting down SDL");
@@ -1685,6 +1732,7 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
                 break;
 
             if (!quick_menu_open && ime::has_pending_request()) {
+                switch_validation::frontend_poll(true);
                 session_controller->set_pause_reason(app::AppSessionPauseReason::User, true);
                 clear_switch_controller_input(*emuenv);
                 ime::process_pending_request(*emuenv);
@@ -1696,6 +1744,11 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
             const bool input_intercepted = quick_menu_open || session_controller->is_paused();
             const SwitchControllerFrame controller = switch_poll_controller(
                 *emuenv, pad, six_axis, controller_status, input_intercepted, virtual_mouse);
+
+            if (!input_intercepted && controller.connected
+                && (controller.held & (HidNpadButton_L | HidNpadButton_R)) == (HidNpadButton_L | HidNpadButton_R)
+                && (controller.down & HidNpadButton_Y))
+                switch_validation::request_benchmark();
 
             const bool menu_chord = controller.connected
                 && (controller.held & (HidNpadButton_L | HidNpadButton_R)) == (HidNpadButton_L | HidNpadButton_R)
@@ -1946,6 +1999,7 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
 
             app::update_runtime_metrics(*emuenv, runtime_metrics);
             cpu_profile.poll();
+            switch_validation::frontend_poll(session_controller->is_paused());
             tracelab::poll();
 
             if (!session_controller->is_running())
@@ -2169,6 +2223,13 @@ int main(int argc, char *argv[]) {
     if (!loader_heap_restored)
         LOG_ERROR("Returning with an unrestored hbloader heap; the next NRO may not load");
     shutdown_step("choosing the return path");
+
+    // A failed isolated capability cleanup retains its backing deliberately.
+    // Do not hand such a process to hbloader to remap a second NRO.
+    if (!switch_validation::memory_capabilities_allow_chainload()) {
+        LOG_ERROR("[memory-validation] retained test mappings require process exit; launcher chainload disabled");
+        run_result.action = SwitchFrontendAction::ExitApplication;
+    }
 
     // A naturally-ended guest and both launcher actions return to the frontend.
     // A HOME/quick-menu Exit request must instead leave the Application. In the

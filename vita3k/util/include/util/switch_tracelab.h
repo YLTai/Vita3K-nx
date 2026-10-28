@@ -44,6 +44,8 @@ enum class Event : uint16_t {
     TextureHashUnsafeMismatch
 };
 
+using ExportHook = void (*)(const char *session_directory);
+
 #if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)
 
 uint64_t ticks();
@@ -90,6 +92,8 @@ void unsafe_texture_hash_audit_mismatch();
 void unsafe_texture_hash_audit_incomplete();
 void begin_session(const char *title_id);
 void end_session();
+// Frontend sets this after begin_session. Called only after workers stop.
+void set_export_hook(ExportHook hook);
 void poll();
 void metadata(const char *key, const char *value);
 const char *mode_name();
@@ -148,6 +152,7 @@ inline void unsafe_texture_hash_audit_mismatch() {}
 inline void unsafe_texture_hash_audit_incomplete() {}
 inline void begin_session(const char *) {}
 inline void end_session() {}
+inline void set_export_hook(ExportHook) {}
 inline void poll() {}
 inline void metadata(const char *, const char *) {}
 inline const char *mode_name() { return "off"; }
