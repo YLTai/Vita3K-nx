@@ -7,6 +7,7 @@
 // (at your option) any later version.
 
 #include <util/switch_thread.h>
+#include <util/switch_tracelab.h>
 
 #ifdef __SWITCH__
 
@@ -693,6 +694,11 @@ SwitchCpuProfileThread::~SwitchCpuProfileThread() {
 }
 
 SwitchCpuProfileSession::SwitchCpuProfileSession(const char *title_id) {
+    // The old six-CSV profiler performs synchronous SD I/O during gameplay.
+    // TraceLab's RAM-first mode disables it by default; opt in explicitly with
+    // "legacy_csv=on" in sdmc:/switch/vita3k/tracelab.cfg.
+    if (!tracelab::legacy_csv_enabled())
+        return;
     std::lock_guard<std::mutex> lock(cpu_profile_mutex);
     cpu_profile_close_locked();
 
@@ -796,6 +802,10 @@ void SwitchCpuProfileSession::poll() {
         return;
     std::lock_guard<std::mutex> lock(cpu_profile_mutex);
     cpu_profile_poll_locked(false);
+}
+
+bool switch_cpu_profile_recording() {
+    return cpu_profile_enabled.load(std::memory_order_relaxed);
 }
 
 void switch_cpu_profile_opcode_merge(const SwitchCpuOpcodeStats *stats, size_t count) {

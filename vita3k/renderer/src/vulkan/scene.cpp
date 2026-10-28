@@ -27,6 +27,7 @@
 #include <spdlog/fmt/bin_to_hex.h>
 
 #include <util/log.h>
+#include <util/switch_tracelab.h>
 #ifdef __SWITCH__
 #include <switch/arm/counter.h>
 #include <util/switch_thread.h>
@@ -157,7 +158,7 @@ void mid_scene_flush(VKContext &context, const SceGxmNotification notification) 
         context.start_recording();
         context.scene_timestamp++;
 #ifdef __SWITCH__
-        context.state.texture_cache.memo_scene = context.scene_timestamp;
+        context.state.texture_cache.note_switch_scene_epoch(context.scene_timestamp, &context);
 #endif
     }
 }
@@ -183,6 +184,7 @@ void restride_stream(const uint8_t *&stream, uint32_t &size, uint32_t stride) {
 static constexpr uint32_t DESCRIPTOR_PACK_SIZE = 64;
 
 static vk::DescriptorSet retrieve_descriptor(VKContext &context, bool is_vertex, uint16_t textures_count) {
+    tracelab::Scope resolve(tracelab::Metric::DescriptorResolve, tracelab::Domain::Render);
     if (textures_count == 0)
         return context.empty_set;
 
@@ -294,7 +296,11 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem, [[maybe_unu
             };
             write_descrs[i].setImageInfo(context.vertex_textures[i].sampler ? context.vertex_textures[i] : default_image_info);
         }
-        state.device.updateDescriptorSets(vertex_textures_count, write_descrs.data(), 0, nullptr);
+        {
+            tracelab::Scope update(tracelab::Metric::DescriptorUpdate, tracelab::Domain::Render,
+                static_cast<uint64_t>(vertex_textures_count) * sizeof(vk::WriteDescriptorSet));
+            state.device.updateDescriptorSets(vertex_textures_count, write_descrs.data(), 0, nullptr);
+        }
 #if defined(__SWITCH__) && defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
         switch_cpu_profile_fine_record(SwitchCpuFineMetric::DescVertUpdate, false, 0);
 #endif
@@ -311,7 +317,11 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem, [[maybe_unu
             };
             write_descrs[i].setImageInfo(context.fragment_textures[i].sampler ? context.fragment_textures[i] : default_image_info);
         }
-        state.device.updateDescriptorSets(fragment_texture_count, write_descrs.data(), 0, nullptr);
+        {
+            tracelab::Scope update(tracelab::Metric::DescriptorUpdate, tracelab::Domain::Render,
+                static_cast<uint64_t>(fragment_texture_count) * sizeof(vk::WriteDescriptorSet));
+            state.device.updateDescriptorSets(fragment_texture_count, write_descrs.data(), 0, nullptr);
+        }
 #if defined(__SWITCH__) && defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
         switch_cpu_profile_fine_record(SwitchCpuFineMetric::DescFragUpdate, false, 0);
 #endif
@@ -336,6 +346,7 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem, [[maybe_unu
 #if defined(__SWITCH__) && defined(VITA3K_SWITCH_DISABLE_DESCRIPTOR_BIND_CACHE)
     // A/B reference behavior: rebind every descriptor without consulting the
     // cache. This does not skip updates, uploads, barriers or any draw command.
+    tracelab::Scope descriptor_bind(tracelab::Metric::DescriptorBind, tracelab::Domain::Render);
     context.render_cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline_layout,
         0, static_cast<uint32_t>(descriptors.size()), descriptors.data(),
         dynamic_offset_count, dynamic_offsets.data());
@@ -357,6 +368,7 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem, [[maybe_unu
         // resend their offsets, and a uniform-only change need not rebind the
         // render target or textures. NVK otherwise re-emits root/cbuf state.
         const uint32_t offset_count = bind.first_set == 0 ? dynamic_offset_count : 0;
+        tracelab::Scope descriptor_bind(tracelab::Metric::DescriptorBind, tracelab::Domain::Render);
         context.render_cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline_layout, bind.first_set,
             bind.set_count, descriptors.data() + bind.first_set, offset_count,
             offset_count ? dynamic_offsets.data() : nullptr);
@@ -369,6 +381,7 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem, [[maybe_unu
 
 // vertex count is only used with double buffer mapping
 static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t instance_count, uint32_t max_index) {
+    tracelab::Scope vertex_setup(tracelab::Metric::VertexBind, tracelab::Domain::Render);
     GxmRecordState &state = context.record;
     const SceGxmVertexProgram &vertex_program = *state.vertex_program.get(mem);
     VertexProgram *vkvert = vertex_program.renderer_data.get();
@@ -452,6 +465,8 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
 
 void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format,
     Ptr<void> indices, size_t count, uint32_t instance_count, MemState &mem, const Config &config) {
+    tracelab::Scope draw_profile(tracelab::Metric::DrawBack, tracelab::Domain::Render,
+        count * (format == SCE_GXM_INDEX_FORMAT_U16 ? 2 : 4));
     // Without a mask attachment, mask updates would overwrite the color surface.
     if (!context.state.features.use_mask_bit && context.record.fragment_program.get(mem)->is_maskupdate) {
 #ifdef __SWITCH__
@@ -674,6 +689,8 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         if (context.state.need_cpu_buffer_sync()) {
             TrappedBuffer *trapped_buffer = context.state.buffer_trapping.access_buffer(indices.address(), count * index_size, mem);
             if (trapped_buffer->extra == ~0) {
+                tracelab::Scope index_scan(tracelab::Metric::IndexScan, tracelab::Domain::Render,
+                    count * index_size);
 #if defined(__SWITCH__) && defined(VITA3K_SWITCH_RENDER_HOTPATH_DIAGNOSTICS)
                 switch_cpu_profile_fine_record(SwitchCpuFineMetric::IndexRangeScanned, false, 0);
 #endif

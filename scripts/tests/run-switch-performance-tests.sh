@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUILD_DIR="${ROOT}/build-switch-preflight/performance-tests"
 mkdir -p "$BUILD_DIR"
 
-for test in descriptor_binding_cache vertex_input sampler_mru; do
+for test in descriptor_binding_cache vertex_input sampler_mru texture_hash_throttle; do
     "${CXX:-c++}" -std=c++20 -O2 -Wall -Wextra -Werror -pedantic \
         -I "$ROOT/vita3k/renderer/include" \
         -I "$ROOT/vita3k/util/include" -isystem "$ROOT/external/boost" \
@@ -14,5 +14,8 @@ for test in descriptor_binding_cache vertex_input sampler_mru; do
 done
 
 python3 "$ROOT/scripts/tests/test_switch_cpu_checkpoint.py" --cxx "${CXX:-c++}"
+python3 "$ROOT/scripts/tests/test_switch_tracelab_ram.py" --cxx "${CXX:-c++}"
+python3 "$ROOT/scripts/tests/test_switch_hash_probe_wiring.py"
+python3 "$ROOT/scripts/tests/test_switch_guest_write_probe_wiring.py"
 python3 "$ROOT/scripts/tests/test_switch_hotspot_metric_layout.py"
 python3 "$ROOT/scripts/tests/test_switch_render_core_spread.py"

@@ -62,11 +62,12 @@ else()
 	set(VITA3K_GIT_REV "${GIT_HASH}-${GIT_REPO}/${GIT_BRANCH}")
 endif()
 
-file(WRITE ${CMAKE_BINARY_DIR}/vita3k/config/gitver.h
-	"#define APP_VER_HI ${VITA3K_APP_VER_HI}\n"
-	"#define APP_VER_MID ${VITA3K_APP_VER_MID}\n"
-	"#define APP_VER_LO ${VITA3K_APP_VER_LO}\n"
-	"#define APP_NUMBER ${GIT_COUNT}\n"
+# Unlike file(WRITE), file(CONFIGURE) preserves the timestamp when the
+# generated header is unchanged. Reconfiguring Ninja should not rebuild
+# every translation unit that includes gitver.h.
+file(CONFIGURE
+	OUTPUT "${CMAKE_BINARY_DIR}/vita3k/config/gitver.h"
+	CONTENT "#define APP_VER_HI ${VITA3K_APP_VER_HI}\n#define APP_VER_MID ${VITA3K_APP_VER_MID}\n#define APP_VER_LO ${VITA3K_APP_VER_LO}\n#define APP_NUMBER ${GIT_COUNT}\n"
 )
 
 include_directories(${CMAKE_BINARY_DIR}/vita3k/config)

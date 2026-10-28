@@ -20,6 +20,9 @@
 #include <gxm/types.h>
 #include <util/containers.h>
 #include <util/fs.h>
+#ifdef __SWITCH__
+#include <renderer/texture/hash_throttle.h>
+#endif
 
 #include <array>
 #include <cstdint>
@@ -51,6 +54,9 @@ struct TextureCacheInfo {
 #ifdef __SWITCH__
     // Scene epoch of the last hash verification; see TextureCache::memo_scene.
     uint64_t last_hashed_scene = 0;
+    // Experimental hash skip is guarded by a pure, testable state machine.
+    // The default path always computes the full content hash.
+    texture::HashThrottleState hash_throttle{};
 #endif
     SceGxmTexture texture;
     int index = 0;
@@ -91,6 +97,11 @@ public:
     // texture data to detect CPU updates; a texture verified in the current
     // epoch cannot have changed and needs no second walk.
     uint64_t memo_scene = 0;
+    // Diagnostic-only identity of the context that last assigned memo_scene.
+    // Do not silently change the existing per-context scene semantics before
+    // confirming their effect with heavy-scene counter data.
+    const void *memo_scene_context = nullptr;
+    void note_switch_scene_epoch(uint64_t context_scene, const void *context);
 #endif
 
 protected:

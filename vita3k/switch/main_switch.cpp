@@ -51,6 +51,7 @@
 #include <util/log.h>
 #include <nids/functions.h>
 #include <util/switch_thread.h>
+#include <util/switch_tracelab.h>
 #include <util/switch_vibration.h>
 
 #include <fmt/format.h>
@@ -1487,6 +1488,9 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
 
     do {
         relaunch_requested = false;
+        tracelab::Session trace_session(launch_request.app_path.c_str());
+        tracelab::tag_thread("frontend");
+        tracelab::metadata("backend", emuenv->cfg.current_config.backend_renderer.c_str());
         SwitchCpuProfileSession cpu_profile(launch_request.app_path.c_str());
         SwitchFrameHost frame_host(nwindow);
         std::optional<AppLaunchRequest> pending_launch_request;
@@ -1942,6 +1946,7 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
 
             app::update_runtime_metrics(*emuenv, runtime_metrics);
             cpu_profile.poll();
+            tracelab::poll();
 
             if (!session_controller->is_running())
                 running = false;
