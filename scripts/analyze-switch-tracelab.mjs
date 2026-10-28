@@ -167,6 +167,26 @@ async function main() {
     if (manifest.schema_version >= 2)
         threads = csv(await readFile(join(dir, 'threads.csv'), 'utf8'));
 
+    const getCalls = name => totals.get(name)?.calls ?? 0;
+    const getBytes = name => totals.get(name)?.bytes ?? 0;
+    const experiment = {
+        // Experimental telemetry is based on recorded runtime config and
+        // counters; none of these values is an automatically safe speedup.
+        requested_skip_interval: manifest.unsafe_texture_hash_skip_requested_interval ?? 0,
+        remaining_skip_interval_at_exit: manifest.unsafe_texture_hash_skip_final_interval ?? 0,
+        audit_mismatch_detected: manifest.unsafe_texture_hash_audit_mismatch_detected ?? false,
+        audit_incomplete: manifest.unsafe_texture_hash_audit_incomplete ?? false,
+        skipped_full_hashes: getCalls('texture_hash_unsafe_skipped'),
+        avoided_hash_range_bytes: getBytes('texture_hash_unsafe_skipped'),
+        full_hash_audits_after_skips: getCalls('texture_hash_unsafe_audit'),
+        changed_hashes_after_skips: getCalls('texture_hash_unsafe_audit_mismatch'),
+        unauditable_skips: getCalls('texture_hash_unsafe_unverified'),
+        changed_full_verifications: getCalls('texture_hash_changed'),
+        unchanged_full_verifications: getCalls('texture_hash_unchanged'),
+        same_scene_reuse: getCalls('texture_hash_scene_reused'),
+        warning: 'UNSAFE experimental mode: skipped checks can miss transient guest/HLE/GPU writes. Audits cannot prove correctness.'
+    };
+
     const report = {
         title: manifest.title,
         measurement: 'Render loop intervals, not physical display scans or game simulation FPS',
@@ -174,6 +194,7 @@ async function main() {
         frames: frameStats,
         hotspots,
         hle_nids,
+        texture_hash_experiment: experiment,
         hle_nids_scope: nidWindow,
         threads,
         trace: {
@@ -201,6 +222,15 @@ P50/P95/P99 intervals: ${frameStats.p50_ms?.toFixed(2) ?? 'n/a'} /
 ${frameStats.p95_ms?.toFixed(2) ?? 'n/a'} /
 ${frameStats.p99_ms?.toFixed(2) ?? 'n/a'} ms.</p>
 <p>Trace events dropped: ${manifest.events_dropped}; frame-ID gaps: ${frameIdGaps}; GPU timestamps: ${escapeHtml(manifest.gpu_timestamps)}.</p>
+<h2>Texture hash experiment (UNSAFE)</h2>
+<p>Requested audit interval: ${experiment.requested_skip_interval || 'off'};
+skipped hashes: ${experiment.skipped_full_hashes};
+avoided hash range bytes: ${experiment.avoided_hash_range_bytes};
+full-hash audits after skips: ${experiment.full_hash_audits_after_skips};
+audit mismatches: ${experiment.changed_hashes_after_skips};
+unverifiable invalidations: ${experiment.unauditable_skips}.
+${experiment.audit_mismatch_detected ? '<strong>EXPERIMENT STOPPED DUE TO MISMATCH.</strong>' : ''}
+${experiment.audit_incomplete ? '<strong>EXPERIMENT STOPPED: AUDIT INCOMPLETE.</strong>' : ''}</p>
 <small>CPU-side wall-time estimates may overlap and include preemption/driver waits.
 Do not add phases or treat rendered-loop intervals as game simulation FPS.</small>
 <h2>Hotspots</h2><table><thead><tr><th>Metric</th><th>Calls</th><th>Bytes</th><th>Samples</th><th>Estimated wall ms</th></tr></thead><tbody>${rows}</tbody></table>`;
@@ -213,7 +243,8 @@ Do not add phases or treat rendered-loop intervals as game simulation FPS.</smal
         const tickHz = traceHz;
         const names = {
             1:'render_begin', 2:'render_end', 3:'gxm_new_frame', 4:'batch_consume',
-            5:'hle_nid_sample', 6:'long_frame', 7:'pipeline_compiled', 8:'jit_cache_recycle'
+            5:'hle_nid_sample', 6:'long_frame', 7:'pipeline_compiled', 8:'jit_cache_recycle',
+            9:'unsafe_texture_hash_audit_mismatch'
         };
         const events = [];
         const firstTick = Number.isFinite(earliestTick) ? earliestTick : 0;

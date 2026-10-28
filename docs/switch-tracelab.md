@@ -136,6 +136,95 @@ frame IDs to filter missing-event gaps. For v2 it reports pooled hotspot
 estimates, independent frame interval statistics, aggregated NID samples
 (full session), and thread CPU checkpoint data.
 
+
+## Experimental cross-scene texture hash A/B (intentionally UNSAFE)
+
+The heavy `PCSD00035` scene produced almost entirely unchanged re-hash results,
+yet there is **no complete CPU/HLE/GPU guest-memory write tracking on Horizon**.
+A cross-scene skipped hash can therefore display **stale texture data**, even if
+a later audit finds the change. This is a temporary experimental diagnostic
+facility, **not a safe optimization** and **not a production default**.
+
+Use two **separate** game launches from the same warmed shader-cache/save/route,
+with comparable clocks, resolution, temperature, renderer and LSFG settings.
+Leave the RAM-first profiler enabled in the *same* mode in both tests:
+
+**A (correctness baseline, always complete hash)**
+
+```ini
+mode=auto
+legacy_csv=off
+unsafe_texture_hash_skip_interval=0
+```
+
+**B (explicit risky trial, audits every 8 scene epochs)**
+
+```ini
+mode=auto
+legacy_csv=off
+unsafe_texture_hash_skip_interval=8
+```
+
+The only accepted nonzero intervals are `4`, `8`, `16`, and `32`.
+Default and invalid values are `0`. With `mode=off`, unsafe skipping is
+automatically disabled: a hidden, unmonitored experiment is not allowed.
+
+Implementation properties:
+
+- New textures and recycled LRU slots start with a **full hash**.
+- A cached texture needs **eight separate unchanged cross-scene full
+  verifications** before any hash can be skipped.
+- A texture that has ever changed since its cache entry was created is never
+  selected for skipping again until its cache slot is recycled.
+- Import/export/replacement texture paths, invalid texture ranges, zero-size
+  textures, scene epoch zero and non-monotonic scenes always use the original
+  full-hash path. A backwards scene epoch resets the stable warm-up counter.
+  The existing same-scene memo remains intact.
+- The first full verification after one or more skips is an **audit**. If
+  changed bytes are detected (or a previously skipped range is now invalid),
+  all unsafe hash skipping is disabled **for the rest of that game session**.
+  The changed texture follows the normal upload/update path.
+- An LRU eviction, import/export transition, or unmapped source while a
+  skipped hash remains unaudited also disables the experiment for that session.
+  This is recorded separately as an incomplete audit, not as a detected
+  content mismatch.
+- This is **detection after the fact**, not prevention: an update that occurs
+  immediately after a skipped verification could produce stale pixels for
+  several scene epochs, and a transient write-and-restore between audits may
+  remain completely undetected. A zero mismatch count is **not proof of
+  correctness**.
+
+Additional TraceLab counters:
+
+| Counter | Meaning |
+| --- | --- |
+| `texture_hash_unsafe_skipped` | Full-hash operations omitted; `bytes` is the estimated source range not rescanned |
+| `texture_hash_unsafe_audit` | Subsequent full verifications following skips |
+| `texture_hash_unsafe_audit_mismatch` | Full-hash content change observed after prior skips; unsafe mode disabled |
+| `texture_hash_unsafe_unverified` | Skipped ranges lost auditability through eviction/mapping/replacement transition; unsafe mode disabled |
+| `texture_hash_changed` / `texture_hash_unchanged` | Original **actually executed** full verifications, not skipped checks |
+| `texture_hash_scene_reused` | Existing within-scene memoizations, independent of the unsafe experiment |
+
+`manifest.json` records `unsafe_texture_hash_skip_requested_interval`,
+`unsafe_texture_hash_skip_final_interval`, and
+`unsafe_texture_hash_audit_mismatch_detected` and
+`unsafe_texture_hash_audit_incomplete`. The PC analysis script adds
+`texture_hash_experiment` to JSON/HTML. If `audit_mismatch_detected=true`,
+discard that B run as a correctness failure and prefer `A`. Also discard
+an experiment where `audit_incomplete=true`: unchanged audit counts do not
+prove its earlier skips were safe.
+
+For the initial A/B, test the same sustained **90–120 seconds** of demanding
+gameplay, ensure there are no visible missing textures/artifacts, and compare
+`frames.csv` frame-ID continuity, source-loop throughput and P95/P99
+intervals. Compare CPU-side sampled `texture_hash` cost and scan bytes, plus
+`dcache_clean` (not modified by this experiment). Do **not** sum nested
+wall-clock phases or mistake estimated saved hash bytes for actual DRAM traffic.
+
+Even if the experiment increases FPS, a release-worthy permanent change still
+requires an authoritative version/dirty-tracking mechanism for every possible
+guest CPU, HLE, GPU and aliased-memory writer.
+
 ## First validation run
 
 1. Build/deploy the updated debug NRO, using the same Vulkan/NVK backend.

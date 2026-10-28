@@ -17,11 +17,14 @@ enum class Metric : uint8_t {
     DescriptorResolve, DescriptorUpdate, DescriptorBind,
     PipelineLookup, PipelineCompile, QueueSubmit, QueuePresent,
     RenderLoop, DrawBack, CollectorPoll,
-    TextureHashUnchanged, TextureHashChanged, TextureHashSceneReused, Count
+    TextureHashUnchanged, TextureHashChanged, TextureHashSceneReused,
+    TextureHashUnsafeSkipped, TextureHashUnsafeAudit,
+    TextureHashUnsafeAuditMismatch, TextureHashUnsafeUnverified, Count
 };
 enum class Event : uint16_t {
     RenderBegin = 1, RenderEnd, GxmNewFrame, BatchConsume,
-    HleNidSample, LongFrame, PipelineCompiled, JitCacheRecycle
+    HleNidSample, LongFrame, PipelineCompiled, JitCacheRecycle,
+    TextureHashUnsafeMismatch
 };
 
 #if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)
@@ -35,6 +38,11 @@ void nid_sample(uint32_t nid, uint32_t sampled_wall_us);
 void tag_thread(const char *label);
 void cpu_checkpoint();
 bool legacy_csv_enabled();
+// EXPERIMENTAL ONLY: cross-scene skips have no complete write tracking on
+// Horizon; explicitly opt in via tracelab.cfg and expect possible stale texels.
+uint32_t unsafe_texture_hash_skip_interval();
+void unsafe_texture_hash_audit_mismatch();
+void unsafe_texture_hash_audit_incomplete();
 void begin_session(const char *title_id);
 void end_session();
 void poll();
@@ -74,6 +82,9 @@ inline void nid_sample(uint32_t, uint32_t) {}
 inline void tag_thread(const char *) {}
 inline void cpu_checkpoint() {}
 inline bool legacy_csv_enabled() { return true; }
+inline uint32_t unsafe_texture_hash_skip_interval() { return 0; }
+inline void unsafe_texture_hash_audit_mismatch() {}
+inline void unsafe_texture_hash_audit_incomplete() {}
 inline void begin_session(const char *) {}
 inline void end_session() {}
 inline void poll() {}

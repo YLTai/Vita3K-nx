@@ -39,7 +39,9 @@ constexpr std::array<const char *, kMetrics> kNames = {
     "descriptor_resolve", "descriptor_update", "descriptor_bind",
     "pipeline_lookup", "pipeline_compile", "vk_queue_submit", "vk_queue_present",
     "render_loop", "draw_backend", "collector_poll",
-    "texture_hash_unchanged", "texture_hash_changed", "texture_hash_scene_reused"
+    "texture_hash_unchanged", "texture_hash_changed", "texture_hash_scene_reused",
+    "texture_hash_unsafe_skipped", "texture_hash_unsafe_audit",
+    "texture_hash_unsafe_audit_mismatch", "texture_hash_unsafe_unverified"
 };
 static_assert(kNames.size() == kMetrics);
 
@@ -114,6 +116,7 @@ struct Window {
 struct Options {
     Mode mode = Mode::Auto;
     bool legacy_csv = false;
+    uint32_t unsafe_hash_skip_interval = 0;
 };
 
 struct LocalState {
@@ -133,6 +136,10 @@ std::vector<Window> windows;
 std::vector<std::pair<std::string, std::string>> annotations;
 std::atomic<Mode> current_mode{Mode::Off};
 std::atomic<bool> legacy_csv{false};
+std::atomic<uint32_t> unsafe_hash_skip_interval{0};
+std::atomic<bool> unsafe_hash_skip_mismatch{false};
+std::atomic<bool> unsafe_hash_skip_incomplete{false};
+uint32_t unsafe_hash_skip_requested = 0;
 std::atomic<uint32_t> generation{0};
 std::atomic<uint32_t> next_slot{0};
 std::atomic<uint64_t> unavailable_slots{0};
@@ -189,6 +196,14 @@ Options read_options() {
             else if (value == "auto") opt.mode = Mode::Auto;
         } else if (key == "legacy_csv") {
             opt.legacy_csv = value == "1" || value == "true" || value == "on";
+        } else if (key == "unsafe_texture_hash_skip_interval") {
+            // Only these explicit intervals are accepted. No default
+            // performance mode can silently weaken texture validation.
+            if (value == "4") opt.unsafe_hash_skip_interval = 4;
+            else if (value == "8") opt.unsafe_hash_skip_interval = 8;
+            else if (value == "16") opt.unsafe_hash_skip_interval = 16;
+            else if (value == "32") opt.unsafe_hash_skip_interval = 32;
+            else opt.unsafe_hash_skip_interval = 0;
         }
     }
     std::fclose(file);
@@ -462,6 +477,15 @@ bool export_session(uint64_t final_tick) {
             legacy_csv.load(std::memory_order_relaxed) ? "true" : "false",
             static_cast<unsigned long long>(frequency()), to_ms(final_tick - origin_tick));
         std::fprintf(file,
+            "  \"unsafe_texture_hash_skip_requested_interval\": %u,\n"
+            "  \"unsafe_texture_hash_skip_final_interval\": %u,\n"
+            "  \"unsafe_texture_hash_audit_mismatch_detected\": %s,\n"
+            "  \"unsafe_texture_hash_audit_incomplete\": %s,\n",
+            unsafe_hash_skip_requested,
+            unsafe_hash_skip_interval.load(std::memory_order_relaxed),
+            unsafe_hash_skip_mismatch.load(std::memory_order_relaxed) ? "true" : "false",
+            unsafe_hash_skip_incomplete.load(std::memory_order_relaxed) ? "true" : "false");
+        std::fprintf(file,
             "  \"frames_recorded\": %u,\n  \"frames_overflow\": %llu,\n"
             "  \"events_dropped\": %llu,\n  \"window_rows_overflow\": %llu,\n"
             "  \"nid_samples_overflow\": %llu,\n  \"trace_bytes\": %llu,\n"
@@ -494,6 +518,21 @@ uint64_t ticks() { return armGetSystemTick(); }
 uint64_t frequency() { return armGetSystemTickFreq(); }
 const char *mode_name() { return mode_label(current_mode.load(std::memory_order_relaxed)); }
 bool legacy_csv_enabled() { return legacy_csv.load(std::memory_order_relaxed); }
+uint32_t unsafe_texture_hash_skip_interval() {
+    return unsafe_hash_skip_interval.load(std::memory_order_relaxed);
+}
+void unsafe_texture_hash_audit_mismatch() {
+    // Disable the experiment globally for the rest of this game session.
+    // The already skipped textures may have rendered stale content.
+    unsafe_hash_skip_mismatch.store(true, std::memory_order_relaxed);
+    unsafe_hash_skip_interval.store(0, std::memory_order_release);
+}
+void unsafe_texture_hash_audit_incomplete() {
+    // No audit is possible after eviction or an invalid guest mapping.
+    // A no-mismatch report is not evidence of correctness in that case.
+    unsafe_hash_skip_incomplete.store(true, std::memory_order_relaxed);
+    unsafe_hash_skip_interval.store(0, std::memory_order_release);
+}
 
 bool active(Domain domain) {
     // Light collects cheap counters for all domains, but does not sample time.
@@ -619,6 +658,15 @@ void begin_session(const char *title_id) {
     end_session();
     const auto options = read_options();
     legacy_csv.store(options.legacy_csv, std::memory_order_release);
+    // An "off" diagnostic mode cannot silently enable unmonitored
+    // inaccurate texture reuse. The experiment also requires a TraceLab
+    // build, so normal release binaries always use full hashing.
+    const uint32_t opt_in_interval = options.mode == Mode::Off
+        ? 0 : options.unsafe_hash_skip_interval;
+    unsafe_hash_skip_requested = opt_in_interval;
+    unsafe_hash_skip_mismatch.store(false, std::memory_order_relaxed);
+    unsafe_hash_skip_incomplete.store(false, std::memory_order_relaxed);
+    unsafe_hash_skip_interval.store(opt_in_interval, std::memory_order_release);
     session_mode = options.mode;
     title_name = title_id ? title_id : "unknown";
     if (options.mode == Mode::Off) {
@@ -662,8 +710,10 @@ void begin_session(const char *title_id) {
     next_poll_tick = origin_tick + frequency();
     generation.fetch_add(1, std::memory_order_release);
     current_mode.store(options.mode, std::memory_order_release);
-    LOG_INFO("[tracelab] mode={} deferred_io=on legacy_csv={} (writes only on normal exit)",
-        mode_name(), options.legacy_csv);
+    LOG_WARN("[tracelab] mode={} deferred_io=on legacy_csv={} unsafe_texture_hash_skip_interval={} (writes only on normal exit)",
+        mode_name(), options.legacy_csv, opt_in_interval);
+    if (opt_in_interval)
+        LOG_WARN("[tracelab] UNSAFE texture hash skipping enabled: may briefly render stale textures; audit interval={} scenes", opt_in_interval);
 }
 
 void poll() {

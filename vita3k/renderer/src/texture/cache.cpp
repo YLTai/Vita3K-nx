@@ -18,6 +18,7 @@
 #include <renderer/functions.h>
 
 #include <renderer/profile.h>
+#include <limits>
 #include <util/switch_tracelab.h>
 #include <renderer/texture_cache.h>
 
@@ -690,6 +691,14 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
         // Texture not found in cache.
         // get the least recently used texture, which info_list_head points to
         info = texture_queue.get_lru();
+#ifdef __SWITCH__
+        // If a slot is evicted before its skipped content is audited, that
+        // history cannot be validated. Stop the unsafe experiment globally.
+        if (info->hash_throttle.skipped_since_verification) {
+            tracelab::count(tracelab::Metric::TextureHashUnsafeUnverified);
+            tracelab::unsafe_texture_hash_audit_incomplete();
+        }
+#endif
         index = info->index;
         if (info->texture_size > 0) {
             // Cache is full.
@@ -707,6 +716,11 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
         // use the texture_repr representation, it contains everything we need and we can use it to erase the key
         // from texture_lookup later
         info->texture = std::bit_cast<SceGxmTexture>(texture_repr);
+#ifdef __SWITCH__
+        // The cache slot is an LRU object: discard experimental state when a
+        // different texture descriptor replaces its former contents.
+        info->hash_throttle = {};
+#endif
 
         // To prevent protecting too commonly accessed data that belongs to the page where the texture also resides
         // (for example, uniform buffer value and texture data got mixed, so page faults are triggered too many, it's not always good).
@@ -728,6 +742,11 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
             else
                 // the xor 1 is to make sure it won't be the same as hash_texture_nostride
                 info->hash = hash_texture_data(gxm_texture, info->texture_size, mem) ^ 1;
+#ifdef __SWITCH__
+            // A new cache entry has been fully verified, but must pass several
+            // independent scene verifications before it can be throttled.
+            texture::note_hash_verification(info->hash_throttle, memo_scene, false);
+#endif
         }
     } else {
         // Texture is cached.
@@ -745,15 +764,86 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
                 tracelab::count(tracelab::Metric::TextureHashSceneReused);
                 upload = false;
             } else {
-                const uint64_t previous_hash = info->hash;
-                if (import_textures || export_textures)
-                    info->hash = hash_texture_nostride(gxm_texture, mem);
-                else
-                    info->hash = hash_texture_data(gxm_texture, info->texture_size, mem) ^ 1;
+                bool experimental_skip = false;
+#ifdef __SWITCH__
+                const uint32_t unsafe_interval = tracelab::unsafe_texture_hash_skip_interval();
+                // A texture can be written by guest code, HLE, or the GPU at a
+                // scene boundary. This opt-in throttle is therefore explicitly
+                // UNSAFE; the full hash is still performed at every audit.
+                // Never throttle replacement/export paths, empty or unmapped
+                // ranges, a dynamically observed texture or a new LRU entry.
+                if (unsafe_interval && !import_textures && !export_textures
+                    && !info->is_imported && info->texture_size
+                    && texture::should_throttle_hash(info->hash_throttle,
+                        memo_scene, unsafe_interval)) {
+                    const uint64_t guest_begin = uint64_t{gxm_texture.data_addr} << 2;
+                    const uint64_t guest_end = guest_begin + info->texture_size;
+                    if (guest_begin && guest_end <= std::numeric_limits<Address>::max()
+                        && is_valid_addr_range(mem, static_cast<Address>(guest_begin),
+                            static_cast<Address>(guest_end))) {
+                        experimental_skip = true;
+                        texture::note_throttled_hash(info->hash_throttle);
+                        tracelab::count(tracelab::Metric::TextureHashUnsafeSkipped,
+                            info->texture_size);
+                    }
+                }
+#endif
+                if (experimental_skip) {
+                    // This cannot be proven safe on Horizon without complete
+                    // CPU/HLE/GPU write tracking. The default option is OFF.
+                    upload = false;
+                } else {
+                    const uint64_t previous_hash = info->hash;
+                    if (import_textures || export_textures)
+                        info->hash = hash_texture_nostride(gxm_texture, mem);
+                    else
+                        info->hash = hash_texture_data(gxm_texture, info->texture_size, mem) ^ 1;
 
-                upload = previous_hash != info->hash;
-                tracelab::count(upload ? tracelab::Metric::TextureHashChanged
-                    : tracelab::Metric::TextureHashUnchanged);
+                    upload = previous_hash != info->hash;
+                    tracelab::count(upload ? tracelab::Metric::TextureHashChanged
+                        : tracelab::Metric::TextureHashUnchanged);
+#ifdef __SWITCH__
+                    const bool audit_had_skips =
+                        info->hash_throttle.skipped_since_verification;
+                    if (import_textures || export_textures) {
+                        if (audit_had_skips) {
+                            tracelab::count(tracelab::Metric::TextureHashUnsafeUnverified);
+                            tracelab::unsafe_texture_hash_audit_incomplete();
+                        }
+                        info->hash_throttle = {};
+                    } else {
+                        // Inaccessible guest memory must not train a
+                        // "stable" state even when the hash value is equal.
+                        const uint64_t guest_begin = uint64_t{gxm_texture.data_addr} << 2;
+                        const uint64_t guest_end = guest_begin + info->texture_size;
+                        const bool mapped = !unsafe_interval
+                            || (guest_begin && info->texture_size
+                                && guest_end <= std::numeric_limits<Address>::max()
+                                && is_valid_addr_range(mem, static_cast<Address>(guest_begin),
+                                    static_cast<Address>(guest_end)));
+                        if (!mapped) {
+                            // Invalidated mappings cannot be safely audited.
+                            if (audit_had_skips) {
+                                tracelab::count(tracelab::Metric::TextureHashUnsafeUnverified);
+                                tracelab::unsafe_texture_hash_audit_incomplete();
+                            }
+                            info->hash_throttle = {};
+                        } else {
+                            if (audit_had_skips)
+                                tracelab::count(tracelab::Metric::TextureHashUnsafeAudit);
+                            if (texture::note_hash_verification(
+                                info->hash_throttle, memo_scene, upload)) {
+                                // Actual hash differs after previous skips.
+                                // Older draws may already have shown stale data.
+                                tracelab::count(tracelab::Metric::TextureHashUnsafeAuditMismatch);
+                                tracelab::unsafe_texture_hash_audit_mismatch();
+                                tracelab::event(tracelab::Event::TextureHashUnsafeMismatch,
+                                    gxm_texture.data_addr << 2, info->texture_size);
+                            }
+                        }
+                    }
+#endif
+                }
             }
         } else {
             range_protect_begin = align(gxm_texture.data_addr << 2, mem.host_page_size);

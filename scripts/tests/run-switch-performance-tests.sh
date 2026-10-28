@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUILD_DIR="${ROOT}/build-switch-preflight/performance-tests"
 mkdir -p "$BUILD_DIR"
 
-for test in descriptor_binding_cache vertex_input sampler_mru; do
+for test in descriptor_binding_cache vertex_input sampler_mru texture_hash_throttle; do
     "${CXX:-c++}" -std=c++20 -O2 -Wall -Wextra -Werror -pedantic \
         -I "$ROOT/vita3k/renderer/include" \
         -I "$ROOT/vita3k/util/include" -isystem "$ROOT/external/boost" \

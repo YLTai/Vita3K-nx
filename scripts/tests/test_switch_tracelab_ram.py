@@ -71,10 +71,11 @@ int main(int argc, char **argv) {
     std::filesystem::create_directories("sdmc:/switch/vita3k");
     {
         std::ofstream cfg("sdmc:/switch/vita3k/tracelab.cfg");
-        cfg << "mode=auto\nlegacy_csv=off\n";
+        cfg << "mode=auto\nlegacy_csv=off\nunsafe_texture_hash_skip_interval=8\n";
     }
     tracelab::begin_session("PCSD00035");
     assert(!tracelab::legacy_csv_enabled());
+    assert(tracelab::unsafe_texture_hash_skip_interval() == 8);
     tracelab::tag_thread("test-guest");
     tracelab::cpu_checkpoint();
     for (std::uint32_t frame = 1; frame <= 100; ++frame) {
@@ -94,6 +95,9 @@ int main(int argc, char **argv) {
         tracelab::cpu_checkpoint();
         tracelab::poll();
     }
+    // Audit mismatch must disable all unsafe skips without another rebuild.
+    tracelab::unsafe_texture_hash_audit_mismatch();
+    assert(tracelab::unsafe_texture_hash_skip_interval() == 0);
     // TraceLab must not create or write session files during gameplay.
     assert(!std::filesystem::exists("sdmc:/switch/vita3k/logs"));
     tracelab::end_session();
@@ -106,6 +110,7 @@ int main(int argc, char **argv) {
     }
     tracelab::begin_session("OFF");
     assert(tracelab::legacy_csv_enabled());
+    assert(tracelab::unsafe_texture_hash_skip_interval() == 0);
     tracelab::event(tracelab::Event::RenderEnd, 999);
     tracelab::end_session();
     return 0;
@@ -127,6 +132,10 @@ int main(int argc, char **argv) {
         session = sessions[0]
         manifest = json.loads((session / "manifest.json").read_text())
         assert manifest["schema_version"] == 2, manifest
+        assert manifest["unsafe_texture_hash_skip_requested_interval"] == 8
+        assert manifest["unsafe_texture_hash_skip_final_interval"] == 0
+        assert manifest["unsafe_texture_hash_audit_mismatch_detected"] is True
+        assert manifest["unsafe_texture_hash_audit_incomplete"] is False
         assert manifest["collector"] == "ram_only_until_exit", manifest
         assert not manifest["legacy_csv"], manifest
         assert manifest["frames_recorded"] == 100, manifest
