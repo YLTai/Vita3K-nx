@@ -195,9 +195,16 @@ static void test_stack_alias(void) {
     Result unmap = svcUnmapMemory(dst, src, PAGE_SIZE);
     add_result("svcUnmapMemory", unmap);
     if (R_SUCCEEDED(unmap)) {
-        query_region("source restored after Unmap", src, NULL);
-        add("source byte after unmap=%02X (expect E3 if alias was written)", ((volatile uint8_t*)src)[0]);
-        free(src);
+        MemoryInfo restored = {0};
+        const bool source_ok = query_region("source restored after Unmap", src, &restored)
+            && (restored.perm & Perm_Rw) == Perm_Rw;
+        if (source_ok) {
+            add("source byte after unmap=%02X (expect E3 if alias was written)",
+                ((volatile uint8_t*)src)[0]);
+            free(src);
+        } else {
+            add("Source not confirmed RW after unmap; NOT accessing or freeing.");
+        }
     } else {
         add("CRITICAL: unmap failed; source remains borrowed; NOT freeing.");
     }
@@ -323,8 +330,8 @@ int main(int argc, char **argv) {
         if (down & HidNpadButton_Plus) break;
         if (down & HidNpadButton_Down) ++scroll;
         if (down & HidNpadButton_Up) --scroll;
-        if (down & HidNpadButton_RStick) scroll = (int)line_count - SHOW_LINES;
-        if (down & HidNpadButton_LStick) scroll = 0;
+        if (down & HidNpadButton_StickR) scroll = (int)line_count - SHOW_LINES;
+        if (down & HidNpadButton_StickL) scroll = 0;
         if (scroll < 0) scroll = 0;
         if (scroll > (int)line_count - SHOW_LINES)
             scroll = line_count > SHOW_LINES ? (int)line_count - SHOW_LINES : 0;
