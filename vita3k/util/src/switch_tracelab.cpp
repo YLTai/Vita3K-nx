@@ -52,7 +52,9 @@ constexpr std::array<const char *, kMetrics> kNames = {
     "texture_hash_epoch_delta_8_15", "texture_hash_epoch_delta_16_31",
     "texture_hash_epoch_delta_32plus",
     "texture_scene_boundary", "texture_scene_context_switch",
-    "texture_scene_epoch_rewind", "texture_scene_epoch_collision"
+    "texture_scene_epoch_rewind", "texture_scene_epoch_collision",
+    "texture_hash_aggressive_skipped", "texture_hash_aggressive_audits",
+    "texture_hash_aggressive_quarantines", "texture_hash_aggressive_unverified"
 };
 static_assert(kNames.size() == kMetrics);
 
@@ -128,6 +130,7 @@ struct Options {
     Mode mode = Mode::Auto;
     bool legacy_csv = false;
     uint32_t unsafe_hash_skip_interval = 0;
+    uint32_t unsafe_recheck_interval = 0;
     // Probe-only classification: zero disables reason counters, not hashing.
     uint32_t hash_probe_interval = 8;
 };
@@ -150,6 +153,10 @@ std::vector<std::pair<std::string, std::string>> annotations;
 std::atomic<Mode> current_mode{Mode::Off};
 std::atomic<bool> legacy_csv{false};
 std::atomic<uint32_t> unsafe_hash_skip_interval{0};
+std::atomic<uint32_t> unsafe_recheck_interval{0};
+std::atomic<bool> aggressive_mismatch_seen{false};
+std::atomic<bool> aggressive_unverified_seen{false};
+uint32_t aggressive_requested_interval = 0;
 std::atomic<uint32_t> hash_probe_interval{0};
 std::atomic<bool> unsafe_hash_skip_mismatch{false};
 std::atomic<bool> unsafe_hash_skip_incomplete{false};
@@ -216,6 +223,16 @@ Options read_options() {
             else if (value == "8") opt.hash_probe_interval = 8;
             else if (value == "16") opt.hash_probe_interval = 16;
             else if (value == "32") opt.hash_probe_interval = 32;
+        } else if (key == "unsafe_texture_hash_recheck_interval") {
+            // Alternative count-based experiment, independent of scene gaps.
+            // Invalid input disables this deliberately risky setting.
+            if (value == "2") opt.unsafe_recheck_interval = 2;
+            else if (value == "4") opt.unsafe_recheck_interval = 4;
+            else if (value == "8") opt.unsafe_recheck_interval = 8;
+            else if (value == "16") opt.unsafe_recheck_interval = 16;
+            else if (value == "32") opt.unsafe_recheck_interval = 32;
+            else if (value == "64") opt.unsafe_recheck_interval = 64;
+            else opt.unsafe_recheck_interval = 0;
         } else if (key == "unsafe_texture_hash_skip_interval") {
             // Only these explicit intervals are accepted. No default
             // performance mode can silently weaken texture validation.
@@ -498,11 +515,19 @@ bool export_session(uint64_t final_tick) {
             static_cast<unsigned long long>(frequency()), to_ms(final_tick - origin_tick));
         std::fprintf(file,
             "  \"texture_hash_probe_interval\": %u,\n"
+            "  \"unsafe_texture_hash_recheck_requested_interval\": %u,\n"
+            "  \"unsafe_texture_hash_recheck_final_interval\": %u,\n"
+            "  \"unsafe_texture_hash_recheck_mismatch_seen\": %s,\n"
+            "  \"unsafe_texture_hash_recheck_unverified_seen\": %s,\n"
             "  \"unsafe_texture_hash_skip_requested_interval\": %u,\n"
             "  \"unsafe_texture_hash_skip_final_interval\": %u,\n"
             "  \"unsafe_texture_hash_audit_mismatch_detected\": %s,\n"
             "  \"unsafe_texture_hash_audit_incomplete\": %s,\n",
             hash_probe_interval.load(std::memory_order_relaxed),
+            aggressive_requested_interval,
+            unsafe_recheck_interval.load(std::memory_order_relaxed),
+            aggressive_mismatch_seen.load(std::memory_order_relaxed) ? "true" : "false",
+            aggressive_unverified_seen.load(std::memory_order_relaxed) ? "true" : "false",
             unsafe_hash_skip_requested,
             unsafe_hash_skip_interval.load(std::memory_order_relaxed),
             unsafe_hash_skip_mismatch.load(std::memory_order_relaxed) ? "true" : "false",
@@ -542,6 +567,17 @@ const char *mode_name() { return mode_label(current_mode.load(std::memory_order_
 bool legacy_csv_enabled() { return legacy_csv.load(std::memory_order_relaxed); }
 uint32_t unsafe_texture_hash_skip_interval() {
     return unsafe_hash_skip_interval.load(std::memory_order_relaxed);
+}
+uint32_t unsafe_texture_hash_recheck_interval() {
+    return unsafe_recheck_interval.load(std::memory_order_relaxed);
+}
+void unsafe_texture_hash_recheck_mismatch() {
+    // Quarantine is per texture in the renderer. Keep the experiment enabled
+    // for unrelated textures, but remember that stale pixels were possible.
+    aggressive_mismatch_seen.store(true, std::memory_order_relaxed);
+}
+void unsafe_texture_hash_recheck_unverified() {
+    aggressive_unverified_seen.store(true, std::memory_order_relaxed);
 }
 uint32_t texture_hash_probe_interval() {
     return hash_probe_interval.load(std::memory_order_relaxed);
@@ -686,12 +722,18 @@ void begin_session(const char *title_id) {
     // An "off" diagnostic mode cannot silently enable unmonitored
     // inaccurate texture reuse. The experiment also requires a TraceLab
     // build, so normal release binaries always use full hashing.
+    const uint32_t aggressive_interval = options.mode == Mode::Off
+        ? 0 : options.unsafe_recheck_interval;
+    aggressive_requested_interval = aggressive_interval;
     const uint32_t opt_in_interval = options.mode == Mode::Off
-        ? 0 : options.unsafe_hash_skip_interval;
+        || aggressive_interval != 0 ? 0 : options.unsafe_hash_skip_interval;
     unsafe_hash_skip_requested = opt_in_interval;
     unsafe_hash_skip_mismatch.store(false, std::memory_order_relaxed);
     unsafe_hash_skip_incomplete.store(false, std::memory_order_relaxed);
     unsafe_hash_skip_interval.store(opt_in_interval, std::memory_order_release);
+    unsafe_recheck_interval.store(aggressive_interval, std::memory_order_release);
+    aggressive_mismatch_seen.store(false, std::memory_order_relaxed);
+    aggressive_unverified_seen.store(false, std::memory_order_relaxed);
     hash_probe_interval.store(options.mode == Mode::Off ? 0 : options.hash_probe_interval,
         std::memory_order_release);
     session_mode = options.mode;
@@ -741,6 +783,8 @@ void begin_session(const char *title_id) {
         mode_name(), options.legacy_csv, opt_in_interval);
     if (opt_in_interval)
         LOG_WARN("[tracelab] UNSAFE texture hash skipping enabled: may briefly render stale textures; audit interval={} scenes", opt_in_interval);
+    if (aggressive_interval)
+        LOG_WARN("[tracelab] AGGRESSIVE UNSAFE texture hashing: verify once per {} cached uses. A stale texture can render for several frames; changed textures are quarantined individually.", aggressive_interval);
 }
 
 void poll() {

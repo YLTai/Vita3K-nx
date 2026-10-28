@@ -714,7 +714,14 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
         // history cannot be validated. Stop the unsafe experiment globally.
         if (info->hash_throttle.skipped_since_verification) {
             tracelab::count(tracelab::Metric::TextureHashUnsafeUnverified);
-            tracelab::unsafe_texture_hash_audit_incomplete();
+            if (tracelab::unsafe_texture_hash_recheck_interval()) {
+                // In the aggressive experiment, record the audit loss but
+                // continue with other cache slots; this evicted slot resets.
+                tracelab::count(tracelab::Metric::TextureHashAggressiveUnverified);
+                tracelab::unsafe_texture_hash_recheck_unverified();
+            } else {
+                tracelab::unsafe_texture_hash_audit_incomplete();
+            }
         }
 #endif
         index = info->index;
@@ -792,6 +799,7 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
                 bool experimental_skip = false;
 #ifdef __SWITCH__
                 const uint32_t unsafe_interval = tracelab::unsafe_texture_hash_skip_interval();
+                const uint32_t aggressive_interval = tracelab::unsafe_texture_hash_recheck_interval();
                 const uint32_t probe_interval = tracelab::texture_hash_probe_interval();
                 // Validate source mapping at most once when a probe or the
                 // unsafe A/B mode is otherwise eligible. The original full
@@ -882,8 +890,23 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
                 // A texture can be written by guest code, HLE, or the GPU at a
                 // scene boundary. This opt-in throttle remains deliberately
                 // UNSAFE; the full hash is performed on audit epochs.
-                if (unsafe_interval && !import_textures && !export_textures
-                    && !info->is_imported && info->texture_size
+                const bool ordinary_texture = !import_textures && !export_textures
+                    && !info->is_imported && info->texture_size;
+                if (aggressive_interval && ordinary_texture
+                    && texture::should_skip_by_reuse_count(
+                        info->hash_throttle, memo_scene, aggressive_interval)
+                    && valid_hash_range()) {
+                    // Unlike the scene-epoch gate, this skips up to N-1
+                    // *uses* after a confirmed stable hash. A full hash on
+                    // the Nth use audits even if the scene gap was >8.
+                    // This intentionally risks showing stale texture data.
+                    experimental_skip = true;
+                    texture::note_aggressive_hash_skip(info->hash_throttle);
+                    tracelab::count(tracelab::Metric::TextureHashAggressiveSkipped,
+                        info->texture_size);
+                    tracelab::count(tracelab::Metric::TextureHashUnsafeSkipped,
+                        info->texture_size);
+                } else if (unsafe_interval && ordinary_texture
                     && texture::should_throttle_hash(info->hash_throttle,
                         memo_scene, unsafe_interval)
                     && valid_hash_range()) {
@@ -913,7 +936,12 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
                     if (import_textures || export_textures) {
                         if (audit_had_skips) {
                             tracelab::count(tracelab::Metric::TextureHashUnsafeUnverified);
-                            tracelab::unsafe_texture_hash_audit_incomplete();
+                            if (aggressive_interval) {
+                                tracelab::count(tracelab::Metric::TextureHashAggressiveUnverified);
+                                tracelab::unsafe_texture_hash_recheck_unverified();
+                            } else {
+                                tracelab::unsafe_texture_hash_audit_incomplete();
+                            }
                         }
                         info->hash_throttle = {};
                     } else {
@@ -921,7 +949,7 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
                         // "stable" state even when the hash value is equal.
                         const uint64_t guest_begin = uint64_t{gxm_texture.data_addr} << 2;
                         const uint64_t guest_end = guest_begin + info->texture_size;
-                        const bool mapped = !unsafe_interval
+                        const bool mapped = !(unsafe_interval || aggressive_interval)
                             || (guest_begin && info->texture_size
                                 && guest_end <= std::numeric_limits<Address>::max()
                                 && is_valid_addr_range(mem, static_cast<Address>(guest_begin),
@@ -930,18 +958,36 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
                             // Invalidated mappings cannot be safely audited.
                             if (audit_had_skips) {
                                 tracelab::count(tracelab::Metric::TextureHashUnsafeUnverified);
-                                tracelab::unsafe_texture_hash_audit_incomplete();
+                                if (aggressive_interval) {
+                                    tracelab::count(tracelab::Metric::TextureHashAggressiveUnverified);
+                                    tracelab::unsafe_texture_hash_recheck_unverified();
+                                } else {
+                                    tracelab::unsafe_texture_hash_audit_incomplete();
+                                }
                             }
                             info->hash_throttle = {};
+                            if (aggressive_interval)
+                                info->hash_throttle.ever_changed = true;
                         } else {
-                            if (audit_had_skips)
+                            if (audit_had_skips) {
                                 tracelab::count(tracelab::Metric::TextureHashUnsafeAudit);
+                                if (aggressive_interval)
+                                    tracelab::count(tracelab::Metric::TextureHashAggressiveAudits);
+                            }
                             if (texture::note_hash_verification(
                                 info->hash_throttle, memo_scene, upload)) {
                                 // Actual hash differs after previous skips.
                                 // Older draws may already have shown stale data.
                                 tracelab::count(tracelab::Metric::TextureHashUnsafeAuditMismatch);
-                                tracelab::unsafe_texture_hash_audit_mismatch();
+                                if (aggressive_interval) {
+                                    // Quarantine THIS changed texture for the
+                                    // rest of its cache residency. The
+                                    // experiment continues for stable textures.
+                                    tracelab::count(tracelab::Metric::TextureHashAggressiveQuarantines);
+                                    tracelab::unsafe_texture_hash_recheck_mismatch();
+                                } else {
+                                    tracelab::unsafe_texture_hash_audit_mismatch();
+                                }
                                 tracelab::event(tracelab::Event::TextureHashUnsafeMismatch,
                                     gxm_texture.data_addr << 2, info->texture_size);
                             }

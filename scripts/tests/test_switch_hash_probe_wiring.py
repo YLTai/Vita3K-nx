@@ -34,6 +34,12 @@ assert "uint64_t memo_scene = 0;" in cache_h
 assert "const void *memo_scene_context = nullptr;" in cache_h
 assert "classify_hash_throttle(" in throttle_h
 assert "should_throttle_hash(" in cache
+assert "should_skip_by_reuse_count(" in throttle_h
+assert "note_aggressive_hash_skip(" in throttle_h
+assert "should_skip_by_reuse_count(" in cache
+assert "tracelab::unsafe_texture_hash_recheck_interval()" in cache
+assert "TextureHashAggressiveQuarantines" in cache
+assert "TextureHashAggressiveUnverified" in cache
 assert "tracelab::texture_hash_probe_interval()" in cache
 
 enum_match = re.search(r"enum class Metric\s*:\s*uint8_t\s*\{(.*?)\};", metrics_h, re.S)
@@ -61,6 +67,10 @@ expected = {
     "TextureSceneContextSwitch": "texture_scene_context_switch",
     "TextureSceneEpochRewind": "texture_scene_epoch_rewind",
     "TextureSceneEpochCollision": "texture_scene_epoch_collision",
+    "TextureHashAggressiveSkipped": "texture_hash_aggressive_skipped",
+    "TextureHashAggressiveAudits": "texture_hash_aggressive_audits",
+    "TextureHashAggressiveQuarantines": "texture_hash_aggressive_quarantines",
+    "TextureHashAggressiveUnverified": "texture_hash_aggressive_unverified",
 }
 for name, label in expected.items():
     assert name in enum_names, name
@@ -73,4 +83,7 @@ for name in expected:
 assert "hash_probe_interval = 8;" in metric_impl
 assert "texture_hash_probe_interval" in metric_impl
 assert "unsafe_hash_skip_interval = 0;" in metric_impl
+assert "unsafe_recheck_interval = 0;" in metric_impl
+assert "unsafe_texture_hash_recheck_interval" in metric_impl
+assert "aggressive_requested_interval = aggressive_interval;" in metric_impl
 print("TraceLab texture hash probe / context epoch wiring OK")

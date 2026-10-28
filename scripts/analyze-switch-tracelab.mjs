@@ -235,6 +235,21 @@ async function main() {
         explanation: 'Eligibility is a counterfactual probe using the current verification history, not proof that skipping Hash would be safe. Per-context local epoch semantics are unchanged.'
     };
 
+    const aggressive = {
+        requested_interval: manifest.unsafe_texture_hash_recheck_requested_interval ?? 0,
+        remaining_interval_at_exit: manifest.unsafe_texture_hash_recheck_final_interval ?? 0,
+        skipped_full_hashes: getCalls('texture_hash_aggressive_skipped'),
+        avoided_hash_range_bytes: getBytes('texture_hash_aggressive_skipped'),
+        audited_rechecks_after_skips: getCalls('texture_hash_aggressive_audits'),
+        quarantined_changed_textures: getCalls('texture_hash_aggressive_quarantines'),
+        unauditable_evictions_or_mappings: getCalls('texture_hash_aggressive_unverified'),
+        per_texture_quarantine_seen: manifest.unsafe_texture_hash_recheck_mismatch_seen ?? false,
+        incomplete_audits_seen: manifest.unsafe_texture_hash_recheck_unverified_seen ?? false,
+        // This change deliberately continues the test with other cache entries
+        // after a mismatch; it is never proof the skipped content was safe.
+        disclaimer: 'Aggressive reuse-count hash skipping is NOT safe without complete guest CPU/HLE/GPU write tracking; audits detect some stale results only after display.'
+    };
+
     const report = {
         title: manifest.title,
         measurement: 'Render loop intervals, not physical display scans or game simulation FPS',
@@ -244,6 +259,7 @@ async function main() {
         hle_nids,
         texture_hash_experiment: experiment,
         texture_hash_probe: probe,
+        texture_hash_aggressive: aggressive,
         hle_nids_scope: nidWindow,
         threads,
         trace: {
@@ -283,7 +299,17 @@ P50/P95/P99 intervals: ${frameStats.p50_ms?.toFixed(2) ?? 'n/a'} /
 ${frameStats.p95_ms?.toFixed(2) ?? 'n/a'} /
 ${frameStats.p99_ms?.toFixed(2) ?? 'n/a'} ms.</p>
 <p>Trace events dropped: ${manifest.events_dropped}; frame-ID gaps: ${frameIdGaps}; GPU timestamps: ${escapeHtml(manifest.gpu_timestamps)}.</p>
-<h2>Texture hash experiment (UNSAFE)</h2>
+<h2>Aggressive reuse-count Hash experiment (UNSAFE)</h2>
+<p>Requested every-Nth-check interval: ${aggressive.requested_interval || 'off'};
+skipped full hashes: ${aggressive.skipped_full_hashes};
+avoided source hash range bytes: ${aggressive.avoided_hash_range_bytes};
+full-hash audits: ${aggressive.audited_rechecks_after_skips};
+per-texture quarantine events: ${aggressive.quarantined_changed_textures};
+unverifiable evictions/mappings: ${aggressive.unauditable_evictions_or_mappings}.
+${aggressive.per_texture_quarantine_seen ? '<strong>CONTENT CHANGE AFTER SKIP: possible stale frames.</strong>' : ''}
+${aggressive.incomplete_audits_seen ? '<strong>Some skipped ranges could not be audited.</strong>' : ''}</p>
+<small>Not a production-safe optimization. A zero-error audit still cannot prove that Guest/HLE/GPU writes were seen.</small>
+<h2>Historical scene-epoch texture hash experiment (UNSAFE)</h2>
 <p>Requested audit interval: ${experiment.requested_skip_interval || 'off'};
 skipped hashes: ${experiment.skipped_full_hashes};
 avoided hash range bytes: ${experiment.avoided_hash_range_bytes};

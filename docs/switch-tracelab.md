@@ -137,6 +137,101 @@ estimates, independent frame interval statistics, aggregated NID samples
 (full session), and thread CPU checkpoint data.
 
 
+## Aggressive cross-scene hash reuse A/B (UNSAFE; intended for heavy scenes)
+
+The measured PCSD00035 heavy scene has roughly **nine scene boundaries per
+render loop**, so the original `unsafe_texture_hash_skip_interval=8`
+scene-epoch policy skips effectively nothing. The new **reuse-count policy**
+deliberately ignores the size of the scene gap. It verifies one full hash per
+N cached cross-scene texture *uses*, rather than at each Nth scene epoch.
+
+This is an opt-in **graphics-correctness experiment**. There is still no
+complete way to detect every CPU/HLE/GPU guest-memory write, and a skipped
+hash can display stale textures for several frames. Do not enable this on a
+build used for ordinary gameplay or assume that a clean audit proves safety.
+
+**A (original full hashing, same instrumented NRO):**
+
+```ini
+mode=auto
+legacy_csv=off
+texture_hash_probe_interval=0
+unsafe_texture_hash_skip_interval=0
+unsafe_texture_hash_recheck_interval=0
+```
+
+**B (aggressive: after a confirmed unchanged recheck, skip 7 of every 8
+cached cross-scene uses):**
+
+```ini
+mode=auto
+legacy_csv=off
+texture_hash_probe_interval=0
+unsafe_texture_hash_skip_interval=0
+unsafe_texture_hash_recheck_interval=8
+```
+
+Permitted nonzero recheck intervals are `2`, `4`, `8`, `16`, `32`,
+and `64`; `0` is the safe default. Larger values are more aggressive.
+If both the old scene-epoch and new recheck-count knobs are nonzero, the
+**reuse-count mode takes precedence** and turns off the old mode.
+`mode=off` disables both experiments.
+
+The throttle is specific to one cached texture entry:
+
+- First cache insertion performs a complete hash; the next complete
+  verification must also be unchanged before the policy starts skipping.
+- Under interval 8, up to seven subsequent distinct-scene cached uses are
+  skipped. Use number eight performs a complete audit regardless of whether
+  the scene epoch advanced by 1, 9, or 200.
+- An entry that has ever changed during its lifetime is excluded from
+  further skipping until its cache slot is recycled.
+- A change detected after skipped uses **quarantines that texture**, but
+  unlike the old cautious mode it **does not abort the entire experiment**.
+  Other eligible textures continue to skip, so the heavy-scene test remains
+  meaningful.
+- If a skipped texture is evicted or its original mapping cannot be
+  audited, mark the trial as containing **unverifiable skipped data**.
+  The removed entry cannot reuse its former state. Other entries continue.
+- Imports/exports, invalid ranges and same-scene memoization retain their
+  existing handling. No modification of CPU DCache Clean/Flush, GPU barriers
+  or resource uploads is intended in the full-hash A mode.
+
+New summary counters:
+
+| Metric | Description |
+| --- | --- |
+| `texture_hash_aggressive_skipped` | Full hashes skipped; byte total is the estimated source range not rescanned |
+| `texture_hash_aggressive_audits` | Full rechecks of textures after one or more skipped uses |
+| `texture_hash_aggressive_quarantines` | Confirmed content changes after skipped uses; earlier frames **may be wrong** |
+| `texture_hash_aggressive_unverified` | LRU eviction or invalidation prevented confirmation of skipped content |
+
+The manifest also records
+`unsafe_texture_hash_recheck_requested_interval`,
+`unsafe_texture_hash_recheck_final_interval`,
+`unsafe_texture_hash_recheck_mismatch_seen` and
+`unsafe_texture_hash_recheck_unverified_seen`.
+The PC analyzer adds a `texture_hash_aggressive` object and a clearly
+labeled warning section in HTML.
+
+Run both A and B for the same warmed `PCSD00035` heavy scene, ideally
+90–120 seconds each, with matching clocks, image resolution, save,
+LSFG state and rendering config. Use `--start-ms 100000 --end-ms 170000`
+for the same analysis interval if the recordings contain that route.
+Compare rendered-loop throughput, actual contiguous frame-time P50/P95/P99,
+hash bytes and wall-time samples, and visual correctness. **Do not infer
+from the expected 7/8 Hash skip ratio that FPS must improve 7/8 as much**:
+the 9–10 ms/loop full-hash wall-cost estimate may overlap CPU/GPU work or
+include scheduling.
+
+If this test has a clear speedup but visual errors or quarantines,
+the underlying opportunity is real but the algorithm is **not release
+safe**. The next correct step is an authoritative write-version system
+covering Guest JIT stores, HLE writes, GPU shader stores and aliased
+memory—not a blind increase to interval 64.
+
+---
+
 ## Heavy-scene texture Hash eligibility diagnosis (safe, default)
 
 The initial A/B trial of PCSD00035 skipped hashes only in the lighter early

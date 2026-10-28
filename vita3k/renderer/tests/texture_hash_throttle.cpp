@@ -11,6 +11,8 @@ using renderer::texture::HASH_THROTTLE_WARMUP_SCENES;
 using renderer::texture::note_hash_verification;
 using renderer::texture::note_throttled_hash;
 using renderer::texture::should_throttle_hash;
+using renderer::texture::should_skip_by_reuse_count;
+using renderer::texture::note_aggressive_hash_skip;
 
 int main() {
     HashThrottleState state{};
@@ -99,5 +101,49 @@ int main() {
         note_hash_verification(rewound, epoch, false);
     assert(rewound.stable_verifications == 8);
     assert(classify_hash_throttle(rewound, 19, 8) == D::Eligible);
+
+    // AGGRESSIVE A/B: the old scheme never skips when 9 scene epochs elapse
+    // between uses; counted reuse should sample the same stable texture
+    // once in 8 real lookups regardless of that scene distance.
+    HashThrottleState heavy{};
+    assert(!should_skip_by_reuse_count(heavy, 1, 8));
+    note_hash_verification(heavy, 1, false); // initial cache entry
+    assert(!should_skip_by_reuse_count(heavy, 10, 8));
+    assert(!note_hash_verification(heavy, 10, false)); // one unchanged full recheck
+    assert(!should_throttle_hash(heavy, 19, 8)); // old policy blocks: delta = 9
+    assert(should_skip_by_reuse_count(heavy, 19, 8));
+    for (uint32_t repeat = 0; repeat < 7; ++repeat) {
+        assert(should_skip_by_reuse_count(heavy, 19 + 9 * repeat, 8));
+        note_aggressive_hash_skip(heavy);
+    }
+    assert(heavy.skipped_since_verification);
+    assert(heavy.aggressive_skips_since_audit == 7);
+    assert(!should_skip_by_reuse_count(heavy, 82, 8)); // eighth use is full audit
+    assert(!note_hash_verification(heavy, 82, false));
+    assert(!heavy.skipped_since_verification);
+    assert(heavy.aggressive_skips_since_audit == 0);
+    assert(should_skip_by_reuse_count(heavy, 91, 8));
+
+    note_aggressive_hash_skip(heavy);
+    assert(note_hash_verification(heavy, 100, true)); // mismatch after skip
+    assert(heavy.ever_changed); // permanently quarantine THIS texture
+    assert(!should_skip_by_reuse_count(heavy, 109, 8));
+    for (uint64_t epoch = 109; epoch < 190; epoch += 9)
+        note_hash_verification(heavy, epoch, false);
+    assert(!should_skip_by_reuse_count(heavy, 200, 8));
+
+    // A recycled cache entry must start from the cold baseline.
+    heavy = {};
+    assert(!should_skip_by_reuse_count(heavy, 200, 8));
+    note_hash_verification(heavy, 200, false);
+    note_hash_verification(heavy, 209, false);
+    assert(should_skip_by_reuse_count(heavy, 218, 8));
+    assert(!should_skip_by_reuse_count(heavy, 218, 1));
+    assert(!should_skip_by_reuse_count(heavy, 0, 8));
+    assert(!should_skip_by_reuse_count(heavy, 218, 65));
+    assert(should_skip_by_reuse_count(heavy, 218, 2));
+    note_aggressive_hash_skip(heavy);
+    assert(!should_skip_by_reuse_count(heavy, 227, 2));
+    assert(should_skip_by_reuse_count(heavy, 227, 64));
     return 0;
 }

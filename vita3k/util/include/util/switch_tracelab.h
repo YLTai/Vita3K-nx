@@ -31,6 +31,8 @@ enum class Metric : uint8_t {
     TextureHashEpochDelta32Plus,
     TextureSceneBoundary, TextureSceneContextSwitch,
     TextureSceneEpochRewind, TextureSceneEpochCollision,
+    TextureHashAggressiveSkipped, TextureHashAggressiveAudits,
+    TextureHashAggressiveQuarantines, TextureHashAggressiveUnverified,
     Count
 };
 enum class Event : uint16_t {
@@ -53,6 +55,12 @@ bool legacy_csv_enabled();
 // EXPERIMENTAL ONLY: cross-scene skips have no complete write tracking on
 // Horizon; explicitly opt in via tracelab.cfg and expect possible stale texels.
 uint32_t unsafe_texture_hash_skip_interval();
+// Aggressive, per-texture reuse-count experiment (explicit opt-in only).
+// Unlike the historical scene-epoch throttle, this is designed to reach
+// heavy scenes with >8 scene boundaries per rendered frame.
+uint32_t unsafe_texture_hash_recheck_interval();
+void unsafe_texture_hash_recheck_mismatch();
+void unsafe_texture_hash_recheck_unverified();
 // Independent, read-only interval used to classify would-be Hash skips.
 // Diagnostic classifications never change cache/hash validity.
 uint32_t texture_hash_probe_interval();
@@ -98,6 +106,9 @@ inline void tag_thread(const char *) {}
 inline void cpu_checkpoint() {}
 inline bool legacy_csv_enabled() { return true; }
 inline uint32_t unsafe_texture_hash_skip_interval() { return 0; }
+inline uint32_t unsafe_texture_hash_recheck_interval() { return 0; }
+inline void unsafe_texture_hash_recheck_mismatch() {}
+inline void unsafe_texture_hash_recheck_unverified() {}
 inline uint32_t texture_hash_probe_interval() { return 0; }
 inline void unsafe_texture_hash_audit_mismatch() {}
 inline void unsafe_texture_hash_audit_incomplete() {}

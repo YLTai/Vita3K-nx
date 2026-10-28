@@ -71,11 +71,14 @@ int main(int argc, char **argv) {
     std::filesystem::create_directories("sdmc:/switch/vita3k");
     {
         std::ofstream cfg("sdmc:/switch/vita3k/tracelab.cfg");
-        cfg << "mode=auto\nlegacy_csv=off\nunsafe_texture_hash_skip_interval=8\n";
+        cfg << "mode=auto\nlegacy_csv=off\n"
+               "unsafe_texture_hash_skip_interval=8\n"
+               "unsafe_texture_hash_recheck_interval=8\n";
     }
     tracelab::begin_session("PCSD00035");
     assert(!tracelab::legacy_csv_enabled());
-    assert(tracelab::unsafe_texture_hash_skip_interval() == 8);
+    assert(tracelab::unsafe_texture_hash_skip_interval() == 0);
+    assert(tracelab::unsafe_texture_hash_recheck_interval() == 8);
     assert(tracelab::texture_hash_probe_interval() == 8);
     tracelab::tag_thread("test-guest");
     tracelab::cpu_checkpoint();
@@ -90,14 +93,18 @@ int main(int argc, char **argv) {
             tracelab::Scope hashing(tracelab::Metric::TextureHash, tracelab::Domain::Render, 65536);
             test_tick += 350;
             tracelab::count(tracelab::Metric::TextureHashUnchanged);
+            tracelab::count(tracelab::Metric::TextureHashAggressiveSkipped, 65536);
         }
         test_tick += 19200000ULL / 25;
         tracelab::event(tracelab::Event::RenderEnd, frame);
         tracelab::cpu_checkpoint();
         tracelab::poll();
     }
-    // Audit mismatch must disable all unsafe skips without another rebuild.
-    tracelab::unsafe_texture_hash_audit_mismatch();
+    // Aggressive mode quarantines individual changed textures while keeping
+    // the mode active for other textures; both failure flags remain visible.
+    tracelab::unsafe_texture_hash_recheck_mismatch();
+    tracelab::unsafe_texture_hash_recheck_unverified();
+    assert(tracelab::unsafe_texture_hash_recheck_interval() == 8);
     assert(tracelab::unsafe_texture_hash_skip_interval() == 0);
     // TraceLab must not create or write session files during gameplay.
     assert(!std::filesystem::exists("sdmc:/switch/vita3k/logs"));
@@ -112,6 +119,7 @@ int main(int argc, char **argv) {
     tracelab::begin_session("OFF");
     assert(tracelab::legacy_csv_enabled());
     assert(tracelab::unsafe_texture_hash_skip_interval() == 0);
+    assert(tracelab::unsafe_texture_hash_recheck_interval() == 0);
     assert(tracelab::texture_hash_probe_interval() == 0);
     tracelab::event(tracelab::Event::RenderEnd, 999);
     tracelab::end_session();
@@ -134,10 +142,14 @@ int main(int argc, char **argv) {
         session = sessions[0]
         manifest = json.loads((session / "manifest.json").read_text())
         assert manifest["schema_version"] == 2, manifest
-        assert manifest["unsafe_texture_hash_skip_requested_interval"] == 8
+        assert manifest["unsafe_texture_hash_skip_requested_interval"] == 0
         assert manifest["texture_hash_probe_interval"] == 8
         assert manifest["unsafe_texture_hash_skip_final_interval"] == 0
-        assert manifest["unsafe_texture_hash_audit_mismatch_detected"] is True
+        assert manifest["unsafe_texture_hash_recheck_requested_interval"] == 8
+        assert manifest["unsafe_texture_hash_recheck_final_interval"] == 8
+        assert manifest["unsafe_texture_hash_recheck_mismatch_seen"] is True
+        assert manifest["unsafe_texture_hash_recheck_unverified_seen"] is True
+        assert manifest["unsafe_texture_hash_audit_mismatch_detected"] is False
         assert manifest["unsafe_texture_hash_audit_incomplete"] is False
         assert manifest["collector"] == "ram_only_until_exit", manifest
         assert not manifest["legacy_csv"], manifest
@@ -172,6 +184,9 @@ int main(int argc, char **argv) {
             assert analysis["frames"]["frame_id_gaps"] == 0
             assert analysis["frames"]["count"] == 100
             assert analysis["trace"]["events_dropped"] == 0
+            assert analysis["texture_hash_aggressive"]["requested_interval"] == 8
+            assert analysis["texture_hash_aggressive"]["skipped_full_hashes"] == 100
+            assert analysis["texture_hash_aggressive"]["per_texture_quarantine_seen"] is True
 
         print("TraceLab host smoke test OK (RAM-only, 100 frames, NID aggregation)")
 

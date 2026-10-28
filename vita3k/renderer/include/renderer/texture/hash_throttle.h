@@ -14,6 +14,10 @@ struct HashThrottleState {
     uint8_t stable_verifications = 0;
     bool ever_changed = false;
     bool skipped_since_verification = false;
+    // Deliberately unsafe diagnostic experiment: validation count, not scene
+    // distance. A stable texture is sampled once per N cross-scene reuses.
+    uint8_t aggressive_confirmed = 0;
+    uint8_t aggressive_skips_since_audit = 0;
 };
 
 constexpr uint8_t HASH_THROTTLE_WARMUP_SCENES = 8;
@@ -60,6 +64,25 @@ constexpr bool should_throttle_hash(const HashThrottleState &state,
         == HashThrottleDecision::Eligible;
 }
 
+// Aggressive A/B ignores the distance between two scene epochs. In the
+// measured heavy scene, that distance is ~9 for each source frame, so the
+// old 8-epoch gate never skipped a single hash. This strategy deliberately
+// tolerates missed Guest/HLE/GPU writes until the next periodic audit.
+constexpr bool should_skip_by_reuse_count(const HashThrottleState &state,
+    uint64_t scene, uint32_t verify_every) {
+    return verify_every >= 2 && verify_every <= 64
+        && scene != 0 && !state.ever_changed
+        && state.last_verified_scene != 0
+        && state.aggressive_confirmed >= 1
+        && static_cast<uint32_t>(state.aggressive_skips_since_audit) + 1
+            < verify_every;
+}
+
+inline void note_aggressive_hash_skip(HashThrottleState &state) {
+    ++state.aggressive_skips_since_audit;
+    state.skipped_since_verification = true;
+}
+
 inline void note_throttled_hash(HashThrottleState &state) {
     state.skipped_since_verification = true;
 }
@@ -82,11 +105,18 @@ inline bool note_hash_verification(HashThrottleState &state,
         // cache slot, even if the experiment remains globally enabled.
         state.ever_changed = true;
         state.stable_verifications = 0;
+        state.aggressive_confirmed = 0;
     } else if (!reset_epoch && scene != state.last_verified_scene
         && state.last_verified_scene != 0
         && state.stable_verifications < std::numeric_limits<uint8_t>::max()) {
         ++state.stable_verifications;
     }
+    // Reuse-count eligibility is intentionally independent of the scene
+    // epoch gap (and its context-local rewinds). It requires one additional
+    // unchanged full verification after the initial cache entry hash.
+    if (!changed && state.last_verified_scene != 0 && scene != 0)
+        state.aggressive_confirmed = 1;
+    state.aggressive_skips_since_audit = 0;
     state.last_verified_scene = scene;
     state.skipped_since_verification = false;
     return audit_mismatch;
