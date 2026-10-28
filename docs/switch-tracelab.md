@@ -137,6 +137,84 @@ estimates, independent frame interval statistics, aggregated NID samples
 (full session), and thread CPU checkpoint data.
 
 
+## Heavy-scene texture Hash eligibility diagnosis (safe, default)
+
+The initial A/B trial of PCSD00035 skipped hashes only in the lighter early
+scenes, **zero in the sustained heavy scene**. Rather than increasing an
+unsafe interval, TraceLab now records *why* a cached texture does or does not
+qualify for the existing throttle state machine.
+
+Run the exact-hash baseline with the following configuration:
+
+```ini
+mode=auto
+legacy_csv=off
+texture_hash_probe_interval=8
+unsafe_texture_hash_skip_interval=0
+```
+
+**This probe does not skip hashes, bypass cache maintenance, alter scene
+numbers or change upload decisions.** The unsafe experiment remains fully
+disabled. The independent probe interval defaults to `8` (allowed `0`,
+`4`, `8`, `16`, `32`), so existing `auto` configurations get the new
+reason counters without extra rebuilds or config edits. Setting the probe
+to `0` suppresses its reason counters only, **not** the full Hash.
+
+Each eligible cached, cross-scene lookup is placed in one of the following
+mutually exclusive reasons. Counters include call counts and the inspected
+texture source range in bytes; they are not physical DRAM traffic:
+
+| Counter | Meaning |
+| --- | --- |
+| `texture_hash_probe_eligible` | Would qualify under *current verification history* and an intact mapping |
+| `texture_hash_probe_warmup` | Fewer than 8 independent unchanged scene verifications |
+| `texture_hash_probe_changed` | This cache entry was previously observed to change |
+| `texture_hash_probe_audit_due` | Epoch gap since last full verification is at least the interval |
+| `texture_hash_probe_nonmonotonic` | Epoch did not advance relative to last verification |
+| `texture_hash_probe_no_epoch` / `texture_hash_probe_no_baseline` | Missing usable scene timestamp or baseline |
+| `texture_hash_probe_import_export` | Replacement, import or export path cannot use the throttle |
+| `texture_hash_probe_no_range` / `texture_hash_probe_invalid_mapping` | Source range cannot safely be used for the probe |
+| `texture_hash_probe_new_entry` | Cache misses requiring initial full Hash; useful for diagnosing LRU churn |
+
+An independent epoch-gap histogram reports
+`texture_hash_epoch_delta_1`, `_2_7`, `_8_15`, `_16_31`,
+`_32plus`. Large `_8_15` and `_32plus` bins point toward textures
+being accessed many scene boundaries apart, rather than low Hash cache
+hit rates.
+
+### Per-Context scene epoch diagnostics
+
+The shared Switch texture cache receives local `scene_timestamp` values
+from different Vulkan contexts. The following events are counted at
+**every scene assignment**:
+
+- `texture_scene_boundary`: assignment occurred.
+- `texture_scene_context_switch`: a different context assigned the next
+  epoch value.
+- `texture_scene_epoch_rewind`: assigned local epoch decreased relative to
+  the previously assigned value.
+- `texture_scene_epoch_collision`: context changed, but the assigned local
+  epoch *equals* the previous context's epoch.
+
+**Do not interpret these as proof that cache coherence is broken.** They
+measure whether the current per-context epoch model is consistent enough
+for a cross-context throttle. This revision intentionally **does not
+replace** the existing `memo_scene` with a new global epoch; that change
+could affect same-scene Hash memoization and unrelated buffer sync rules.
+We will decide only after real-world counters and a dedicated correctness
+test.
+
+`node scripts/analyze-switch-tracelab.mjs <session-dir>
+--start-ms 100000 --end-ms 170000` writes
+`texture_hash_probe` to the JSON report, including an exclusive rejection
+breakdown, byte ranges, epoch-gap histogram, context switches, rewinds and
+collisions. Its HTML output includes the most frequent reasons.
+
+**Important:** `eligible` is a counterfactual count in the baseline,
+not a measurement of guaranteed savings. In A, full hashing updates
+`last_verified_scene` on every use; in B, skipped checks do not.
+The two distributions are not automatically identical.
+
 ## Experimental cross-scene texture hash A/B (intentionally UNSAFE)
 
 The heavy `PCSD00035` scene produced almost entirely unchanged re-hash results,
@@ -154,6 +232,7 @@ Leave the RAM-first profiler enabled in the *same* mode in both tests:
 ```ini
 mode=auto
 legacy_csv=off
+texture_hash_probe_interval=8
 unsafe_texture_hash_skip_interval=0
 ```
 
@@ -162,6 +241,7 @@ unsafe_texture_hash_skip_interval=0
 ```ini
 mode=auto
 legacy_csv=off
+texture_hash_probe_interval=8
 unsafe_texture_hash_skip_interval=8
 ```
 

@@ -187,6 +187,54 @@ async function main() {
         warning: 'UNSAFE experimental mode: skipped checks can miss transient guest/HLE/GPU writes. Audits cannot prove correctness.'
     };
 
+    // All values refer to the selected time window, unlike the full-session
+    // HLE NID table. In older TraceLab sessions, these probes did not exist;
+    // return null instead of implying there were no rejected candidates.
+    const probeReasons = [
+        ['eligible', 'texture_hash_probe_eligible'],
+        ['warmup', 'texture_hash_probe_warmup'],
+        ['previously_changed', 'texture_hash_probe_changed'],
+        ['no_scene_epoch', 'texture_hash_probe_no_epoch'],
+        ['no_prior_verification', 'texture_hash_probe_no_baseline'],
+        ['epoch_nonmonotonic', 'texture_hash_probe_nonmonotonic'],
+        ['audit_due', 'texture_hash_probe_audit_due'],
+        ['import_or_replacement', 'texture_hash_probe_import_export'],
+        ['no_source_range', 'texture_hash_probe_no_range'],
+        ['invalid_mapping', 'texture_hash_probe_invalid_mapping']
+    ];
+    const reasonValues = Object.fromEntries(probeReasons.map(([label, metric]) =>
+        [label, {calls: getCalls(metric), bytes: getBytes(metric)}]));
+    const deltaMetrics = [
+        ['delta_1', 'texture_hash_epoch_delta_1'],
+        ['delta_2_to_7', 'texture_hash_epoch_delta_2_7'],
+        ['delta_8_to_15', 'texture_hash_epoch_delta_8_15'],
+        ['delta_16_to_31', 'texture_hash_epoch_delta_16_31'],
+        ['delta_32_plus', 'texture_hash_epoch_delta_32plus']
+    ];
+    const epochValues = Object.fromEntries(deltaMetrics.map(([label, metric]) =>
+        [label, {calls: getCalls(metric), bytes: getBytes(metric)}]));
+    const measuredLoops = getCalls('render_loop');
+    const considered = Object.values(reasonValues).reduce((sum, v) => sum + v.calls, 0);
+    const probe = manifest.texture_hash_probe_interval === undefined ? {
+        available: false,
+        description: 'Older capture: texture hash rejection reasons were not recorded.'
+    } : {
+        available: true,
+        interval: manifest.texture_hash_probe_interval,
+        considered_cached_texture_checks: considered,
+        eligible_fraction: considered ? reasonValues.eligible.calls / considered : null,
+        probe_new_entries: getCalls('texture_hash_probe_new_entry'),
+        probe_new_entry_bytes: getBytes('texture_hash_probe_new_entry'),
+        reasons: reasonValues,
+        epoch_delta_histogram: epochValues,
+        scene_boundaries: getCalls('texture_scene_boundary'),
+        context_switches: getCalls('texture_scene_context_switch'),
+        epoch_rewinds: getCalls('texture_scene_epoch_rewind'),
+        cross_context_epoch_collisions: getCalls('texture_scene_epoch_collision'),
+        render_loops_in_window: measuredLoops,
+        explanation: 'Eligibility is a counterfactual probe using the current verification history, not proof that skipping Hash would be safe. Per-context local epoch semantics are unchanged.'
+    };
+
     const report = {
         title: manifest.title,
         measurement: 'Render loop intervals, not physical display scans or game simulation FPS',
@@ -195,6 +243,7 @@ async function main() {
         hotspots,
         hle_nids,
         texture_hash_experiment: experiment,
+        texture_hash_probe: probe,
         hle_nids_scope: nidWindow,
         threads,
         trace: {
@@ -211,6 +260,18 @@ async function main() {
     console.log(JSON.stringify(report, null, 2));
 
     if (htmlPath) {
+        const probeRows = probe.available ? Object.entries(probe.reasons)
+            .sort((a,b) => b[1].calls - a[1].calls)
+            .map(([name,v]) => `<tr><td>${escapeHtml(name)}</td><td>${v.calls}</td><td>${v.bytes}</td></tr>`)
+            .join('') : '';
+        const probeHtml = probe.available
+            ? `<h2>Texture hash probe (no changes to cache validity)</h2>
+<p>Probe interval: ${probe.interval}; cached checks classified: ${probe.considered_cached_texture_checks};
+eligible share: ${probe.eligible_fraction === null ? 'n/a' : (probe.eligible_fraction * 100).toFixed(2) + '%'}.
+Scene boundaries: ${probe.scene_boundaries}; context switches: ${probe.context_switches};
+epoch rewinds: ${probe.epoch_rewinds}; cross-context collisions: ${probe.cross_context_epoch_collisions}.</p>
+<table><thead><tr><th>Reason</th><th>Calls</th><th>Texture source range bytes</th></tr></thead><tbody>${probeRows}</tbody></table>`
+            : '<p>Texture hash probe not present in this older capture.</p>';
         const rows = hotspots.map(item => `<tr><td>${escapeHtml(item.metric)}</td><td>${item.calls}</td><td>${item.bytes}</td><td>${item.samples}</td><td>${item.estimated_wall_ms === null ? 'n/a' : item.estimated_wall_ms.toFixed(3)}</td></tr>`).join('');
         const html = `<!doctype html><meta charset="utf-8"><title>Vita3K TraceLab</title>
 <style>body{font:15px system-ui;margin:3rem auto;max-width:980px;padding:0 1rem;color:#222}
@@ -233,6 +294,7 @@ ${experiment.audit_mismatch_detected ? '<strong>EXPERIMENT STOPPED DUE TO MISMAT
 ${experiment.audit_incomplete ? '<strong>EXPERIMENT STOPPED: AUDIT INCOMPLETE.</strong>' : ''}</p>
 <small>CPU-side wall-time estimates may overlap and include preemption/driver waits.
 Do not add phases or treat rendered-loop intervals as game simulation FPS.</small>
+${probeHtml}
 <h2>Hotspots</h2><table><thead><tr><th>Metric</th><th>Calls</th><th>Bytes</th><th>Samples</th><th>Estimated wall ms</th></tr></thead><tbody>${rows}</tbody></table>`;
         await writeFile(htmlPath, html);
     }

@@ -97,6 +97,11 @@ public:
     // texture data to detect CPU updates; a texture verified in the current
     // epoch cannot have changed and needs no second walk.
     uint64_t memo_scene = 0;
+    // Diagnostic-only identity of the context that last assigned memo_scene.
+    // Do not silently change the existing per-context scene semantics before
+    // confirming their effect with heavy-scene counter data.
+    const void *memo_scene_context = nullptr;
+    void note_switch_scene_epoch(uint64_t context_scene, const void *context);
 #endif
 
 protected:

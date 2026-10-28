@@ -41,7 +41,18 @@ constexpr std::array<const char *, kMetrics> kNames = {
     "render_loop", "draw_backend", "collector_poll",
     "texture_hash_unchanged", "texture_hash_changed", "texture_hash_scene_reused",
     "texture_hash_unsafe_skipped", "texture_hash_unsafe_audit",
-    "texture_hash_unsafe_audit_mismatch", "texture_hash_unsafe_unverified"
+    "texture_hash_unsafe_audit_mismatch", "texture_hash_unsafe_unverified",
+    "texture_hash_probe_new_entry", "texture_hash_probe_eligible",
+    "texture_hash_probe_warmup", "texture_hash_probe_changed",
+    "texture_hash_probe_no_epoch", "texture_hash_probe_no_baseline",
+    "texture_hash_probe_nonmonotonic", "texture_hash_probe_audit_due",
+    "texture_hash_probe_import_export", "texture_hash_probe_no_range",
+    "texture_hash_probe_invalid_mapping",
+    "texture_hash_epoch_delta_1", "texture_hash_epoch_delta_2_7",
+    "texture_hash_epoch_delta_8_15", "texture_hash_epoch_delta_16_31",
+    "texture_hash_epoch_delta_32plus",
+    "texture_scene_boundary", "texture_scene_context_switch",
+    "texture_scene_epoch_rewind", "texture_scene_epoch_collision"
 };
 static_assert(kNames.size() == kMetrics);
 
@@ -117,6 +128,8 @@ struct Options {
     Mode mode = Mode::Auto;
     bool legacy_csv = false;
     uint32_t unsafe_hash_skip_interval = 0;
+    // Probe-only classification: zero disables reason counters, not hashing.
+    uint32_t hash_probe_interval = 8;
 };
 
 struct LocalState {
@@ -137,6 +150,7 @@ std::vector<std::pair<std::string, std::string>> annotations;
 std::atomic<Mode> current_mode{Mode::Off};
 std::atomic<bool> legacy_csv{false};
 std::atomic<uint32_t> unsafe_hash_skip_interval{0};
+std::atomic<uint32_t> hash_probe_interval{0};
 std::atomic<bool> unsafe_hash_skip_mismatch{false};
 std::atomic<bool> unsafe_hash_skip_incomplete{false};
 uint32_t unsafe_hash_skip_requested = 0;
@@ -196,6 +210,12 @@ Options read_options() {
             else if (value == "auto") opt.mode = Mode::Auto;
         } else if (key == "legacy_csv") {
             opt.legacy_csv = value == "1" || value == "true" || value == "on";
+        } else if (key == "texture_hash_probe_interval") {
+            if (value == "0") opt.hash_probe_interval = 0;
+            else if (value == "4") opt.hash_probe_interval = 4;
+            else if (value == "8") opt.hash_probe_interval = 8;
+            else if (value == "16") opt.hash_probe_interval = 16;
+            else if (value == "32") opt.hash_probe_interval = 32;
         } else if (key == "unsafe_texture_hash_skip_interval") {
             // Only these explicit intervals are accepted. No default
             // performance mode can silently weaken texture validation.
@@ -477,10 +497,12 @@ bool export_session(uint64_t final_tick) {
             legacy_csv.load(std::memory_order_relaxed) ? "true" : "false",
             static_cast<unsigned long long>(frequency()), to_ms(final_tick - origin_tick));
         std::fprintf(file,
+            "  \"texture_hash_probe_interval\": %u,\n"
             "  \"unsafe_texture_hash_skip_requested_interval\": %u,\n"
             "  \"unsafe_texture_hash_skip_final_interval\": %u,\n"
             "  \"unsafe_texture_hash_audit_mismatch_detected\": %s,\n"
             "  \"unsafe_texture_hash_audit_incomplete\": %s,\n",
+            hash_probe_interval.load(std::memory_order_relaxed),
             unsafe_hash_skip_requested,
             unsafe_hash_skip_interval.load(std::memory_order_relaxed),
             unsafe_hash_skip_mismatch.load(std::memory_order_relaxed) ? "true" : "false",
@@ -520,6 +542,9 @@ const char *mode_name() { return mode_label(current_mode.load(std::memory_order_
 bool legacy_csv_enabled() { return legacy_csv.load(std::memory_order_relaxed); }
 uint32_t unsafe_texture_hash_skip_interval() {
     return unsafe_hash_skip_interval.load(std::memory_order_relaxed);
+}
+uint32_t texture_hash_probe_interval() {
+    return hash_probe_interval.load(std::memory_order_relaxed);
 }
 void unsafe_texture_hash_audit_mismatch() {
     // Disable the experiment globally for the rest of this game session.
@@ -667,6 +692,8 @@ void begin_session(const char *title_id) {
     unsafe_hash_skip_mismatch.store(false, std::memory_order_relaxed);
     unsafe_hash_skip_incomplete.store(false, std::memory_order_relaxed);
     unsafe_hash_skip_interval.store(opt_in_interval, std::memory_order_release);
+    hash_probe_interval.store(options.mode == Mode::Off ? 0 : options.hash_probe_interval,
+        std::memory_order_release);
     session_mode = options.mode;
     title_name = title_id ? title_id : "unknown";
     if (options.mode == Mode::Off) {

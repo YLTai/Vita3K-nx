@@ -19,7 +19,19 @@ enum class Metric : uint8_t {
     RenderLoop, DrawBack, CollectorPoll,
     TextureHashUnchanged, TextureHashChanged, TextureHashSceneReused,
     TextureHashUnsafeSkipped, TextureHashUnsafeAudit,
-    TextureHashUnsafeAuditMismatch, TextureHashUnsafeUnverified, Count
+    TextureHashUnsafeAuditMismatch, TextureHashUnsafeUnverified,
+    TextureHashProbeNewEntry, TextureHashProbeEligible,
+    TextureHashProbeWarmup, TextureHashProbeChanged,
+    TextureHashProbeNoEpoch, TextureHashProbeNoBaseline,
+    TextureHashProbeNonMonotonic, TextureHashProbeAuditDue,
+    TextureHashProbeImportExport, TextureHashProbeNoRange,
+    TextureHashProbeInvalidMapping,
+    TextureHashEpochDelta1, TextureHashEpochDelta2To7,
+    TextureHashEpochDelta8To15, TextureHashEpochDelta16To31,
+    TextureHashEpochDelta32Plus,
+    TextureSceneBoundary, TextureSceneContextSwitch,
+    TextureSceneEpochRewind, TextureSceneEpochCollision,
+    Count
 };
 enum class Event : uint16_t {
     RenderBegin = 1, RenderEnd, GxmNewFrame, BatchConsume,
@@ -41,6 +53,9 @@ bool legacy_csv_enabled();
 // EXPERIMENTAL ONLY: cross-scene skips have no complete write tracking on
 // Horizon; explicitly opt in via tracelab.cfg and expect possible stale texels.
 uint32_t unsafe_texture_hash_skip_interval();
+// Independent, read-only interval used to classify would-be Hash skips.
+// Diagnostic classifications never change cache/hash validity.
+uint32_t texture_hash_probe_interval();
 void unsafe_texture_hash_audit_mismatch();
 void unsafe_texture_hash_audit_incomplete();
 void begin_session(const char *title_id);
@@ -83,6 +98,7 @@ inline void tag_thread(const char *) {}
 inline void cpu_checkpoint() {}
 inline bool legacy_csv_enabled() { return true; }
 inline uint32_t unsafe_texture_hash_skip_interval() { return 0; }
+inline uint32_t texture_hash_probe_interval() { return 0; }
 inline void unsafe_texture_hash_audit_mismatch() {}
 inline void unsafe_texture_hash_audit_incomplete() {}
 inline void begin_session(const char *) {}

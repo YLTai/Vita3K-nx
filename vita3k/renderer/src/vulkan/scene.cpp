@@ -158,7 +158,7 @@ void mid_scene_flush(VKContext &context, const SceGxmNotification notification) 
         context.start_recording();
         context.scene_timestamp++;
 #ifdef __SWITCH__
-        context.state.texture_cache.memo_scene = context.scene_timestamp;
+        context.state.texture_cache.note_switch_scene_epoch(context.scene_timestamp, &context);
 #endif
     }
 }

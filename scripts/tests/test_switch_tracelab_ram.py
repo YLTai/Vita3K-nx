@@ -76,6 +76,7 @@ int main(int argc, char **argv) {
     tracelab::begin_session("PCSD00035");
     assert(!tracelab::legacy_csv_enabled());
     assert(tracelab::unsafe_texture_hash_skip_interval() == 8);
+    assert(tracelab::texture_hash_probe_interval() == 8);
     tracelab::tag_thread("test-guest");
     tracelab::cpu_checkpoint();
     for (std::uint32_t frame = 1; frame <= 100; ++frame) {
@@ -111,6 +112,7 @@ int main(int argc, char **argv) {
     tracelab::begin_session("OFF");
     assert(tracelab::legacy_csv_enabled());
     assert(tracelab::unsafe_texture_hash_skip_interval() == 0);
+    assert(tracelab::texture_hash_probe_interval() == 0);
     tracelab::event(tracelab::Event::RenderEnd, 999);
     tracelab::end_session();
     return 0;
@@ -133,6 +135,7 @@ int main(int argc, char **argv) {
         manifest = json.loads((session / "manifest.json").read_text())
         assert manifest["schema_version"] == 2, manifest
         assert manifest["unsafe_texture_hash_skip_requested_interval"] == 8
+        assert manifest["texture_hash_probe_interval"] == 8
         assert manifest["unsafe_texture_hash_skip_final_interval"] == 0
         assert manifest["unsafe_texture_hash_audit_mismatch_detected"] is True
         assert manifest["unsafe_texture_hash_audit_incomplete"] is False

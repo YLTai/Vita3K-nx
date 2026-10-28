@@ -5,6 +5,8 @@
 #include <cstdint>
 
 using renderer::texture::HashThrottleState;
+using renderer::texture::HashThrottleDecision;
+using renderer::texture::classify_hash_throttle;
 using renderer::texture::HASH_THROTTLE_WARMUP_SCENES;
 using renderer::texture::note_hash_verification;
 using renderer::texture::note_throttled_hash;
@@ -68,5 +70,34 @@ int main() {
     for (uint64_t scene = 4; scene <= 11; ++scene)
         note_hash_verification(stable, scene, false);
     assert(should_throttle_hash(stable, 12, 8));
+
+    // Each rejected candidate is classified by one exclusive reason.
+    using D = HashThrottleDecision;
+    HashThrottleState probe{};
+    assert(classify_hash_throttle(probe, 100, 0) == D::Disabled);
+    assert(classify_hash_throttle(probe, 0, 8) == D::NoEpoch);
+    assert(classify_hash_throttle(probe, 100, 8) == D::Warmup);
+    probe.stable_verifications = HASH_THROTTLE_WARMUP_SCENES;
+    assert(classify_hash_throttle(probe, 100, 8) == D::NoBaseline);
+    probe.last_verified_scene = 100;
+    assert(classify_hash_throttle(probe, 100, 8) == D::NonMonotonic);
+    assert(classify_hash_throttle(probe, 99, 8) == D::NonMonotonic);
+    assert(classify_hash_throttle(probe, 108, 8) == D::AuditDue);
+    assert(classify_hash_throttle(probe, 132, 8) == D::AuditDue);
+    assert(classify_hash_throttle(probe, 101, 8) == D::Eligible);
+    probe.ever_changed = true;
+    assert(classify_hash_throttle(probe, 101, 8) == D::PreviouslyChanged);
+
+    // Full verification immediately after an epoch rewind creates a fresh
+    // baseline; it must not count as one of eight stable forward checks.
+    HashThrottleState rewound{};
+    rewound.stable_verifications = 8;
+    rewound.last_verified_scene = 200;
+    note_hash_verification(rewound, 10, false);
+    assert(rewound.stable_verifications == 0);
+    for (uint64_t epoch = 11; epoch <= 18; ++epoch)
+        note_hash_verification(rewound, epoch, false);
+    assert(rewound.stable_verifications == 8);
+    assert(classify_hash_throttle(rewound, 19, 8) == D::Eligible);
     return 0;
 }
