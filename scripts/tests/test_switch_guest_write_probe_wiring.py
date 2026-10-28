@@ -70,7 +70,7 @@ for name, label in {
 }.items():
     assert name in enum_names, name
     assert labels[enum_names.index(name)] == label, name
-    assert name in trace_h and name in trace, name
+    assert name in trace_h and label in trace, name
 
 assert "guest_write_probe=off" in doc
 assert "guest_write_probe_mode" in trace
