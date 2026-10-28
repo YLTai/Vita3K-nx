@@ -4,6 +4,11 @@ on:
   push:
     paths-ignore:
       - '**.md'
+      # This isolated hardware probe needs only the devkitA64 container.
+      # Do not start the multi-platform desktop build matrix for its branch.
+      - 'switch-memory-probe/**'
+      - '.github/workflows/switch-memory-probe.yml'
+      - '.github/workflows/c-cpp.yml'
   pull_request:
     paths-ignore:
       - '**.md'

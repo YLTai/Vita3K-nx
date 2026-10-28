@@ -1,0 +1,64 @@
+name: Switch Memory Probe (tiny standalone NRO)
+
+on:
+  push:
+    branches: [exp/switch-memory-probe-20261028]
+    paths:
+      - 'switch-memory-probe/**'
+      - '.github/workflows/switch-memory-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  memory-probe:
+    name: Build only the memory probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    container:
+      image: devkitpro/devkita64:latest
+      options: --user root
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEVKITPRO: /opt/devkitpro
+      DEVKITA64: /opt/devkitpro/devkitA64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            switch-memory-probe
+          persist-credentials: false
+
+      - name: Check the small Switch toolchain
+        run: |
+          set -euo pipefail
+          export PATH="$DEVKITA64/bin:$DEVKITPRO/tools/bin:$PATH"
+          if ! command -v make >/dev/null; then
+            apt-get update -qq
+            apt-get install -y --no-install-recommends make
+          fi
+          test -f "$DEVKITPRO/libnx/switch_rules"
+          command -v aarch64-none-elf-gcc
+          command -v elf2nro
+          command -v nacptool
+
+      - name: Compile one small NRO (no Vita3K dependencies)
+        run: |
+          set -euo pipefail
+          export PATH="$DEVKITA64/bin:$DEVKITPRO/tools/bin:$PATH"
+          make -C switch-memory-probe -j2
+          test -s switch-memory-probe/switch-memory-probe.nro
+          ls -lh switch-memory-probe/switch-memory-probe.nro
+
+      - name: Upload standalone NRO
+        uses: actions/upload-artifact@v4
+        with:
+          name: switch-memory-probe-nro
+          path: |
+            switch-memory-probe/switch-memory-probe.nro
+            switch-memory-probe/README.md
+          if-no-files-found: error
+          retention-days: 30
