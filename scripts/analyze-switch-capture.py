@@ -37,6 +37,8 @@ def number(obj, key, integer=False):
 
 
 def analyze(data, changed_total=None):
+    if data.get("capture_plan") == "content-1":
+        return analyze_content(data)
     reasons, warnings = [], []
     bench, watch = data.get('benchmark', {}), data.get('write_shadow', {})
     tests = data.get('tests', [])
@@ -160,6 +162,92 @@ def analyze(data, changed_total=None):
                 'Two time-symmetric samples per mode do not prove statistical significance or graphics correctness.'])
 
 
+
+CONTENT_ORDER = ['full_hash', 'memcmp_audit', 'memcmp_exact', 'memcmp_exact', 'memcmp_audit', 'full_hash']
+CONTENT_CONTROLS = {'cold_and_equal', 'first_middle_last_byte', 'palette_only', 'same_address_reuse',
+                    'key_includes_spans', 'bounded_lru', 'oversize_and_small_fallback', 'audit_every_hit',
+                    'source_changes_during_hash', 'private_snapshot_hash_binding', 'collision_still_refreshes',
+                    'allocation_independent_reset'}
+
+
+def analyze_content(data):
+    errors, warnings = [], []
+    b, memo = data.get('benchmark', {}), data.get('content_compare', {})
+    tests = data.get('tests', [])
+    rows = [t for t in tests if t.get('suite') == 'content_compare_control']
+    controls_ok = len(rows) == 12 and {r.get('name') for r in rows} == CONTENT_CONTROLS and all(r.get('status') == 'pass' for r in rows)
+    if not controls_ok or data.get('controls_complete') is not True:
+        errors.append('Missing/duplicate/failed exact-content controls')
+    if any(t.get('status') not in ('pass', 'skip') for t in tests) or data.get('tests_dropped') != 0:
+        errors.append('Self-test failure or dropped results')
+    if data.get('baseline_commit') != '58964c1e0aab203e333f245355952ddb8cc243df':
+        errors.append('Wrong content-comparison baseline')
+    if data.get('full_byte_validation') is not True or data.get('hash_recompute_elision') != 'exact_byte_equality_only':
+        errors.append('Complete byte comparison contract absent')
+    if data.get('strict_hash') is not True or data.get('hash_skipping') is not False or data.get('strict_reference_scope') != 'capture_only':
+        errors.append('Reference or unsafe-skip setting changed')
+    if b.get('order') != 'ABCCBA' or b.get('experiment') != 'exact_content_compare':
+        errors.append('Wrong phase sequence')
+    if b.get('completed') is not True or b.get('aborted') is not False or b.get('frames_overflow') != 0:
+        errors.append('Capture incomplete/interrupted/overflowing')
+    if memo.get('schema_version') != 1 or memo.get('disabled') is not False or memo.get('stopped_early') is not False:
+        errors.append('Memo disabled, stopped early, or unknown schema')
+    if memo.get('live_write_observer_enabled') is not False or memo.get('audit_returns_reference') is not True:
+        errors.append('Unexpected experiment behavior')
+    phases, counters = b.get('phases', []), memo.get('phases', [])
+    checked = []
+    if len(phases) != 6 or len(counters) != 6: errors.append('Six phases required')
+    try:
+        if number(b, 'settle_seconds', True) != 2 or number(b, 'measure_seconds', True) != 10:
+            errors.append('Unexpected timing')
+        if number(memo, 'peak_shadow_bytes', True) > number(memo, 'byte_budget', True):
+            errors.append('Shadow memory exceeded budget')
+        for i, (p, c) in enumerate(zip(phases, counters)):
+            if i >= 6 or p.get('index') != i or c.get('index') != i or p.get('variant') != CONTENT_ORDER[i] or c.get('mode') != CONTENT_ORDER[i]:
+                raise ValueError('Phase identity mismatch')
+            n, ms, rate = number(p, 'measured_intervals', True), number(p, 'duration_ms'), number(p, 'loops_per_second')
+            if p.get('complete') is not True or n < 50 or not 9000 <= ms <= 10000 or not math.isclose(rate, 1000*n/ms, rel_tol=1e-5, abs_tol=1e-5):
+                errors.append(f'Phase {i}: insufficient or inconsistent samples')
+            for k in ('calls','input_bytes','hits','equal_bytes','refreshes','copied_bytes','fallback_calls','evictions',
+                      'allocation_failures','digest_calls','digest_bytes','audit_checks','audit_disagreements','begin_tick','end_tick'):
+                number(c,k,True)
+            if c['end_tick'] <= c['begin_tick'] or (i and c['begin_tick'] != counters[i-1]['end_tick']):
+                errors.append(f'Phase {i}: invalid source-loop boundaries')
+            if c['calls'] != c['hits']+c['refreshes']+c['fallback_calls'] or c['equal_bytes']+c['copied_bytes'] > c['input_bytes']:
+                errors.append(f'Phase {i}: counter reconciliation failed')
+            if c['allocation_failures'] or c['audit_disagreements']:
+                errors.append(f'Phase {i}: allocation failure / audit disagreement (may include concurrent writes)')
+            if c['mode']=='full_hash' and (c['hits'] or c['refreshes'] or c['digest_calls']!=c['calls']):
+                errors.append(f'Phase {i}: baseline was not original full Hash')
+            if c['mode']=='memcmp_audit' and (not c['audit_checks'] or c['audit_checks']!=c['hits']+c['refreshes']):
+                errors.append(f'Phase {i}: not every memo result was independently audited')
+            if c['mode']=='memcmp_exact' and (not c['hits'] or c['audit_checks'] or c['digest_calls']!=c['refreshes']+c['fallback_calls']):
+                errors.append(f'Phase {i}: no exercised equality benefit / unexpected extra Hash')
+            checked.append(dict(index=i,mode=c['mode'],loops_per_second=rate,measured_intervals=n,duration_ms=ms,
+                                p95_ms=p.get('p95_ms'), counters_including_settle=c))
+    except (KeyError, ValueError, TypeError, ZeroDivisionError) as e: errors.append(str(e))
+    groups, comparison = {}, None
+    if not errors and len(checked)==6:
+        for mode in dict.fromkeys(CONTENT_ORDER):
+            group=[p for p in checked if p['mode']==mode]
+            n=sum(p['measured_intervals'] for p in group); ms=sum(p['duration_ms'] for p in group)
+            groups[mode]=dict(loops_per_second=1000*n/ms,mean_loop_ms=ms/n,phase_rates=[p['loops_per_second'] for p in group])
+        a,c=groups['full_hash'],groups['memcmp_exact']
+        drift=(a['phase_rates'][1]/a['phase_rates'][0]-1)*100
+        comparison=dict(throughput_delta_pct=(c['loops_per_second']/a['loops_per_second']-1)*100,
+                        extra_ms_per_loop=c['mean_loop_ms']-a['mean_loop_ms'],baseline_drift_pct=drift,descriptive_only=True)
+        if abs(drift)>2: warnings.append('Baseline drift exceeds 2%; small performance differences are not reliable')
+    return dict(plan='content-1',controls_ok=controls_ok,comparison_eligible=not errors,exclusions=errors,warnings=warnings,
+                groups=groups,comparison=comparison,phases=checked,first_disagreement=memo.get('first_disagreement'),
+                next_action='Exit normally and share this single capture; no repeat required just for green',
+                limits=['Every candidate use compares all pixel/palette bytes. There is no periodic or dirty-page-based skip.',
+                        'C avoids XXH3 only for identical private snapshots. B returns an independent full-source Hash every time.',
+                        'Only the existing ordinary Hash footprint is covered; Vulkan visibility/lifetime and concurrent writers remain unresolved.',
+                        'Counters include settling; timing excludes it. Logical bytes are not measured DRAM traffic.',
+                        'A/B/C all use the original game JIT path, not the previous live write observer; compare within this build.',
+                        'Two symmetric samples per mode are descriptive. B audit cost is not a performance optimization.'])
+
+
 def load_session(path):
     def total(summary):
         rows = [m for m in summary.get('metrics', []) if m.get('metric') == 'texture_hash_changed']
@@ -194,7 +282,7 @@ def main():
             args.html.write_text('<!doctype html><meta charset="utf-8"><title>Vita3K compact capture</title>'
                 '<style>body{font:16px system-ui;max-width:1100px;margin:36px auto;padding:0 24px}'
                 'pre{white-space:pre-wrap;overflow-wrap:anywhere}</style>'
-                '<h1>一次采集：A/B/C/C/B/A</h1><p>自动反例通过不等于完整游戏写入覆盖。性能比较是观察开销，不是免 Hash 提速。</p>'
+                '<h1>一次采集：A/B/C/C/B/A</h1><p>content-1：A 完整 Hash，B 逐字节比较并全量审计，C 逐字节比较。compact-1 为旧写入观察实验。完成不等于 GPU 同步正确性证明。</p>'
                 '<pre>'+html.escape(text)+'</pre>', encoding='utf-8')
         print(text)
     except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as error:

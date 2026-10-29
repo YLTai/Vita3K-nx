@@ -33,3 +33,7 @@ python3 "$ROOT/scripts/apply-switch-write-watch-hooks.py" --check-applied
 python3 "$ROOT/scripts/tests/test_switch_write_range.py" --cxx "${CXX:-c++}"
 python3 "$ROOT/scripts/tests/test_switch_observer_canaries.py" --cxx "${CXX:-c++}"
 python3 "$ROOT/scripts/tests/test_switch_compact_capture.py" --cxx "${CXX:-c++}"
+
+python3 "$ROOT/scripts/tests/test_content_hash_memo.py" --cxx "${CXX:-c++}"
+python3 "$ROOT/scripts/tests/test_content_capture.py" --cxx "${CXX:-c++}"
+python3 "$ROOT/scripts/tests/test_content_source_wiring.py" --cxx "${CXX:-c++}"

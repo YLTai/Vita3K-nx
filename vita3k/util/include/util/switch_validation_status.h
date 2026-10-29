@@ -9,7 +9,7 @@
 namespace switch_validation {
 
 enum class Stage : uint8_t {
-    Disabled, Startup, Waiting, Warmup, Settling, Measuring, Paused, Interrupted, Complete, Blocked
+    Disabled, Startup, Waiting, Warmup, Settling, Measuring, Paused, Interrupted, Complete, Blocked, Stopped
 };
 enum class CaptureOutcome : uint8_t { Pending, Ready, Inconclusive, Invalid };
 
@@ -22,6 +22,8 @@ struct StatusSnapshot {
     bool deduplicate = false;
     bool write_shadow = false, watch_failed = false;
     bool compact = false;
+    bool content_compare = false, content_failed = false;
+    uint64_t compare_hits = 0, audit_checks = 0, audit_disagreements = 0, shadow_bytes = 0;
     bool controls_complete = true;
     char policy_letter = 'A';
     uint64_t watched_pages = 0, first_write_pages = 0, unobserved_changes = 0;
@@ -78,6 +80,10 @@ inline HudText make_hud_text(const StatusSnapshot &s, uint64_t now_tick) {
         std::snprintf(text.samples.data(), text.samples.size(), "Pages:%llu | Exact:%llu | HLE:%llu | Cache changes:%llu | FULL Hash",
             static_cast<unsigned long long>(s.watched_pages), static_cast<unsigned long long>(s.exact_write_hits),
             static_cast<unsigned long long>(s.host_write_hits), static_cast<unsigned long long>(s.cache_changes));
+    if (s.content_compare)
+        std::snprintf(text.samples.data(), text.samples.size(), "Equal:%llu | Audits:%llu | Diff:%llu | Shadow:%llu MiB",
+            static_cast<unsigned long long>(s.compare_hits), static_cast<unsigned long long>(s.audit_checks),
+            static_cast<unsigned long long>(s.audit_disagreements), static_cast<unsigned long long>(s.shadow_bytes / (1024 * 1024)));
     std::snprintf(text.action.data(), text.action.size(), "L+R+Y: start/restart | Keep the scene stable");
     std::snprintf(text.timing.data(), text.timing.size(), "Run %u | %u%% | Remaining %02llu:%02llu",
         s.run_id, s.progress_per_mille / 10,
@@ -116,6 +122,12 @@ inline HudText make_hud_text(const StatusSnapshot &s, uint64_t now_tick) {
         std::snprintf(text.timing.data(), text.timing.size(), "Current run is invalid; partial results retained");
         std::snprintf(text.action.data(), text.action.size(), "L+R+Y: restart | Or exit normally and share report");
         break;
+    case Stage::Stopped:
+        text.tone = HudText::Tone::Error;
+        std::snprintf(text.title.data(), text.title.size(), "MEMORY VALIDATION | DONE - CHECK REPORT");
+        std::snprintf(text.timing.data(), text.timing.size(), "Comparison stopped early; original full Hash restored");
+        std::snprintf(text.action.data(), text.action.size(), "EXIT GAME NORMALLY TO SAVE | Share, do not repeat");
+        break;
     case Stage::Blocked:
         text.tone = HudText::Tone::Error;
         std::snprintf(text.title.data(), text.title.size(), "MEMORY VALIDATION | STARTUP CHECK FAILED");
@@ -145,6 +157,11 @@ inline HudText make_hud_text(const StatusSnapshot &s, uint64_t now_tick) {
     default:
         break;
     }
+    if (s.content_compare && (s.stage == Stage::Measuring || s.stage == Stage::Settling))
+        std::snprintf(text.action.data(), text.action.size(), "%s | Full byte validation on every use",
+            s.policy_letter == 'A' ? "A: original XXH3" : s.policy_letter == 'B' ? "B: byte compare + XXH3 audit" : "C: exact byte compare");
+    if (s.content_compare && s.stage == Stage::Complete && s.outcome == CaptureOutcome::Inconclusive)
+        std::snprintf(text.timing.data(), text.timing.size(), "Too few eligible comparisons/audits; share, do not repeat");
     // A stalled renderer must not display a timer-driven, fictitious DONE.
     if ((s.stage == Stage::Measuring || s.stage == Stage::Settling || s.stage == Stage::Warmup)
         && s.timebase_hz && s.source_tick && now_tick > s.source_tick
