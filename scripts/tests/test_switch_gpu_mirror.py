@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import sys
 ROOT = Path(__file__).resolve().parents[2]
 CPP = r'''
 #include <util/mirror_probe_controls.h>
@@ -77,6 +78,8 @@ SDK_CPP = r'''
 struct Renderer {
  vk::Device device;vk::Queue general_queue;uint32_t general_family_index=0;
  vk::PhysicalDeviceMemoryProperties physical_device_memory;std::mutex general_queue_mutex;
+ std::vector<vk::QueueFamilyProperties> physical_device_queue_families;
+ vk::PhysicalDeviceProperties physical_device_properties;
  std::atomic<bool> device_lost{false};
 };
 void instantiate(Renderer&r){switch_validation::mirror_probe::tick(r);switch_validation::mirror_probe::shutdown(r);}
@@ -104,6 +107,8 @@ int main(int argc,char**argv){
  sv::request_benchmark();assert(!dh::state.start_requested.load());
  m::state.started.store(true);m::state.completed.store(7);m::state.audits.store(7);sv::on_render_end(20);
  view=sv::status_snapshot();assert(view.stage==sv::Stage::Measuring&&view.progress_per_mille==500);
+ m::state.shader_dispatches.store(10);m::state.shader_fills.store(5);m::state.shader_copies.store(5);
+ m::state.shader_chains.store(1);m::state.guard_checks.store(2);
  m::state.finished.store(true);m::state.passed.store(true);m::state.cleanup.store(true);m::state.completed.store(14);
  m::state.audits.store(15);m::state.waits.store(25);m::state.uploaded.store(65536);m::state.downloaded.store(8192);m::state.faults.store(12);sv::on_render_end(30);
  view=sv::status_snapshot();assert(view.stage==sv::Stage::Complete&&view.outcome==sv::CaptureOutcome::Ready);
@@ -144,7 +149,7 @@ def controller_gate(d,cxx,sanitize):
  cache={'initial_baseline','clean_512_no_scan','pixel_first','pixel_middle','pixel_last','palette_only',
   'cross_page_store','host_memset','same_value_write','same_page_outside_input','same_address_new_lifetime',
   'post_timing_audit','controls_complete','cleanup_complete'}|{f'cleanup_mask_{i:02x}' for i in range(16)}
- gpu={'initial_upload','clean_512_reuse','cpu_first_word','cpu_palette_word','gpu_write_while_cpu_read_only',
+ gpu={'shader_program','initial_upload','clean_512_reuse','cpu_first_word','cpu_palette_word','gpu_write_while_cpu_read_only',
   'gpu_then_cpu_partial','same_value_cpu_overwrite','cross_page_cpu_write','cpu_dirty_then_gpu_partial',
   'gpu_to_cpu_read','buffer_image_roundtrip','same_address_new_lifetime','final_integrity','cleanup_complete','suite_complete'}
  report['tests']=[dict(suite=s,name=n,status='pass',detail='SYNTHETIC analyzer fixture')
@@ -157,7 +162,7 @@ def controller_gate(d,cxx,sanitize):
    elif operation=='duplicate':bad['tests'].append(bad['tests'][i])
    else:bad['tests'][i]['status']='fail'
    assert analyzer.analyze(bad)['exclusions'],(i,operation)
- for key,value in [('cleanup_complete',False),('finished',False),('completed_cases',13),('fence_waits',0),('independent_byte_audits',0),('upload_bytes',0),('download_bytes',0),('cpu_write_faults',0)]:
+ for key,value in [('cleanup_complete',False),('finished',False),('completed_cases',13),('fence_waits',0),('independent_byte_audits',0),('upload_bytes',0),('download_bytes',0),('cpu_write_faults',0),('shader_dispatches',0),('shader_fill_dispatches',0),('shader_copy_dispatches',0),('shader_chain_submissions',2),('gpu_guard_audits',0),('probe_version',99)]:
   bad=copy.deepcopy(report);bad['guest_backing']['gpu_mirror'][key]=value;assert analyzer.analyze(bad)['exclusions']
  print('Actual controller/HUD/export/analyzer: no timer/button gate, failure/exit/reset/off, missing/duplicate/failed byte-control exclusions PASS (synthetic results only)')
 
@@ -169,15 +174,18 @@ def main():
   if a.sanitize:cmd[2:2]=['-g','-fsanitize=address,undefined','-fno-omit-frame-pointer']
   subprocess.run(cmd,check=True);subprocess.run([str(d/'test')],check=True)
   controller_gate(d,a.cxx,a.sanitize)
+  subprocess.run([sys.executable,str(ROOT/'scripts/tests/test_switch_mirror_shader.py'),'--cxx',a.cxx]+(['--sanitize'] if a.sanitize else []),check=True)
   sdk=Path(os.environ.get('DEVKITA64','/opt/devkitpro/devkitA64'))/'bin/aarch64-none-elf-g++'
   inc=ROOT/'external/VulkanMemoryAllocator-Hpp/Vulkan-Headers/include'
   if sdk.exists():
    if not (inc/'vulkan/vulkan.hpp').exists():raise RuntimeError('target Vulkan headers missing')
+   generated=ROOT/'build-switch-preflight/gpu-mirror'
+   subprocess.run([sys.executable,str(ROOT/'scripts/build-switch-mirror-shader.py'),'--output-dir',str(generated)],check=True)
    (d/'sdk.cpp').write_text(SDK_CPP)
    subprocess.run([str(sdk),'-std=c++20','-O2','-fno-lto','-D_GNU_SOURCE','-D__SWITCH__','-DVITA3K_SWITCH_TRACELAB=1',
      '-march=armv8-a+crc+crypto','-mtune=cortex-a57','-mtp=soft','-ftls-model=local-exec',
      '-I',str(Path(os.environ.get('DEVKITPRO','/opt/devkitpro'))/'libnx/include'),
-     '-I',str(inc),'-I',str(ROOT/'external/xxHash'),'-I',str(ROOT/'vita3k/util/include'),'-I',str(ROOT/'vita3k/renderer/include'),
+     '-I',str(generated),'-I',str(inc),'-I',str(ROOT/'external/xxHash'),'-I',str(ROOT/'vita3k/util/include'),'-I',str(ROOT/'vita3k/renderer/include'),
      '-c',str(d/'sdk.cpp'),'-o',str(d/'sdk.o')],check=True)
    print('Actual A64/Vulkan-Hpp mirror backend compiled (not device executed)')
   else:print('SKIP target syntax gate: devkitA64 SDK unavailable locally')

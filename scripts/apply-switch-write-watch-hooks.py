@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 RECIPE = ROOT / 'patches/experiments/switch-live-write-watch.json'
 RECIPES = (RECIPE, ROOT / 'patches/experiments/switch-heap-fault.json',
            ROOT / 'patches/experiments/switch-direct-heap.json',
-           ROOT / 'patches/experiments/switch-deferred-import.json')
+           ROOT / 'patches/experiments/switch-deferred-import.json',
+           ROOT / 'patches/experiments/switch-mirror-shader.json')
 
 
 def blob_sha(data):
