@@ -59,6 +59,10 @@ std::string title;
 std::vector<Result> results;
 std::mutex results_mutex;
 std::atomic<uint64_t> lost_results{0};
+uint32_t test_passed = 0, test_failed = 0, test_skipped = 0; // results_mutex
+std::mutex status_mutex;
+StatusSnapshot published_status; // status_mutex; UI never reads live renderer counters
+
 std::array<Interval, kMaxIntervals> intervals{};
 std::array<Phase, staging_dedup_order.size()> phases{};
 std::atomic<bool> is_enabled{false};
@@ -155,6 +159,71 @@ void reset_run(uint64_t tick) {
     public_state.store(1, std::memory_order_release);
 }
 
+// Render thread only. Fixed-size copy, no string formatting or disk I/O.
+void publish_status(uint64_t tick) {
+    StatusSnapshot out;
+    const uint64_t hz = armGetSystemTickFreq();
+    const uint64_t settle = uint64_t(options.settle_seconds) * hz;
+    const uint64_t measure = uint64_t(options.measure_seconds) * hz;
+    const uint64_t duration = settle + measure;
+    const uint64_t total = duration * phases.size();
+    out.automatic = options.automatic;
+    out.run_id = run_id;
+    out.source_tick = tick;
+    out.timebase_hz = hz;
+    out.total_ms = uint64_t(options.settle_seconds + options.measure_seconds) * phases.size() * 1000;
+    out.intervals_dropped = overflow;
+    for (const auto &phase : phases) {
+        out.samples += phase.intervals;
+        out.publish_calls += phase.publish_calls;
+        out.dedup_calls += phase.dedup_calls;
+    }
+    if (completed) {
+        out.stage = Stage::Complete;
+        out.phase = static_cast<uint32_t>(phases.size());
+        out.progress_per_mille = 1000;
+        for (size_t i = 0; i < phases.size(); ++i) {
+            out.insufficient_samples |= !phases[i].complete || phases[i].intervals < 100
+                || phases[i].ticks < measure * 9 / 10;
+            out.missing_treatment |= staging_dedup_order[i] && (phases[i].dedup_calls == 0 || phases[i].dedup_bytes == 0);
+        }
+        out.outcome = overflow || out.insufficient_samples ? CaptureOutcome::Invalid
+            : out.missing_treatment ? CaptureOutcome::Inconclusive : CaptureOutcome::Ready;
+    } else if (aborted) {
+        out.stage = Stage::Interrupted;
+        out.outcome = CaptureOutcome::Invalid;
+    } else if (!run_start_tick) {
+        const uint64_t elapsed = first_render_tick && tick >= first_render_tick ? tick - first_render_tick : 0;
+        const uint64_t warmup = uint64_t(options.warmup_seconds) * hz;
+        const uint64_t left = elapsed < warmup ? warmup - elapsed : 0;
+        out.stage = options.automatic ? Stage::Warmup : Stage::Waiting;
+        out.stage_remaining_ms = hz ? left * 1000 / hz : 0;
+        out.remaining_ms = out.total_ms + (options.automatic ? out.stage_remaining_ms : 0);
+    } else {
+        const uint64_t elapsed = tick >= run_start_tick ? tick - run_start_tick : 0;
+        const auto position = phase_position(elapsed, settle, measure);
+        out.phase = position.index + 1;
+        out.deduplicate = position.deduplicate;
+        const bool actually_settled = tick >= phase_entry_tick && tick - phase_entry_tick >= settle;
+        out.stage = position.measuring && actually_settled ? Stage::Measuring : Stage::Settling;
+        const uint64_t phase_elapsed = elapsed % duration;
+        const uint64_t left = out.stage == Stage::Measuring ? duration - phase_elapsed
+            : std::max(phase_elapsed < settle ? settle - phase_elapsed : 0,
+                tick - phase_entry_tick < settle ? settle - (tick - phase_entry_tick) : 0);
+        out.stage_remaining_ms = hz ? left * 1000 / hz : 0;
+        out.remaining_ms = hz && elapsed < total ? (total - elapsed) * 1000 / hz : 0;
+        out.progress_per_mille = total ? static_cast<uint32_t>(std::min<uint64_t>(999, elapsed * 1000 / total)) : 0;
+        if (position.index < phases.size()) out.phase_samples = phases[position.index].intervals;
+    }
+    const std::lock_guard<std::mutex> lock(status_mutex);
+    published_status = out;
+}
+
+struct PublishOnReturn {
+    uint64_t tick;
+    ~PublishOnReturn() { publish_status(tick); }
+};
+
 double percentile(const std::vector<double> &values, double fraction) {
     if (values.empty()) return 0;
     const double position = fraction * (values.size() - 1);
@@ -171,6 +240,7 @@ void begin_session(const char *title_id) {
     {
         const std::lock_guard<std::mutex> lock(results_mutex);
         results.clear();
+        test_passed = test_failed = test_skipped = 0;
     }
     lost_results.store(0, std::memory_order_relaxed);
     phases.fill({});
@@ -183,6 +253,12 @@ void begin_session(const char *title_id) {
     frame_dedup_calls = frame_dedup_bytes = 0;
     start_requested.store(false); abort_requested.store(false);
     is_paused.store(false); public_state.store(0);
+    {
+        const std::lock_guard<std::mutex> lock(status_mutex);
+        published_status = {};
+        published_status.stage = options.enabled ? Stage::Startup : Stage::Disabled;
+        published_status.automatic = options.automatic;
+    }
     is_enabled.store(options.enabled, std::memory_order_release);
     if (options.enabled)
         LOG_INFO("[memory-validation] isolated tests enabled; strict Hash; ABBA/BAAB {}s + {}s settle; L+R+Y starts/restarts; auto={} after {}s",
@@ -202,6 +278,28 @@ void end_session() {
 
 bool enabled() { return is_enabled.load(std::memory_order_relaxed); }
 bool strict_hash() { return enabled(); }
+
+StatusSnapshot status_snapshot() {
+    if (!enabled()) return {};
+    // There is no path that holds results_mutex then status_mutex together.
+    // scoped_lock also keeps test counts and the published copy consistent.
+    const std::scoped_lock lock(status_mutex, results_mutex);
+    StatusSnapshot out = published_status;
+    out.passed = test_passed; out.failed = test_failed; out.skipped = test_skipped;
+    out.results_dropped = lost_results.load(std::memory_order_relaxed);
+    out.restart_pending = start_requested.load(std::memory_order_acquire);
+    if (out.stage != Stage::Complete) {
+        const bool paused = is_paused.load(std::memory_order_acquire);
+        if (paused || abort_requested.load(std::memory_order_acquire)) {
+            out.stage = out.run_id ? Stage::Interrupted : Stage::Paused;
+            if (out.run_id) out.outcome = CaptureOutcome::Invalid;
+        }
+    } else if (out.failed || out.results_dropped) {
+        out.outcome = CaptureOutcome::Invalid;
+    }
+    return out;
+}
+
 bool deduplicate_staging_cache() { return dedup_enabled.load(std::memory_order_relaxed); }
 
 void record(const char *suite, const char *test, const char *status,
@@ -215,6 +313,10 @@ void record(const char *suite, const char *test, const char *status,
         }
         results.push_back({ suite ? suite : "unknown", test ? test : "unknown",
             status ? status : "fail", detail ? detail : "", elapsed_ticks, iterations_count });
+        const auto &saved = results.back().status;
+        if (saved == "pass") ++test_passed;
+        else if (saved == "skip") ++test_skipped;
+        else ++test_failed;
     } catch (...) {
         // Reporting must never bypass SVC/mapping cleanup under memory pressure.
         lost_results.fetch_add(1, std::memory_order_relaxed);
@@ -235,6 +337,7 @@ void note_staging_publish(uint64_t bytes, bool deduplicated) {
 
 void on_render_end(uint64_t tick) {
     if (!enabled()) return;
+    const PublishOnReturn publish{tick};
     // Attribute publication work only to complete measured frame intervals,
     // excluding a frame that crosses warm-up, phase, or restart boundaries.
     const uint64_t calls = frame_publish_calls, bytes = frame_publish_bytes;
@@ -379,7 +482,10 @@ void write_report(const char *directory) {
             static_cast<unsigned long long>(p.dedup_calls), static_cast<unsigned long long>(p.dedup_bytes),
             static_cast<unsigned long long>(p.excluded_intervals), 1000.0 * p.excluded_ticks / hz);
     }
-    std::fputs("\n    ]\n  }\n}\n", file);
+    const auto summary = status_snapshot();
+    std::fprintf(file, "\n    ]\n  },\n  \"validation_revision\":2,\n"
+        "  \"capture_outcome\":\"%s\",\n  \"overlay_refresh_hz\":4,\n"
+        "  \"overlay_completion_is_not_graphics_validation\":true\n}\n", outcome_name(summary.outcome));
     const bool write_error = std::ferror(file) != 0;
     const bool close_error = std::fclose(handle.release()) != 0;
     if (write_error || close_error)

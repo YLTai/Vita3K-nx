@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include <cpu/switch_memory_validation.h>
 #include <util/switch_memory_validation.h>
+#include <util/switch_validation_bench.h>
 
 #if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)
 
@@ -40,16 +41,8 @@ constexpr uint32_t kTestValue = 0x89abcdef;
 
 using PageTable = std::array<uint8_t *, Dynarmic::A32::UserConfig::NUM_PAGE_TABLE_ENTRIES>;
 
-enum class TableMode { Original, Mirror, FirstWrite };
-
-const char *mode_name(TableMode mode) {
-    switch (mode) {
-    case TableMode::Original: return "original_table";
-    case TableMode::Mirror: return "mirror_write_table";
-    case TableMode::FirstWrite: return "first_write_table";
-    }
-    return "unknown";
-}
+using TableMode = switch_validation::StoreBenchMode;
+using switch_validation::store_mode_name;
 
 struct FreeBytes {
     void operator()(uint8_t *ptr) const { std::free(ptr); }
@@ -294,7 +287,8 @@ Dynarmic::A32::UserConfig config_for(MemoryFixture &memory, TableMode mode, bool
     config.page_table = memory.read_table.get();
     config.absolute_offset_page_table = true;
     if (mode != TableMode::Original)
-        config.write_page_table = memory.write_table.get();
+        config.write_page_table = mode == TableMode::SameTableX25
+            ? memory.read_table.get() : memory.write_table.get();
     config.global_monitor = &memory.monitor;
     config.processor_id = 0;
     config.optimizations = Dynarmic::all_safe_optimizations;
@@ -461,31 +455,101 @@ void prepare_bench(MemoryFixture &memory, Dynarmic::A32::Jit &jit, TableMode mod
     jit.Regs()[4] = kDataBase;
 }
 
-void bench_sample(MemoryFixture &memory, TableMode mode, const char *comparison, size_t slot) {
-    // Keep only one 8 MiB JIT slice live at a time. Destruction returns it to
-    // the existing shared pool; this suite never shuts down a process pool.
-    Dynarmic::A32::Jit jit(config_for(memory, mode, false));
-    prepare_bench(memory, jit, mode, kWarmupStores);
-    jit.Run(); // Compile every loop/exit path outside the timing interval.
-    const bool warm_ok = memory.clean_stop() && jit.Regs()[2] == 0;
-    prepare_bench(memory, jit, mode, kBenchStores);
+// Do not recreate/recompile the split JIT between open/first-write/preopened.
+// The three states MUST share one native code cache for this comparison.
+void matrix_sample(MemoryFixture &memory, Dynarmic::A32::Jit &jit, TableMode mode,
+    bool boundaries, bool reverse, uint32_t round, uint32_t slot) {
+    const bool warm_with_faults = mode == TableMode::FirstWrite || mode == TableMode::Preopened;
+    const TableMode warm_mode = warm_with_faults ? TableMode::FirstWrite : mode;
+    bool warm_ok = true;
+    // Warm the loop, exit and slow path outside the timing interval.
+    for (unsigned pass = 0; pass < 3; ++pass) {
+        prepare_bench(memory, jit, warm_mode, kWarmupStores);
+        jit.Run();
+        warm_ok &= memory.clean_stop() && jit.Regs()[2] == 0
+            && memory.writes == (warm_with_faults ? kDataPages : 0);
+    }
+    if (mode != TableMode::Preopened)
+        warm_ok &= memory.arm(mode == TableMode::FirstWrite ? (1u << kDataPages) - 1 : 0);
+    // Preopened keeps the exact PTE values left by the untimed first-write run.
+    // In particular it does NOT rearm, reset the code cache, or swap the table.
+    memory.reset_events();
+    memory.prepare(jit, memory.bench, kDataBase);
+    jit.Regs()[2] = kBenchStores;
+    jit.Regs()[3] = kDataBase + kDataPages * kPageSize;
+    jit.Regs()[4] = kDataBase;
+
+    const auto handle = threadGetCurHandle();
+    const int core_before = svcGetCurrentProcessorNumber();
+    u64 cpu_before = 0, cpu_after = 0;
+    const uint64_t bracket_start = armGetSystemTick();
+    const Result cpu_before_rc = svcGetInfo(&cpu_before, InfoType_ThreadTickCount, handle, TickCountInfo_Total);
     const uint64_t start = armGetSystemTick();
     jit.Run();
     const uint64_t elapsed = armGetSystemTick() - start;
+    const Result cpu_after_rc = svcGetInfo(&cpu_after, InfoType_ThreadTickCount, handle, TickCountInfo_Total);
+    const uint64_t bracket_ticks = armGetSystemTick() - bracket_start;
+    const int core_after = svcGetCurrentProcessorNumber();
+    const bool cpu_valid = R_SUCCEEDED(cpu_before_rc) && R_SUCCEEDED(cpu_after_rc) && cpu_after >= cpu_before;
     const uint64_t expected_callbacks = mode == TableMode::FirstWrite ? kDataPages : 0;
+    const uint32_t expected_dirty = warm_with_faults ? (1u << kDataPages) - 1 : 0;
     const bool passed = warm_ok && elapsed > 0 && memory.clean_stop() && jit.Regs()[2] == 0
         && memory.writes == expected_callbacks && memory.reads == 0
-        && memory.first_writes == expected_callbacks
-        && memory.dirty_mask == (mode == TableMode::FirstWrite ? (1u << kDataPages) - 1 : 0)
+        && memory.first_writes == expected_callbacks && memory.dirty_mask == expected_dirty
         && memory.invalid_writes == 0 && memory.bench_contents_match();
-    char name[96], detail[384];
-    std::snprintf(name, sizeof(name), "%s_abba_%zu_%s", comparison, slot + 1, mode_name(mode));
+    char name[128], detail[1024];
+    std::snprintf(name, sizeof(name), "b%u_layout%u_r%u_s%u_%s",
+        unsigned(boundaries), unsigned(reverse), round, slot, store_mode_name(mode));
     std::snprintf(detail, sizeof(detail),
-        "mode=%s order=ABBA slot=%zu pages=%u store_bytes=4 callbacks=%llu expected_callbacks=%llu boundary_checks=off_aligned_workload_only cycle_counting=off compile_outside_timing=1 host_above_4GiB=%u",
-        mode_name(mode), slot + 1, kDataPages, static_cast<unsigned long long>(memory.writes),
-        static_cast<unsigned long long>(expected_callbacks), unsigned(reinterpret_cast<uintptr_t>(memory.bytes.get()) > 0xffffffffull));
-    switch_validation::record("store_microbench", name, passed ? "pass" : "fail", detail, elapsed, kBenchStores);
-    memory.active_jit = nullptr;
+        "mode=%s boundary_checks=%u reverse_layout=%u round=%u slot=%u jit_slot=%u "
+        "callbacks=%llu expected_callbacks=%llu cpu_ticks_valid=%u cpu_ticks=%llu "
+        "cpu_rc_before=0x%X cpu_rc_after=0x%X core_before=%d core_after=%d bracket_ticks=%llu "
+        "read_table=0x%llx write_table=0x%llx backing=0x%llx jit_object=0x%llx guest_pc=0x%X "
+        "store_bytes=4 pages=%u shared_split_jit=1 compile_outside_timing=1",
+        store_mode_name(mode), unsigned(boundaries), unsigned(reverse), round, slot,
+        switch_validation::store_bench_jit(mode), static_cast<unsigned long long>(memory.writes),
+        static_cast<unsigned long long>(expected_callbacks), unsigned(cpu_valid),
+        static_cast<unsigned long long>(cpu_valid ? cpu_after - cpu_before : 0),
+        unsigned(cpu_before_rc), unsigned(cpu_after_rc), core_before, core_after,
+        static_cast<unsigned long long>(bracket_ticks),
+        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(memory.read_table.get())),
+        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(mode == TableMode::SameTableX25
+            ? memory.read_table.get() : mode == TableMode::Original ? nullptr : memory.write_table.get())),
+        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(memory.bytes.get())),
+        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(&jit)), memory.bench, kDataPages);
+    switch_validation::record("store_matrix_v2", name, passed ? "pass" : "fail", detail, elapsed, kBenchStores);
+}
+
+void run_bench_matrix(MemoryFixture &memory) {
+    switch_validation::record("store_matrix_v2", "scope", "pass",
+        "100 samples: two boundary policies x two allocation/compile orders x five Latin rows x five modes; "
+        "open/first-write/preopened share one JIT; CPU tick bracket includes query overhead; "
+        "core endpoints cannot prove absence of intermediate migrations; no clocks/affinity changed");
+    for (bool boundaries : {false, true}) {
+        for (bool reverse : {false, true}) {
+            std::array<std::unique_ptr<Dynarmic::A32::Jit>, 3> jits;
+            struct ClearActive {
+                MemoryFixture &memory;
+                ~ClearActive() { memory.active_jit = nullptr; }
+            } clear_active{memory};
+            const std::array<TableMode, 3> configs{TableMode::Original, TableMode::SameTableX25, TableMode::Mirror};
+            // Reverse both allocation and initial code emission order. Subsequent
+            // samples never rebuild their JIT, including switches between modes.
+            for (unsigned n = 0; n < jits.size(); ++n) {
+                const unsigned i = reverse ? static_cast<unsigned>(jits.size()) - 1 - n : n;
+                jits[i] = std::make_unique<Dynarmic::A32::Jit>(config_for(memory, configs[i], boundaries));
+                prepare_bench(memory, *jits[i], i == 2 ? TableMode::FirstWrite : configs[i], kWarmupStores);
+                jits[i]->Run();
+            }
+            for (uint32_t round = 0; round < switch_validation::store_bench_rounds; ++round) {
+                for (uint32_t slot = 0; slot < switch_validation::store_bench_modes; ++slot) {
+                    const TableMode mode = switch_validation::store_bench_mode(round, slot, reverse);
+                    matrix_sample(memory, *jits[switch_validation::store_bench_jit(mode)],
+                        mode, boundaries, reverse, round, slot);
+                }
+            }
+        }
+    }
 }
 
 } // namespace
@@ -498,14 +562,10 @@ void run_jit_memory_validation() {
             MemoryFixture memory;
             run_config_rejections(memory);
             run_correctness(memory);
-            for (TableMode treatment : {TableMode::Mirror, TableMode::FirstWrite}) {
-                const std::array<TableMode, 4> order{TableMode::Original, treatment, treatment, TableMode::Original};
-                for (size_t slot = 0; slot < order.size(); ++slot)
-                    bench_sample(memory, order[slot], mode_name(treatment), slot);
-            }
+            run_bench_matrix(memory);
         }
         switch_validation::record("jit_selftest", "allocation_scope", "pass",
-            "isolated 16 MiB tables released; one 8 MiB code slice live at most; no real Guest mappings changed; caller closes idle shared code pool");
+            "isolated 16 MiB tables released; at most three 8 MiB code slices live during matrix; no real Guest mappings changed; caller closes idle shared code pool");
     } catch (const std::bad_alloc &) {
         switch_validation::record("jit_selftest", "allocation", "skip",
             "insufficient isolated page-table/backing/JIT memory; production configuration unchanged");

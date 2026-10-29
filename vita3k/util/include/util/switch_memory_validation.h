@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <util/switch_validation_status.h>
 
 namespace switch_validation {
 
@@ -12,6 +13,8 @@ void begin_session(const char *title_id);
 void end_session();
 bool enabled();
 bool strict_hash();
+// Safe from either thread; copies only published summaries and atomic flags.
+StatusSnapshot status_snapshot();
 bool deduplicate_staging_cache();
 // Copies all strings immediately. Tests run before any Guest worker starts.
 void record(const char *suite, const char *test, const char *status,
@@ -40,6 +43,7 @@ inline void begin_session(const char *) {}
 inline void end_session() {}
 inline bool enabled() { return false; }
 inline bool strict_hash() { return false; }
+inline StatusSnapshot status_snapshot() { return {}; }
 inline bool deduplicate_staging_cache() { return false; }
 inline void record(const char *, const char *, const char *, const char *, uint64_t = 0, uint64_t = 0) noexcept {}
 inline void request_benchmark() {}

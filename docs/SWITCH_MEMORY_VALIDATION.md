@@ -1,82 +1,96 @@
-# Switch 内存验证：一个 NRO，一次采集
+# Switch 内存验证 v2：一个 NRO，看进度完成一次采集
 
-本版把隔离的 Horizon 能力测试、真实 Dynarmic A32→A64 写页表测试、写入微基准，以及游戏中的纹理 staging 缓存维护 A/B 放进同一个模拟器。测试数据留在 RAM，正常结束游戏后写入同一个 TraceLab 目录。无需在 A/B 阶段之间重新编译或修改配置。
+本版在 PR #13 原有验证上增加独立的原生 overlay，以及一轮启动即可执行的 100 样本写表实验矩阵。仍只编译一份核心和一份内嵌该核心的启动器，不要求更换多个 A/B NRO 或在阶段之间修改配置。
 
-这是用于选择下一步内存架构的验证版本。独立写页表已经进入 Dynarmic 后端，但仅在隔离测试里启用；游戏仍使用原来的读写页表。没有把缺少 HLE/GPU 覆盖的脏页实验当成纹理有效性依据。
+**独立写表目前只用于隔离自测，游戏仍使用原来的 JIT 页表。没有启用未经完整 JIT/HLE/GPU 一致性验证的免 Hash 策略。** overlay 中的完成表示“采集结束”，不表示“画面正确性已经证明”。
 
 ## 最少操作
 
-1. 用编译产物根目录的 **`Vita3K.nro`** 替换现有启动器 NRO。它内置本次编译的模拟器；`core/Vita3K.nro` 是同一份核心的诊断副本，不需要另装第二个版本。
-2. 启动 PCSD00035，进入可重复的重场景。启动过程中会自动执行安全能力测试、JIT 正确性测试和写入微基准。
-3. 默认在首次渲染之后预热 **120 秒**，自动开始游戏 A/B。想在选定场景开始或重新开始，只需按一次 **L + R + Y**；按住组合键时不会把该组合继续传给游戏。
-4. 在同一场景保持约 **3 分 4 秒**。自动顺序为 **A、B、B、A、B、A、A、B**；每段 3 秒稳定等待 + 20 秒测量。无需中间操作。
-5. 正常结束游戏，返回启动器或使用退出菜单。提供这次生成的整个 `sdmc:/switch/vita3k/logs/tracelab-<title>-<time>-<session>/` 目录即可，不用挑选多个 CSV。
+1. 用产物根目录的 **`Vita3K.nro`** 替换启动器。它已内置新核心，`core/Vita3K.nro` 只是诊断副本，不必另装。
+2. 启动 PCSD00035。Heap/Stack、JIT 正确性和新写表矩阵全部自动运行。初始自测在 renderer 创建前执行，此时尚无游戏 overlay；第一帧后面板会显示启动自测结果汇总。
+3. 进入固定重场景，按一次 **L + R + Y** 开始；或沿用首次渲染后 120 秒自动启动。组合键不会继续传给游戏。
+4. 看右下方 **MEMORY VALIDATION** 面板。八段自动按 **A、B、B、A、B、A、A、B** 执行，每段 3 秒稳定等待和 20 秒测量。默认整轮约 184 秒，不用手动切换。
+5. 面板出现 **DONE** 后，按照 **EXIT GAME NORMALLY TO SAVE** 提示正常退出游戏。把这次完整的 `sdmc:/switch/vita3k/logs/tracelab-<title>-<time>-<session>/` 文件夹提供出来即可，不需要逐个处理 CSV。
 
-如果之前配置了 `mode=off`，诊断仍然遵守关闭设置。把产物中的 `tracelab-memory-validation.cfg` 复制为 `sdmc:/switch/vita3k/tracelab.cfg` 即可恢复上述默认测试流程；这一步只需做一次。该文件独立于启动器生成的 `config.yml`。
+此前设了 `mode=off` 的用户，只需把产物中的 `tracelab-memory-validation.cfg` 复制为 `sdmc:/switch/vita3k/tracelab.cfg` 一次；诊断仍尊重关闭设置，不会擅自忽略 `mode=off`。预设独立于启动器生成的 `config.yml`。
 
-预热时打开菜单或失去焦点，会在恢复后重新计时。A/B 已开始后暂停、打开菜单或切换焦点，会使当前一轮无效；恢复到固定场景后再按 L + R + Y。重复按组合键会替换上一次 A/B 结果，但保留启动自测结果。完整的八段跑完后自动恢复 A 策略。
+## 面板状态与退出时机
 
-正常退出才导出 RAM 数据；强制杀进程、崩溃或直接断电不能保存尚未导出的这轮采集。阶段变化写入普通日志，不会为每一帧写报告文件。
+面板独立于 FPS overlay 开关，采用现有 Vulkan 原生 overlay。文字和进度条最多每秒更新四次；没有输入线程、额外的 present 或游戏期间报告文件写入。固定大小和刷新策略对 A/B 相同；自身仍有绘制开销，因此不要直接拿本版速度与无面板的旧版本比较。
 
-## 一个版本包含的验证
-
-| 项目 | 自动检查 | 结果用途 |
+| 状态 | 含义 | 操作 |
 | --- | --- | --- |
-| Horizon 环境 | HOS、loader、SVC hints、Heap/Stack/Alias region、exception context、构建的 libnx 版本 | 区分实际运行环境；hint 不等于能力证明 |
-| Heap 权限 | 1、4、16、64 页，各 32 次 RO→RW；核验权限、完整数据和 guard pages | 判断直接 Heap backing 的保护能力及批量 SVC 成本 |
-| Stack alias | 独立 Heap→Stack map，源只查询，目标 RO 探测，RW 写入，unmap 后数据恢复 | 在实际模拟器进程里复核映射约束 |
-| 原生 A64 store | 独立 CodeMemory `str; ret` 写入 | 演示 native store 不会自动经过软件回调，单列于 Dynarmic 测试 |
-| Dynarmic 写页表 | 8/16/32/64 位首次写回调后恢复直接写、读路径不受影响、Run/Step、停止后的重新布防 | 验证独立写表的实际发射和执行语义 |
-| 边界和别名 | 同 backing 的 Guest 别名、不连续宿主页、跨页的首/次/双页被监视、无效页回调 | 防止只观察起始页或错误假设宿主页连续 |
-| 配置冲突 | write table 缺少 read table、write table 与 fastmem 同时设置 | 在构造时拒绝 X25 所有权冲突，不执行无效配置 |
-| 写入微基准 | 原页表 vs 镜像写页表；原页表 vs 每页首次写慢路径；各自 ABBA | 分离换表成本与首次写回调成本，记录实际 Guest store 数 |
-| 游戏内 staging A/B | 原缓存维护 vs 非 coherent staging 去重 | 测量保留 Vulkan flush 时省掉重复平台维护的效果 |
+| WARM-UP | 自动启动倒计时 | 进入稳定场景；L+R+Y 可立即开始 |
+| READY TO START | 仅手动模式 | 在选定场景按 L+R+Y |
+| SETTLING | 当前 A/B 策略刚切换，等待稳定 | 保持场景，不退出 |
+| MEASURING | 正在采集，显示段号、A/B、总体百分比、段内和总剩余时间 | 保持场景，不退出 |
+| START / RESTART REQUESTED | 已收到按键，等待下一个 source render loop 处理 | 不要立即退出 |
+| PAUSED before capture | 尚未开始时进入菜单/失焦 | 恢复后重计预热 |
+| INTERRUPTED | 采集中暂停、打开菜单或失焦；当前轮失效 | 恢复场景后 L+R+Y 重启，或正常退出提供部分报告 |
+| DONE - CAPTURE READY | 八段完成，基本样本量、记录完整性和 B 实际执行检查通过 | **正常退出保存，不必继续挂机** |
+| DONE - INCONCLUSIVE | 八段完成，但至少一段没有实际 B 上传 | **正常退出并提供报告**；不要盲目重复，不能据此声称优化有效 |
+| DONE - CHECK REPORT | 自测、样本质量或记录完整性检查失败 | **正常退出并提供失败记录**；不要当作无损优化通过 |
+| WAITING FOR SOURCE FRAMES | source render loop 长时间没有更新 | 进度保持最后一次完成位置，不会凭计时器虚构 DONE |
 
-`QueryMemory.type` 按查询返回的内存类型记录，不把它与未导出的内核 capability 位进行比较。借用源在 map 期间不解引用。所有权限测试只操作独立分配的内部页，分配边界保留 RW guard，避免改动 allocator 元数据。
+面板的 PASS / FAIL / SKIP 是结果记录数，不是互相独立功能的数量。跳过不等于通过。记录丢失、自测未知状态或失败，会阻止绿色完成。文字使用 ASCII 英文，不依赖可选中文字体。
 
-如果恢复权限或 unmap 失败，测试记录 `fail` 并保留有关 backing；不会释放仍然受保护或被借用的地址。退出时禁止把此进程交给下一 NRO 做 chainload，改走进程退出。启动的 JIT 测试结束后销毁所有测试页表和 code slice，再关闭空闲测试 code pool，让游戏重新分配自己的资源。
+完整结束后自动恢复 A 策略。完成后打开退出菜单不会把已完成采集改判为中断。重复 L+R+Y 替换上次游戏 A/B 结果，但保留全部启动自测。屏幕提示的是“可以退出保存”，**不是“报告已经写入 SD”**：正常结束才导出 RAM 数据；强制关闭、崩溃或断电可能丢失尚未保存的报告。
 
-本版不故意触发写保护异常。异常能否安全恢复、Direct Heap Guest backing、生产环境并发重新布防、exclusive store、HLE 和 GPU 写入全覆盖均明确列为未验证。`skip` 表示能力不可用或未覆盖；不等同于 `pass`。
+## 为什么这次启动包含 100 个写表样本
 
-## A/B 到底改变什么
+上一版每个微基准样本单独创建 JIT，镜像写表与首次写入组出现不一致的性能结果。本版专门消除“切换这三种状态时重建 JIT”的混杂因素，一次运行同时检查寄存器、表地址、首次写入、边界检查和编译顺序。
 
-两组始终使用相同的普通纹理缓存参考模式：每次检查重新计算现有 hash 覆盖范围，关闭同 scene 的 hash memo，也关闭历史的两种 unsafe interval skip。旧配置中的 Hash64、guest store counter/guard、hash 分类探针和旧 CSV 采样，在验证模式中都会被强制关闭，避免混入开销或 stale texture 实验。
+五种模式：
 
-这个参考模式的范围是 `ordinary_texture_cache_existing_hash_footprint`。它没有替换 surface cache、DoubleBuffer block memo、原有 mip/stride/import hash 范围规则，也没有自动比较 GPU 输出图像。因此 `strict_hash=true` 不是整个渲染器的内存一致性证明。不要把这一版的 A 数字直接和旧版本的 24.36 Loop/s 当成同条件结果；先比较同一 NRO 内的 A/B。
+| 模式 | 意义 |
+| --- | --- |
+| original_table | 原始 X24 页表路径 |
+| same_table_x25 | X25 指向与 X24 完全相同的表，分离换寄存器与换表地址的影响 |
+| mirror_write_table | 独立写表，全部开放 |
+| first_write_table | 四个后备页重新布防，各首次写走回调，然后开放 |
+| preopened_write_table | 在计时外走首次写回调开放页面，计时内不再布防 |
 
-| staging 内存类型 | A：原维护 | B：去重 |
-| --- | --- | --- |
-| Non-coherent | 平台 cache flush + VMA/Vulkan flush | 保留 VMA/Vulkan flush，省去前一次平台 flush |
-| Coherent | 保留现有平台 flush workaround | 相同 |
+后三种模式在一组中使用**同一个 JIT 对象、同一个代码缓存、同一张写表和后备数据**，不会按样本销毁/重建 JIT。每个配置先在计时外预热，检查结果和实际回调数。
 
-修改范围只包括 VMA 分配的 texture staging，GPU 作为 TransferSrc 读取它。没有改 External Host Guest pointer 导入、其它 ring buffer、image transition、barrier、fence 或 staging 重用时机。去重的依据是当前固定 Mesa Switch 驱动中 non-coherent flush 的 cache clean 路径；更换 SDK 时必须重新核对，而非推广为所有 Vulkan 实现的结论。
+总计：两种边界检查策略 × 两种分配/初始编译顺序 × 五轮 Latin 顺序 × 五种模式 = **100 个样本**。每行都含五种模式，每个模式在五轮中出现在全部五个采样位置。每个样本执行 262,144 次 Guest store，结果写到 `store_matrix_v2` suite。
 
-每一轮上传只读取一次策略。计数由渲染线程维护；不增加 Guest 每次 store 的计数，不把 A/B 两组变成不同的原子统计负载。发生很长的跨阶段停顿时，会从实际策略切换时刻重新满足稳定等待，不能仅靠计划时间认定缓存已经稳定。
+记录包括内层 wall ticks、查询包围区间的 thread CPU ticks、两个查询返回码、采样前后核心编号、实际回调数、读写表及后备地址、JIT 对象身份和 Guest PC。不改 CPU 频率、线程亲和性或优先级。最多三个 8 MiB code slice 同时存活；所有测试资源在 Guest 启动前释放，随后关闭空闲测试 code pool。
 
-## 报告与判读
+注意：JIT 对象地址**不是**发射出的 native 热块地址。CPU tick 区间包含查询开销，不能当成裸 store cycles；核心首尾一致也不能证明中途未迁核。ns/store 包含 Guest 循环及分派，不能直接乘游戏写入次数来预测帧率。边界检查关闭组只对应已知对齐的测试工作负载，不能替代最终生产路径。
 
-新增 `memory-validation.json` 与既有 `manifest.json`、`summary.json`、`frames.csv`、`hotspots.csv`、`threads.csv`、`nid-samples.csv`、`trace.bin` 位于同一目录。构建产物另附 `build-info.txt` 和 NRO 的 `SHA256SUMS`。
+## 保留的自动验证和游戏 A/B
 
-现有分析器会自动读入新文件；只需 Node，不需要 npm 包：
+原有 Heap 1/4/16/64 页 RO→RW、Stack alias、解除映射后权限和数据恢复、原生 A64 store、Dynarmic 8/16/32/64 位首次写、Run/Step、停止后重新布防、别名、非连续后备、跨页及无效映射检查继续自动执行。
+
+`QueryMemory.type` 只按对外内存类型记录，不推断未导出的内部 capability 位。所有权限测试使用独立页和 RW guard。权限恢复/unmap 失败则保留 backing，禁止带着残留映射 chainload，避免释放仍不可访问或被借用的内存。本版不故意触发写保护异常。
+
+游戏 A/B 不变：A 对 texture staging 执行原平台维护和 VMA flush；B 对 non-coherent staging 只省掉前一次重复平台维护，仍执行 VMA/Vulkan flush；coherent 映射保留原 workaround。没有修改 External Host Guest pointer、其他 ring buffer、GPU barrier、fence、图像布局转换或 staging 重用时机。
+
+两组仍使用 `ordinary_texture_cache_existing_hash_footprint` 参考模式，关闭普通纹理缓存的同 scene memo 和旧 Hash64/unsafe skip。它不覆盖 surface cache、DoubleBuffer block memo 及现有 Hash 范围之外的一切一致性情况。不要把本版严格 Hash 下的速度与早先 24.36 Loop/s 视为同配置比较。
+
+本轮**没有新增 GPU staging→image→readback 内容验证、生产环境并发重新布防或完整 HLE/GPU 写追踪**。游戏内真实写表仍未开启；不得把隔离测试通过当作生产 hashless tracker 已完成。GPU 可见性和实际画面正确性仍需独立验证。
+
+## 报告与工具
+
+仍只有一个 TraceLab 会话目录。`memory-validation.json` 保持兼容的 `schema_version=1`，新增 `validation_revision=2`、`capture_outcome` 和 overlay 元数据；既有 `tests` 和 `benchmark` 结构不变。八段的基本就绪门槛与既有分析器对齐：每段至少 100 个有效间隔、有效时长至少目标的 90%，没有 overflow，中断或测试记录丢失；B 必须有实际去重调用和字节。最终 PC 分析仍会检查其他日志的完整性和配对条件。
+
+原来的 Node 分析器继续提供游戏性能、全部自测明细和 staging A/B：
 
 ```sh
-node analyze-switch-tracelab.mjs "/path/to/tracelab-session" --html memory-report.html > memory-report.json
+node analyze-switch-tracelab.mjs "/path/to/session" --html memory-report.html > memory-report.json
 ```
 
-在源码目录使用时脚本路径为 `scripts/analyze-switch-tracelab.mjs`。HTML 包含能力、自测、微基准、八段数据、四个相邻 AB/BA 配对以及排除原因。既有 capture 没有新文件时仍可以分析。
+产物增加标准库 Python 分析器，专门比较新的同 JIT 矩阵：
 
-以下条件满足才报告配对性能变化：
+```sh
+python3 analyze-switch-memory-v2.py "/path/to/session" > memory-matrix.json
+```
 
-- 八段顺序完整、未暂停中断、未 overflow，参考模式一致。
-- 每段至少 100 个有效 render-loop 间隔，记录时长至少为目标的 90%。
-- JIT 自测没有 `fail`/unknown，测试记录未丢失。
-- 对应 B 段确实有 `dedup_calls` 和 `dedup_bytes`。如果所有 staging 都是 coherent，结果为 `n/a`，不能把没有执行的优化报成收益。
+它按边界检查和分配顺序分组，输出 Original→Same-X25、Same-X25→Mirror、Mirror→FirstWrite、Mirror→Preopened 的配对比值。检测失败、迁核、重复/缺失坐标、回调数错误、表或后备身份不一致时排除对应配对；五轮不全则不输出性能比值。CPU 查询不可用时保留有效 wall 数据，但 CPU 比值为 null。不会把所有模式和顺序混成一个“平均开销”。旧采集没有矩阵时显示不可用，不伪造样本。
 
-记录的速度单位是 **render loops/s**，不是显示 FPS，也不是 LSFG 输出帧率。还给出 p50/p95/p99，以及因 settle/boundary 排除的间隔和时长。微基准的 `ns/store` 包含循环和 JIT 调度等配套成本，没有减去计时/循环 overhead，不应解读成裸 STR 指令 latency。
+通常只需提供整个会话目录，无须在 Switch 上或电脑上手动运行分析器。结合可见画面异常、当时的时钟、渲染和 LSFG 设置反馈；A/B 中途不要更改条件。
 
-能力失败和微基准失败始终列在报告顶部；不支持的能力 `skip` 不会让整轮错误地显示“全部通过”。实际画面是否出现花屏、旧纹理、渲染目标反馈异常，仍需在同一重场景观察。请连同这些现象和当时的时钟、LSFG/渲染设置一起反馈；A/B 中途不要改变这些条件。
-
-## 可选配置
+## 配置与开发检查
 
 ```ini
 mode=auto
@@ -86,10 +100,6 @@ validation_settle_seconds=3
 validation_phase_seconds=20
 ```
 
-`memory_validation=on` 仅取消自动启动，仍自动执行启动自测，游戏 A/B 由 L + R + Y 开始。`memory_validation=off` 关闭本次验证功能；`mode=off` 同时关闭 TraceLab 和验证。时长范围分别为预热 0–600 秒、稳定等待 1–30 秒、测量 5–120 秒。通常直接使用默认值。
+`memory_validation=on` 仅取消自动开始；`off` 关闭验证。`mode=off` 同时关闭 TraceLab。可调范围仍是预热 0–600 秒、稳定等待 1–30 秒、测量 5–120 秒。很短的测量配合低帧率可能达不到 100 间隔门槛，建议保留默认配置。
 
-## 开发验证与后续 gate
-
-CI 仍只编译一次核心和一次内嵌核心的启动器，没有 A/B build matrix。编译前运行 host preflight，覆盖控制器的真实状态机、暂停退出、重新开始、跨段停顿、有界记录、延迟导出、分析器排除规则及 staging 发布决策；交叉编译检查实际 Switch 类型和链接。
-
-host 测试不能替代 Horizon SVC 或 Cortex-A57 的实际执行结果。收到这一份实机报告后，才能决定是否把写表接入真实 Guest 内存，并进一步增加 backing/alias 身份、CPU safepoint 重新布防、跨页回调、HLE 受控写入和 GPU owner/version 协议。完整覆盖前不启用“页未脏就免 hash”的游戏策略。
+主机回归新增真实控制器+HUD 共用文本规则检查，覆盖暂停、重启、完成、低样本、失败、读线程并发、报告和退出菜单。矩阵驱动测试提取真实驱动函数，使用明确标注的 host fixture 验证顺序、JIT 复用和报告协议；**不模拟或证明真正的 Dynarmic A64 执行**。已有实际 emitter/Oaknut 字节检查保留在 CI，完整 Switch 编译检查目标平台类型和链接。最终仍需同一个 NRO 的实机结果。

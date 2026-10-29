@@ -16,6 +16,8 @@ done
 python3 "$ROOT/scripts/tests/test_switch_cpu_checkpoint.py" --cxx "${CXX:-c++}"
 python3 "$ROOT/scripts/tests/test_switch_tracelab_ram.py" --cxx "${CXX:-c++}"
 python3 "$ROOT/scripts/tests/test_switch_memory_validation.py" --cxx "${CXX:-c++}"
+python3 "$ROOT/scripts/tests/test_switch_validation_hud.py" --cxx "${CXX:-c++}"
+python3 "$ROOT/scripts/tests/test_switch_memory_matrix.py" --cxx "${CXX:-c++}"
 python3 "$ROOT/scripts/tests/test_switch_write_table_codegen.py" --cxx "${CXX:-c++}"
 python3 "$ROOT/scripts/tests/test_switch_memory_capabilities.py" --cxx "${CXX:-c++}"
 python3 "$ROOT/scripts/tests/test_switch_memory_report.py"

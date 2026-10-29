@@ -194,6 +194,7 @@ jobs:
           cp build-switch/Vita3K.nro build-switch/artifacts/core/Vita3K.nro
           cp docs/SWITCH_MEMORY_VALIDATION.md build-switch/artifacts/READ-MEMORY-VALIDATION.md
           cp scripts/analyze-switch-tracelab.mjs build-switch/artifacts/
+          cp scripts/analyze-switch-memory-v2.py build-switch/artifacts/
           cp scripts/tracelab-memory-validation.cfg build-switch/artifacts/tracelab-memory-validation.cfg
           {
             printf 'Vita3K commit: %s\n' "$(git rev-parse HEAD)"
