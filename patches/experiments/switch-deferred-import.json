@@ -1,6 +1,6 @@
 {
   "base_commit": "1c6825d5179abc2f1da33a591c18cfff2ee9c6ba",
-  "purpose": "Demand materialization of whole GPU buffer mappings; no live RO, no new Hash reuse. Ordered exact-pin extension.",
+  "purpose": "Whole-mapping imports retained; automatic private GPU mirror ownership + image roundtrip, not live Guest hashless execution.",
   "files": [
     {
       "path": "vita3k/util/src/switch_memory_validation.cpp",
@@ -25,6 +25,46 @@
         {
           "old": "const bool valid = controls && !test_failed && !lost_results.load() && !topology.errors;",
           "new": "const bool valid = controls && !test_failed && !lost_results.load() && !topology.errors && !deferred_import::registry.summary().errors;"
+        },
+        {
+          "old": "        out.direct_guest = topology.active;",
+          "new": "        out.gpu_mirror = mirror_probe::state.requested.load();\n        out.mirror_cases = mirror_probe::state.completed.load();\n        out.mirror_audits = mirror_probe::state.audits.load();\n        out.mirror_upload = mirror_probe::state.uploaded.load();\n        out.mirror_download = mirror_probe::state.downloaded.load();\n        out.direct_guest = topology.active;"
+        },
+        {
+          "old": "    } else if (content_stopped) {",
+          "new": "        if (out.gpu_mirror) {\n            const auto gpu = mirror_probe::snapshot();\n            const bool prerequisite_failed = scratch_failed || test_failed || lost_results.load() || topology.errors;\n            out.stage = gpu.finished || prerequisite_failed ? Stage::Complete : Stage::Measuring;\n            out.total_ms = out.remaining_ms = 0;\n            out.progress_per_mille = static_cast<uint32_t>(gpu.completed * 1000 / mirror_probe::case_count);\n            out.outcome = prerequisite_failed || (gpu.finished && (!gpu.passed || !gpu.cleanup)) ? CaptureOutcome::Invalid\n                : gpu.finished ? CaptureOutcome::Ready : CaptureOutcome::Pending;\n        }\n    } else if (content_stopped) {"
+        },
+        {
+          "old": "        completed = !topology.active || topology.finished || topology.errors || scratch_failed || deferred_import::registry.summary().errors;",
+          "new": "        completed = !topology.active || topology.finished || topology.errors || scratch_failed || deferred_import::registry.summary().errors;\n        if (mirror_probe::state.requested.load())\n            completed = mirror_probe::state.finished.load() || topology.errors || scratch_failed || test_failed || lost_results.load();"
+        },
+        {
+          "old": "        std::fputs(\"{\\n  \\\"schema_version\\\":1,\\n  \\\"capture_plan\\\":\\\"heap-fault-4-deferred\\\",\\n  \\\"title\\\":\", file);",
+          "new": "        std::fputs(mirror_probe::state.requested.load()\n            ? \"{\\n  \\\"schema_version\\\":1,\\n  \\\"capture_plan\\\":\\\"gpu-mirror-1\\\",\\n  \\\"title\\\":\"\n            : \"{\\n  \\\"schema_version\\\":1,\\n  \\\"capture_plan\\\":\\\"heap-fault-4-deferred\\\",\\n  \\\"title\\\":\", file);"
+        },
+        {
+          "old": "            const bool controls = heap_control_mask == 3 && (!topology.active || direct_heap::state.cache_passed.load());",
+          "new": "            const bool gpu_requested = mirror_probe::state.requested.load();\n            const auto gpu = mirror_probe::snapshot();\n            const bool controls = heap_control_mask == 3 && (!topology.active || direct_heap::state.cache_passed.load())\n                && (!gpu_requested || (gpu.finished && gpu.passed && gpu.cleanup && gpu.completed == mirror_probe::case_count));"
+        },
+        {
+          "old": "            const char *outcome = !valid ? \"invalid\" : topology.active && !direct_heap::ready(topology) ? \"inconclusive\" : \"ready\";",
+          "new": "            const char *outcome = !valid ? \"invalid\" : !gpu_requested && topology.active && !direct_heap::ready(topology) ? \"inconclusive\" : \"ready\";"
+        },
+        {
+          "old": "real Guest Direct Heap topology and isolated no-scan controls; live Guest Hash retained; no GPU/IPC/concurrent-rearm proof",
+          "new": "Direct Heap retained; private CPU/GPU mirror transfer and image controls when requested; live Guest Hash retained; no shader-store/IPC/concurrent-rearm proof"
+        },
+        {
+          "old": "const bool prerequisite_failed = scratch_failed || test_failed || lost_results.load() || topology.errors;",
+          "new": "const bool prerequisite_failed = scratch_failed || test_failed || lost_results.load() || topology.errors || imports.errors;"
+        },
+        {
+          "old": "completed = mirror_probe::state.finished.load() || topology.errors || scratch_failed || test_failed || lost_results.load();",
+          "new": "completed = mirror_probe::state.finished.load() || topology.errors || scratch_failed || test_failed || lost_results.load() || deferred_import::registry.summary().errors;"
+        },
+        {
+          "old": "void request_benchmark() {\n    if (!enabled()) return;",
+          "new": "void request_benchmark() {\n    if (!enabled() || mirror_probe::state.requested.load()) return;"
         }
       ]
     },
@@ -39,6 +79,14 @@
         {
           "old": "        std::snprintf(text.action.data(), text.action.size(), \"%s\", done\n            ? \"EXIT GAME NORMALLY TO SAVE | Share this run; do not repeat\"",
           "new": "        if (s.lazy_imports) {\n            std::snprintf(text.samples.data(), text.samples.size(), \"Deferred:%llu MiB | GPU:%llu MiB | Avoided:%llu | Errors:%llu\",\n                (unsigned long long)s.lazy_pending_mib, (unsigned long long)s.lazy_imported_mib,\n                (unsigned long long)s.lazy_avoided, (unsigned long long)(s.lazy_errors + s.direct_errors));\n        }\n        std::snprintf(text.action.data(), text.action.size(), \"%s\", done\n            ? \"EXIT GAME NORMALLY TO SAVE | Share this run; do not repeat\""
+        },
+        {
+          "old": "    bool direct_guest = false, lazy_imports = false;",
+          "new": "    bool direct_guest = false, lazy_imports = false, gpu_mirror = false;\n    uint64_t mirror_cases = 0, mirror_audits = 0, mirror_upload = 0, mirror_download = 0;"
+        },
+        {
+          "old": "    if (s.heap_fault && s.direct_guest) {",
+          "new": "    if (s.heap_fault && s.gpu_mirror) {\n        const bool done = s.stage == Stage::Complete;\n        const bool pass = done && s.outcome == CaptureOutcome::Ready && !s.failed && !s.results_dropped;\n        text.tone = !done ? HudText::Tone::Running : pass ? HudText::Tone::Ready : HudText::Tone::Warning;\n        std::snprintf(text.title.data(), text.title.size(), \"GPU MIRROR | %s\",\n            !done ? \"AUTOMATIC GPU TESTS\" : pass ? \"DONE - REPORT READY\" : \"DONE - CHECK REPORT\");\n        std::snprintf(text.timing.data(), text.timing.size(), \"Step %llu / 14 | %u%% | No scene timer or button required\",\n            (unsigned long long)s.mirror_cases, s.progress_per_mille / 10);\n        std::snprintf(text.samples.data(), text.samples.size(), \"Byte audits:%llu | Upload:%llu KiB | Readback:%llu KiB\",\n            (unsigned long long)s.mirror_audits, (unsigned long long)(s.mirror_upload / 1024),\n            (unsigned long long)(s.mirror_download / 1024));\n        std::snprintf(text.action.data(), text.action.size(), \"%s\", done\n            ? \"EXIT GAME NORMALLY TO SAVE | Share this run; do not repeat\"\n            : \"Automatic private-resource tests | Wait for DONE | Game Hash unchanged\");\n        return text;\n    }\n    if (s.heap_fault && s.direct_guest) {"
         }
       ]
     },
@@ -61,6 +109,34 @@
         {
           "old": "    hz = data.get('timebase_hz', 0)\n    timing = next((t for t in tests if t.get('name') == 'rearm_64'), {})",
           "new": "    if data.get('capture_plan') == 'heap-fault-4-deferred':\n        imports = topology.get('deferred_imports', {})\n        if imports.get('errors'): issues.append('Deferred mapping lifetime/materialization failure')\n        if topology.get('active') and (not imports.get('enabled') or not imports.get('frozen_at_window_end')):\n            issues.append('Deferred import mode disabled or focused window not completed')\n        if imports.get('capacity_fallbacks'): issues.append('Deferred registry capacity reached: original eager fallback used')\n        if not topology.get('final_classification_complete'):\n            issues.append('Missing end-of-window permission census')\n    hz = data.get('timebase_hz', 0)\n    timing = next((t for t in tests if t.get('name') == 'rearm_64'), {})"
+        },
+        {
+          "old": "(\"heap-fault-1\", \"heap-fault-2-direct\", \"heap-fault-3-mixed\", \"heap-fault-4-deferred\")",
+          "new": "(\"heap-fault-1\", \"heap-fault-2-direct\", \"heap-fault-3-mixed\", \"heap-fault-4-deferred\", \"gpu-mirror-1\")"
+        },
+        {
+          "old": "    if data.get('capture_plan') in ('heap-fault-3-mixed', 'heap-fault-4-deferred'):",
+          "new": "    if data.get('capture_plan') in ('heap-fault-3-mixed', 'heap-fault-4-deferred', 'gpu-mirror-1'):"
+        },
+        {
+          "old": "        if not topology.get('finished') or topology.get('frames',0) < 120 or not topology.get('input_ranges'):",
+          "new": "        if data.get('capture_plan') != 'gpu-mirror-1' and (not topology.get('finished') or topology.get('frames',0) < 120 or not topology.get('input_ranges')):"
+        },
+        {
+          "old": "    hz = data.get('timebase_hz', 0)\n    timing = next((t for t in tests if t.get('name') == 'rearm_64'), {})",
+          "new": "    if data.get('capture_plan') == 'gpu-mirror-1':\n        gpu = topology.get('gpu_mirror', {})\n        required_gpu = {'initial_upload','clean_512_reuse','cpu_first_word','cpu_palette_word',\n            'gpu_write_while_cpu_read_only','gpu_then_cpu_partial','same_value_cpu_overwrite',\n            'cross_page_cpu_write','cpu_dirty_then_gpu_partial','gpu_to_cpu_read','buffer_image_roundtrip',\n            'same_address_new_lifetime','final_integrity','cleanup_complete','suite_complete'}\n        gpu_tests = [t for t in tests if t.get('suite') == 'gpu_mirror']\n        if any(sum(t.get('name') == n and t.get('status') == 'pass' for t in gpu_tests) != 1\n            or sum(t.get('name') == n for t in gpu_tests) != 1 for n in required_gpu):\n            issues.append('Missing, duplicated or failed real GPU mirror control')\n        if not all(gpu.get(k) is True for k in ('started','finished','passed','cleanup_complete')) or gpu.get('completed_cases') != 14:\n            issues.append('GPU mirror incomplete or unsafe cleanup; preserve checkpoint and report')\n        if not topology.get('scratch_cleanup_ok') or not gpu.get('fence_waits') or gpu.get('independent_byte_audits',0) < 13:\n            issues.append('GPU mirror lacks scratch cleanup, fence or independent byte-oracle evidence')\n    hz = data.get('timebase_hz', 0)\n    timing = next((t for t in tests if t.get('name') == 'rearm_64'), {})"
+        },
+        {
+          "old": "    hz = data.get('timebase_hz', 0)\n    timing = next",
+          "new": "    if data.get('capture_plan') == 'gpu-mirror-1' and (not topology.get('active') or topology.get('deferred_imports', {}).get('errors')):\n        issues.append('Direct Heap inactive or deferred lifetime error')\n    hz = data.get('timebase_hz', 0)\n    timing = next"
+        },
+        {
+          "old": "                tests=tests, warnings=[",
+          "new": "                GPU_mirror_controls_passed=data.get('capture_plan') == 'gpu-mirror-1' and not issues,\n                tests=tests, warnings=[\n                    'gpu-mirror-1 executes private Vulkan transfer/image writes, not shader stores, IPC or concurrent production writers.',"
+        },
+        {
+          "old": "        if not topology.get('scratch_cleanup_ok') or not gpu.get('fence_waits') or gpu.get('independent_byte_audits',0) < 13:",
+          "new": "        if (not topology.get('scratch_cleanup_ok') or not gpu.get('fence_waits') or gpu.get('independent_byte_audits',0) < 13\n                or gpu.get('required_cases') != 14 or not all(gpu.get(k, 0) > 0 for k in ('upload_bytes','download_bytes','cpu_write_faults'))):"
         }
       ]
     },
@@ -71,6 +147,10 @@
         {
           "old": "python3 \"$ROOT/scripts/tests/test_switch_direct_heap.py\" --cxx \"${CXX:-c++}\"",
           "new": "python3 \"$ROOT/scripts/tests/test_switch_direct_heap.py\" --cxx \"${CXX:-c++}\"\npython3 \"$ROOT/scripts/tests/test_switch_deferred_import.py\" --require-source --cxx \"${CXX:-c++}\""
+        },
+        {
+          "old": "python3 \"$ROOT/scripts/tests/test_switch_deferred_import.py\" --require-source --cxx \"${CXX:-c++}\"",
+          "new": "python3 \"$ROOT/scripts/tests/test_switch_deferred_import.py\" --require-source --cxx \"${CXX:-c++}\"\npython3 \"$ROOT/scripts/tests/test_switch_gpu_mirror.py\" --cxx \"${CXX:-c++}\""
         }
       ]
     },
@@ -105,6 +185,18 @@
         {
           "old": "    mapped_memories.clear();\n    buffer_trapping.trapped_buffers.clear();",
           "new": "    mapped_memories.clear();\n#ifdef __SWITCH__\n    // GPU objects have just been destroyed, after the existing idle wait.\n    switch_validation::deferred_import::registry.release_owner(reinterpret_cast<uintptr_t>(this));\n#endif\n    buffer_trapping.trapped_buffers.clear();"
+        },
+        {
+          "old": "#include <renderer/vulkan/switch_deferred_import_impl.h>",
+          "new": "#include <renderer/vulkan/switch_deferred_import_impl.h>\n#include <renderer/vulkan/switch_mirror_probe.h>"
+        },
+        {
+          "old": "void VKState::render_frame(DisplayState &display, const GxmState &gxm, MemState &mem) {",
+          "new": "void VKState::render_frame(DisplayState &display, const GxmState &gxm, MemState &mem) {\n    switch_validation::mirror_probe::tick(*this);"
+        },
+        {
+          "old": "void VKState::cleanup() {",
+          "new": "void VKState::cleanup() {\n    switch_validation::mirror_probe::shutdown(*this);"
         }
       ]
     },

@@ -10,6 +10,7 @@
 #include <cstring>
 #include <mutex>
 #include <util/switch_deferred_import.h>
+#include <util/switch_mirror_probe_state.h>
 
 namespace switch_validation::direct_heap {
 constexpr uint64_t page = 4096, align_bytes = 2 * 1024 * 1024;
@@ -51,6 +52,7 @@ inline std::mutex scratch_probe_mutex;
 // Caller has stopped prior session workers; pool allocation counters remain
 // process-lifetime counters, while input samples/progress belong to this session.
 inline void begin_session() noexcept {
+    mirror_probe::reset();
     state.finished.store(false); state.started.store(false); state.start_requested.store(false);
     state.cache_attempted.store(false); state.cache_passed.store(false); state.cache_finished.store(false);
     state.cache_cleanup_ok.store(false); state.final_classification_complete.store(false); state.start_tick.store(0); state.end_tick.store(0);
@@ -141,6 +143,8 @@ inline void write_json(FILE *file) {
     std::fprintf(file, "],\"final_classification_complete\":%s,\"deferred_imports\":",
         state.final_classification_complete.load() ? "true" : "false");
     deferred_import::registry.write_json(file);
+    std::fputs(",\"gpu_mirror\":", file);
+    mirror_probe::write_json(file);
     std::fputs("}", file);
 }
 } // namespace switch_validation::direct_heap
