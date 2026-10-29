@@ -12,6 +12,11 @@ on:
   # GitHub only exposes this button once the workflow is on the default branch.
   # The CI-only branch uses the push trigger above.
   workflow_dispatch:
+    inputs:
+      fast_dev:
+        description: "Skip LTO for faster iteration; not suitable for Release FPS comparisons"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -37,16 +42,21 @@ jobs:
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       LC_ALL: C
       TZ: UTC
-      # ON only for this PR's paired diagnostic artifacts; merged builds use OFF.
-      SWITCH_HOTPATH_DIAGNOSTICS: ${{ github.event_name == 'pull_request' && github.head_ref == 'perf/switch-render-hotspot-ab-20261027' && 'ON' || 'OFF' }}
+      # Release builds retain LTO; dispatch input or repository variable can opt out.
+      SWITCH_LTO_MODE: ${{ (inputs.fast_dev || vars.VITA3K_SWITCH_FAST_DEV == 'true') && 'NEVER' || 'RELEASE_ONLY' }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_COMPRESS: 'true'
+      CCACHE_MAXSIZE: 2G
+      # The one debug NRO carries both the established fine counters and TraceLab.
+      SWITCH_HOTPATH_DIAGNOSTICS: 'ON'
 
     steps:
       - name: Install build tools
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build pkg-config git curl \
-            ca-certificates perl python3
+            build-essential cmake ninja-build ccache pkg-config git curl \
+            ca-certificates perl python3 nodejs
           # The official image already includes switch-dev and switch-portlibs.
           # devkitPro blocks package downloads from GitHub-hosted runners.
           dkp-pacman -Q devkitA64 libnx switch-pkg-config switch-mesa
@@ -64,6 +74,11 @@ jobs:
           echo "$DEVKITA64/bin" >> "$GITHUB_PATH"
           echo "$DEVKITPRO/tools/bin" >> "$GITHUB_PATH"
           echo "$DEVKITPRO/portlibs/switch/bin" >> "$GITHUB_PATH"
+          # github.workspace can be a host path in container jobs. Use the
+          # container's actual workspace so ccache and actions/cache both
+          # address the same mounted .ccache directory.
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           sdk_version=$(sed -n 's/^SDK_VERSION=//p' scripts/prepare-switch-vulkan-sdk.sh)
           openssl_version=$(sed -n 's/^OPENSSL_VERSION=//p' scripts/prepare-switch-openssl.sh)
           test -n "$sdk_version" && test -n "$openssl_version"
@@ -74,9 +89,33 @@ jobs:
           digest=$(sha256sum build-switch-deps/toolchain.txt | cut -d ' ' -f 1)
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
+      # Do not cache build-switch/: freshly checked out files have new mtimes and
+      # Ninja would rebuild them. ccache reuses object code by content/flags.
+      - name: Restore C/C++ object cache
+        id: ccache_restore
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: .ccache
+          key: switch-ccache-v1-${{ steps.toolchain.outputs.digest }}-${{ hashFiles('scripts/prepare-switch-*.sh', '.ci/build-switch-sdk.sh', '.ci/patches/**', 'cmake/switch/openssl-compat/**') }}-${{ env.SWITCH_LTO_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            switch-ccache-v1-${{ steps.toolchain.outputs.digest }}-${{ hashFiles('scripts/prepare-switch-*.sh', '.ci/build-switch-sdk.sh', '.ci/patches/**', 'cmake/switch/openssl-compat/**') }}-${{ env.SWITCH_LTO_MODE }}-
+
+      - name: Initialize compiler cache
+        id: ccache_setup
+        run: |
+          mkdir -p "$CCACHE_DIR"
+          ccache --max-size="$CCACHE_MAXSIZE"
+          ccache --zero-stats
+          ccache --version | head -1
+          echo "Workspace: $GITHUB_WORKSPACE"
+          ccache --show-config | grep -E '(cache_dir|base_dir) ='
+
       # Check pinned submodules before spending time building the SDKs.
       - name: Apply Switch submodule patches
-        run: bash scripts/apply-switch-submodule-patches.sh
+        run: |
+          bash scripts/apply-switch-submodule-patches.sh
+          python3 scripts/apply-switch-write-watch-hooks.py
 
       - name: Validate language catalog generation
         run: |
@@ -130,8 +169,12 @@ jobs:
           cmake -S . -B build-switch -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
             -DCMAKE_BUILD_TYPE=Release \
+            -DUSE_LTO="$SWITCH_LTO_MODE" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DSWITCH_RENDER_CORE_SPREAD=ON \
             -DSWITCH_RENDER_HOTPATH_DIAGNOSTICS="$SWITCH_HOTPATH_DIAGNOSTICS" \
+            -DSWITCH_TRACELAB=ON \
             -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR" \
             -DSWITCH_VULKAN_SDK="$SWITCH_VULKAN_SDK"
           cmake --build build-switch --parallel "$VITA3K_BUILD_JOBS"
@@ -141,7 +184,9 @@ jobs:
         run: |
           mkdir -p switch-launcher/romfs/emu
           cp build-switch/Vita3K.nro switch-launcher/romfs/emu/Vita3K.nro
-          make -C switch-launcher -j"$VITA3K_BUILD_JOBS"
+          make -C switch-launcher -j"$VITA3K_BUILD_JOBS" \
+            CC="ccache $DEVKITA64/bin/aarch64-none-elf-gcc" \
+            CXX="ccache $DEVKITA64/bin/aarch64-none-elf-g++"
           test -s switch-launcher/Vita3K.nro
 
       - name: Stage artifacts
@@ -149,13 +194,22 @@ jobs:
           mkdir -p build-switch/artifacts/core
           cp switch-launcher/Vita3K.nro build-switch/artifacts/Vita3K.nro
           cp build-switch/Vita3K.nro build-switch/artifacts/core/Vita3K.nro
+          cp docs/SWITCH_MEMORY_VALIDATION.md build-switch/artifacts/READ-MEMORY-VALIDATION.md
+          cp scripts/analyze-switch-tracelab.mjs build-switch/artifacts/
+          cp scripts/analyze-switch-memory-v2.py build-switch/artifacts/
+          cp scripts/analyze-switch-memory-v3.py build-switch/artifacts/
+          cp build-switch-preflight/write-watch-hooks.json build-switch/artifacts/
+          cp scripts/tracelab-memory-validation.cfg build-switch/artifacts/tracelab-memory-validation.cfg
           {
             printf 'Vita3K commit: %s\n' "$(git rev-parse HEAD)"
             printf 'Mesa commit: %s\n' "$(cat "$SWITCH_VULKAN_SDK/share/mesa-switch/revision")"
             printf 'Vita3K.nro contains the launcher and emulator; core/ is for diagnostics.\n'
             printf 'SWITCH_DESCRIPTOR_BIND_CACHE=ON\n'
             printf 'SWITCH_RENDER_CORE_SPREAD=ON\n'
-            printf 'SWITCH_RENDER_HOTPATH_DIAGNOSTICS=%s\n\n' "$SWITCH_HOTPATH_DIAGNOSTICS"
+            printf 'SWITCH_RENDER_HOTPATH_DIAGNOSTICS=%s\n' "$SWITCH_HOTPATH_DIAGNOSTICS"
+            printf 'SWITCH_TRACELAB=ON\n'
+            printf 'USE_LTO=%s\n' "$SWITCH_LTO_MODE"
+            printf 'compiler_cache=ccache\n\n'
             cat build-switch-deps/toolchain.txt
             cat "$SWITCH_VULKAN_SDK/share/mesa-switch/build-info.txt"
           } > build-switch/artifacts/build-info.txt
@@ -170,74 +224,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # Only the render-hotspot A/B experiment builds a second NRO; normal
-      # pull requests and merged pushes still compile exactly once.
-      - name: Build descriptor-cache OFF reference NRO for A/B
-        if: github.event_name == 'pull_request' && github.head_ref == 'perf/switch-render-hotspot-ab-20261027'
-        run: |
-          cmake -S . -B build-switch -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DSWITCH_DESCRIPTOR_BIND_CACHE=OFF \
-            -DSWITCH_RENDER_HOTPATH_DIAGNOSTICS="$SWITCH_HOTPATH_DIAGNOSTICS" \
-            -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR" \
-            -DSWITCH_VULKAN_SDK="$SWITCH_VULKAN_SDK"
-          cmake --build build-switch --parallel "$VITA3K_BUILD_JOBS"
-          test -s build-switch/Vita3K.nro
-          cp build-switch/Vita3K.nro switch-launcher/romfs/emu/Vita3K.nro
-          make -C switch-launcher -j"$VITA3K_BUILD_JOBS"
-          test -s switch-launcher/Vita3K.nro
-          mkdir -p build-switch/artifacts-descriptor-off/core
-          cp switch-launcher/Vita3K.nro build-switch/artifacts-descriptor-off/Vita3K.nro
-          cp build-switch/Vita3K.nro build-switch/artifacts-descriptor-off/core/Vita3K.nro
-          sed 's/SWITCH_DESCRIPTOR_BIND_CACHE=ON/SWITCH_DESCRIPTOR_BIND_CACHE=OFF/' \
-            build-switch/artifacts/build-info.txt > build-switch/artifacts-descriptor-off/build-info.txt
-          cd build-switch/artifacts-descriptor-off
-          sha256sum Vita3K.nro core/Vita3K.nro > SHA256SUMS
-
-      - name: Upload descriptor-cache OFF reference NRO
-        if: github.event_name == 'pull_request' && github.head_ref == 'perf/switch-render-hotspot-ab-20261027'
-        uses: actions/upload-artifact@v4
-        with:
-          name: vita3k-switch-descriptor-cache-off-${{ github.sha }}
-          path: build-switch/artifacts-descriptor-off/
-          if-no-files-found: error
-          retention-days: 14
-
-      # This scheduling experiment builds an identical renderer with the
-      # original core-3-only render affinity as a strict A/B reference.
-      # Normal PRs/merged pushes still produce only the production NRO.
-      - name: Build core-3-only render reference NRO
-        if: github.event_name == 'pull_request' && github.head_ref == 'perf/switch-render-core-spread-20261027'
-        run: |
-          cmake -S . -B build-switch -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DSWITCH_RENDER_CORE_SPREAD=OFF \
-            -DSWITCH_RENDER_HOTPATH_DIAGNOSTICS="$SWITCH_HOTPATH_DIAGNOSTICS" \
-            -DSWITCH_OPENSSL_DIR="$SWITCH_OPENSSL_DIR" \
-            -DSWITCH_VULKAN_SDK="$SWITCH_VULKAN_SDK"
-          cmake --build build-switch --parallel "$VITA3K_BUILD_JOBS"
-          test -s build-switch/Vita3K.nro
-          cp build-switch/Vita3K.nro switch-launcher/romfs/emu/Vita3K.nro
-          make -C switch-launcher -j"$VITA3K_BUILD_JOBS"
-          test -s switch-launcher/Vita3K.nro
-          mkdir -p build-switch/artifacts-core3-reference/core
-          cp switch-launcher/Vita3K.nro build-switch/artifacts-core3-reference/Vita3K.nro
-          cp build-switch/Vita3K.nro build-switch/artifacts-core3-reference/core/Vita3K.nro
-          sed 's/SWITCH_RENDER_CORE_SPREAD=ON/SWITCH_RENDER_CORE_SPREAD=OFF/' \
-            build-switch/artifacts/build-info.txt > build-switch/artifacts-core3-reference/build-info.txt
-          cd build-switch/artifacts-core3-reference
-          sha256sum Vita3K.nro core/Vita3K.nro > SHA256SUMS
-
-      - name: Upload core-3-only render reference NRO
-        if: github.event_name == 'pull_request' && github.head_ref == 'perf/switch-render-core-spread-20261027'
-        uses: actions/upload-artifact@v4
-        with:
-          name: vita3k-switch-render-core3-reference-${{ github.sha }}
-          path: build-switch/artifacts-core3-reference/
-          if-no-files-found: error
-          retention-days: 14
+      # Keep exactly one emulator + launcher build in this workflow.
+      # Historical core-3-only and descriptor-cache A/B artifacts are retired.
 
       - name: Upload configure logs on failure
         if: failure()
@@ -253,3 +241,17 @@ jobs:
             switch-launcher/dependencies/build/CMakeFiles/CMakeConfigureLog.yaml
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Show compiler cache statistics
+        if: always() && steps.ccache_setup.outcome == 'success'
+        run: ccache --show-stats
+
+      # A fresh key is saved each run, including after a compiler/link failure,
+      # so repeated PR updates can reuse already compiled sources.
+      - name: Save C/C++ object cache
+        if: always() && steps.ccache_setup.outcome == 'success' && steps.ccache_restore.outcome == 'success'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: .ccache
+          key: ${{ steps.ccache_restore.outputs.cache-primary-key }}

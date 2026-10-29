@@ -37,6 +37,7 @@
 #include <util/align.h>
 #include <util/android_driver.h>
 #include <util/log.h>
+#include <util/switch_tracelab.h>
 #include <util/warning.h>
 #include <vkutil/vkutil.h>
 
@@ -415,6 +416,7 @@ void VKState::submit_general(const vk::SubmitInfo &submit_info, vk::Fence fence,
     const uint64_t submit_start = armGetSystemTick();
 #endif
     try {
+        tracelab::Scope submit(tracelab::Metric::QueueSubmit, tracelab::Domain::Render);
         general_queue.submit(submit_info, fence);
     } catch (const vk::SystemError &error) {
         LOG_CRITICAL("Vulkan {} failed: {}", stage, error.what());
@@ -444,6 +446,7 @@ void VKState::submit_general_sequence(const std::vector<vk::CommandBuffer> &comm
         const uint64_t submit_start = armGetSystemTick();
 #endif
         try {
+            tracelab::Scope submit(tracelab::Metric::QueueSubmit, tracelab::Domain::Render);
             general_queue.submit(submit_info, i + 1 == commands.size() ? fence : vk::Fence{});
         } catch (const vk::SystemError &error) {
             LOG_CRITICAL("Vulkan scene submission {}/{} failed: {}", i + 1, commands.size(), error.what());
@@ -465,6 +468,7 @@ vk::Result VKState::present_general(const vk::PresentInfoKHR &present_info) {
     switch_cpu_profile_render_phase(SwitchCpuProfilePhase::VkQueueMutexWait,
         lock_start, armGetSystemTick());
     const uint64_t present_start = armGetSystemTick();
+    tracelab::Scope present(tracelab::Metric::QueuePresent, tracelab::Domain::Render);
     const vk::Result result = lsfg::present(*this, present_info);
     switch_cpu_profile_render_phase(SwitchCpuProfilePhase::VkQueuePresent,
         present_start, armGetSystemTick());
@@ -488,6 +492,7 @@ vk::Result VKState::submit_and_present_general(const vk::SubmitInfo &submit_info
     const uint64_t submit_start = armGetSystemTick();
 #endif
     try {
+        tracelab::Scope submit(tracelab::Metric::QueueSubmit, tracelab::Domain::Render);
         general_queue.submit(submit_info, fence);
     } catch (const vk::SystemError &error) {
         LOG_CRITICAL("Vulkan swapchain frame submission failed: {}", error.what());
@@ -497,6 +502,7 @@ vk::Result VKState::submit_and_present_general(const vk::SubmitInfo &submit_info
     switch_cpu_profile_render_phase(SwitchCpuProfilePhase::VkQueueSubmit,
         submit_start, armGetSystemTick());
     const uint64_t present_start = armGetSystemTick();
+    tracelab::Scope present(tracelab::Metric::QueuePresent, tracelab::Domain::Render);
     const vk::Result result = lsfg::present(*this, present_info);
     switch_cpu_profile_render_phase(SwitchCpuProfilePhase::VkQueuePresent,
         present_start, armGetSystemTick());
@@ -2271,10 +2277,13 @@ TrappedBuffer *BufferTrapping::access_buffer(Address addr, uint32_t size, MemSta
     if (std::holds_alternative<ExternalBuffer>(mapping.buffer_impl)) {
         uint8_t *const host = Ptr<uint8_t>(addr).get(mem);
         if (host) {
-            if (always_trap)
+            if (always_trap) {
+                tracelab::Scope flush(tracelab::Metric::CacheFlush, tracelab::Domain::Render, size);
                 armDCacheFlush(host, size);
-            else
+            } else {
+                tracelab::Scope clean(tracelab::Metric::CacheClean, tracelab::Domain::Render, size);
                 armDCacheClean(host, size);
+            }
         }
         temp_buffer.size = size;
         temp_buffer.mapped_location = host;

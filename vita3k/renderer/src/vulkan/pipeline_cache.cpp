@@ -30,6 +30,7 @@
 #include <util/log.h>
 #include <util/switch_storage.h>
 #include <util/switch_thread.h>
+#include <util/switch_tracelab.h>
 
 #include <SDL3/SDL_cpuinfo.h>
 
@@ -894,6 +895,8 @@ vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(con
 void PipelineCache::compiler_thread(MemState &mem) {
     switch_allow_helper_core("shader compiler thread");
     SwitchCpuProfileThread cpu_profile("shader-compiler");
+    tracelab::tag_thread("shader-compiler");
+    tracelab::cpu_checkpoint();
     moodycamel::ConsumerToken consumer_token(pipeline_compile_queue);
 
     CompileRequest *queued_request;
@@ -906,8 +909,10 @@ void PipelineCache::compiler_thread(MemState &mem) {
         const PipelineVertexProgram vertex_program = request->get_vertex_program();
         const PipelineFragmentProgram fragment_program = request->get_fragment_program();
         const vk::Pipeline pipeline = compile_pipeline(request->type, request->render_pass, vertex_program, fragment_program, *request->get_record(), request->hints, request->has_casts, request->with_raw_attachment, mem);
+        tracelab::event(tracelab::Event::PipelineCompiled, pipeline ? 1u : 0u);
         request->pipeline->store(pipeline, std::memory_order_release);
         cpu_profile.checkpoint();
+        tracelab::cpu_checkpoint();
 
         if (pipeline) {
             const auto time_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
@@ -927,6 +932,7 @@ static vk::StencilOpState convert_op_state(const GxmStencilStateOp &state) {
 }
 
 vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::RenderPass render_pass, const PipelineVertexProgram &vertex_program_gxm, const PipelineFragmentProgram &fragment_program_gxm, const GxmRecordState &record, const shader::Hints &hints, bool has_casts, bool with_raw_attachment, MemState &mem, bool cache_only) try {
+    tracelab::Scope pipeline_compile(tracelab::Metric::PipelineCompile, tracelab::Domain::Render);
     const VertexProgram &vertex_program = vertex_program_gxm.renderer_data;
     const SceGxmProgram *gxm_fragment_shader = &fragment_program_gxm.program;
     const VKFragmentProgram &fragment_program = fragment_program_gxm.renderer_data;
@@ -1052,6 +1058,7 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
 }
 
 vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem) {
+    tracelab::Scope pipeline_lookup(tracelab::Metric::PipelineLookup, tracelab::Domain::Render);
     const GxmRecordState &record = context.record;
     // get the hash of the current context
     uint64_t key = XXH3_64bits(&record, record_pipeline_len);

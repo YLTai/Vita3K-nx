@@ -1,0 +1,131 @@
+{
+  "base_commit": "2521f801cee25432ad12544e17906893e829bb77",
+  "files": [
+    {
+      "path": "vita3k/mem/src/mem.cpp",
+      "base_blob": "69de52e101fbc5032fb399063d0297eb1e2cb6f0",
+      "replacements": [
+        {
+          "old": "#include <util/align.h>\n#include <util/log.h>\n",
+          "new": "#include <util/align.h>\n#include <util/log.h>\n#include <util/switch_write_watch_api.h>\n"
+        },
+        {
+          "old": "#include <utility>\n\n#ifdef _WIN32\n",
+          "new": "#include <utility>\n\n// A single publication point keeps the optional JIT write table in step with\n// ordinary allocation, aliases and GPU external remaps. Desktop uses a stub.\nstatic void publish_page_entry(MemState &state, uint32_t page, PagePtr entry) {\n    switch_validation::live_publish_page(state.page_table.get(), page, entry);\n}\n\n#ifdef _WIN32\n"
+        },
+        {
+          "old": "static bool switch_decommit_range(MemState &state, uint64_t start, uint64_t size) {\n    std::lock_guard<std::mutex> lock(g_switch_pool_mutex);\n",
+          "new": "static bool switch_decommit_range(MemState &state, uint64_t start, uint64_t size) {\n    [[maybe_unused]] switch_validation::MappingGuard audit_mapping;\n    std::lock_guard<std::mutex> lock(g_switch_pool_mutex);\n"
+        },
+        {
+          "old": "            if (state.use_page_table)\n                state.page_table[gp0 + i + k] = SWITCH_UNBACKED_PAGE;\n",
+          "new": "            if (state.use_page_table)\n                publish_page_entry(state, gp0 + i + k, SWITCH_UNBACKED_PAGE);\n"
+        },
+        {
+          "old": "static Address alloc_inner(MemState &state, uint32_t start_page, uint32_t page_count, const char *name, const bool force) {\n    int page_num;\n",
+          "new": "static Address alloc_inner(MemState &state, uint32_t start_page, uint32_t page_count, const char *name, const bool force) {\n    [[maybe_unused]] switch_validation::MappingGuard audit_mapping;\n    int page_num;\n"
+        },
+        {
+          "old": "            state.page_table[gp] = (state.memory.get() + static_cast<size_t>(pp) * STANDARD_PAGE_SIZE) - static_cast<size_t>(gp) * STANDARD_PAGE_SIZE;\n",
+          "new": "            publish_page_entry(state, gp, (state.memory.get() + static_cast<size_t>(pp) * STANDARD_PAGE_SIZE) - static_cast<size_t>(gp) * STANDARD_PAGE_SIZE);\n"
+        },
+        {
+          "old": "bool add_page_alias(MemState &mem, Address dst, Address src, uint32_t size) {\n    if (!mem.use_page_table",
+          "new": "bool add_page_alias(MemState &mem, Address dst, Address src, uint32_t size) {\n    [[maybe_unused]] switch_validation::MappingGuard audit_mapping;\n    if (!mem.use_page_table"
+        },
+        {
+          "old": "        mem.page_table[d / KiB(4)] = host - d;\n",
+          "new": "        publish_page_entry(mem, d / KiB(4), host - d);\n"
+        },
+        {
+          "old": "void add_external_mapping(MemState &mem, Address addr, uint32_t size, uint8_t *addr_ptr) {\n    assert((size & 4095) == 0);\n",
+          "new": "void add_external_mapping(MemState &mem, Address addr, uint32_t size, uint8_t *addr_ptr) {\n    [[maybe_unused]] switch_validation::MappingGuard audit_mapping;\n    assert((size & 4095) == 0);\n"
+        },
+        {
+          "old": "        std::fill_n(mem.page_table.get() + addr / KiB(4), block_count, page_table_entry);\n",
+          "new": "        for (uint32_t block = 0; block < block_count; ++block)\n            publish_page_entry(mem, addr / KiB(4) + block, page_table_entry);\n"
+        },
+        {
+          "old": "            memcpy(addr_ptr + block * KiB(4), original_entries[block] + block_addr, KiB(4));\n            mem.page_table[block_addr / KiB(4)] = page_table_entry;\n",
+          "new": "            memcpy(addr_ptr + block * KiB(4), original_entries[block] + block_addr, KiB(4));\n            publish_page_entry(mem, block_addr / KiB(4), page_table_entry);\n"
+        },
+        {
+          "old": "        memcpy(addr_ptr + block * KiB(4), src, KiB(4));\n        mem.page_table[block_addr / KiB(4)] = page_table_entry;\n",
+          "new": "        memcpy(addr_ptr + block * KiB(4), src, KiB(4));\n        publish_page_entry(mem, block_addr / KiB(4), page_table_entry);\n"
+        },
+        {
+          "old": "    mem.page_table[addr / KiB(4)] = mem.memory.get();\n    protect_inner(mem, addr, size, MemPerm::None);\n    mem.page_table[addr / KiB(4)] = page_table_entry;\n",
+          "new": "    publish_page_entry(mem, addr / KiB(4), mem.memory.get());\n    protect_inner(mem, addr, size, MemPerm::None);\n    publish_page_entry(mem, addr / KiB(4), page_table_entry);\n"
+        },
+        {
+          "old": "void remove_external_mapping(MemState &mem, uint8_t *addr_ptr, uint32_t size) {\n    uint64_t addr_value",
+          "new": "void remove_external_mapping(MemState &mem, uint8_t *addr_ptr, uint32_t size) {\n    [[maybe_unused]] switch_validation::MappingGuard audit_mapping;\n    uint64_t addr_value"
+        },
+        {
+          "old": "        mem.page_table[mapping.address / KiB(4)] = mapping.original_entry;\n        unprotect_inner(mem, mapping.address, mapping.size);\n",
+          "new": "        publish_page_entry(mem, mapping.address / KiB(4), mapping.original_entry);\n        unprotect_inner(mem, mapping.address, mapping.size);\n"
+        },
+        {
+          "old": "            std::fill_n(mem.page_table.get() + mapping.address / KiB(4), block_count, mapping.original_entry);\n",
+          "new": "            for (uint32_t block = 0; block < block_count; ++block)\n                publish_page_entry(mem, mapping.address / KiB(4) + block, mapping.original_entry);\n"
+        },
+        {
+          "old": "                memcpy(original + block_addr, addr_ptr + block * KiB(4), KiB(4));\n                mem.page_table[block_addr / KiB(4)] = original;\n",
+          "new": "                memcpy(original + block_addr, addr_ptr + block * KiB(4), KiB(4));\n                publish_page_entry(mem, block_addr / KiB(4), original);\n"
+        },
+        {
+          "old": "            memcpy(mapping.original_entry + block_addr, addr_ptr + block * KiB(4), KiB(4));\n            mem.page_table[block_addr / KiB(4)] = mapping.original_entry;\n",
+          "new": "            memcpy(mapping.original_entry + block_addr, addr_ptr + block * KiB(4), KiB(4));\n            publish_page_entry(mem, block_addr / KiB(4), mapping.original_entry);\n"
+        },
+        {
+          "old": "void deinit_mem(MemState &state) {\n    const std::lock_guard<std::mutex> gen_lock(state.generation_mutex);\n",
+          "new": "void deinit_mem(MemState &state) {\n    const std::lock_guard<std::mutex> gen_lock(state.generation_mutex);\n    [[maybe_unused]] switch_validation::MappingGuard audit_mapping;\n"
+        },
+        {
+          "old": "    state.memory.reset();\n    state.alloc_table.reset();\n",
+          "new": "    switch_validation::live_detach_table(state.page_table.get());\n    state.memory.reset();\n    state.alloc_table.reset();\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/cpu/src/dynarmic_cpu.cpp",
+      "base_blob": "aa20b8a5baadff077c7dfd173d37aa754cad87a0",
+      "replacements": [
+        {
+          "old": "#include <util/switch_tracelab.h>\n",
+          "new": "#include <util/switch_tracelab.h>\n#include <util/switch_write_watch_api.h>\n"
+        },
+        {
+          "old": "    T MemoryRead(Dynarmic::A32::VAddr addr) {\n        Ptr<T> ptr{ addr };\n",
+          "new": "    T MemoryRead(Dynarmic::A32::VAddr addr) {\n#ifdef __SWITCH__\n        T observed{};\n        if (switch_validation::live_read(parent->mem->page_table.get(), addr, &observed, sizeof(T))\n            != switch_validation::watch::Access::Unhandled)\n            return observed;\n#endif\n        Ptr<T> ptr{ addr };\n"
+        },
+        {
+          "old": "    void MemoryWrite(Dynarmic::A32::VAddr addr, T value) {\n        Ptr<T> ptr{ addr };\n",
+          "new": "    void MemoryWrite(Dynarmic::A32::VAddr addr, T value) {\n#ifdef __SWITCH__\n        if (switch_validation::live_write(parent->mem->page_table.get(), addr, &value, sizeof(T))\n            != switch_validation::watch::Access::Unhandled)\n            return;\n#endif\n        Ptr<T> ptr{ addr };\n"
+        },
+        {
+          "old": "    bool MemoryWriteExclusive(Dynarmic::A32::VAddr addr, T value, T expected) {\n        Ptr<T> ptr{ addr };\n",
+          "new": "    bool MemoryWriteExclusive(Dynarmic::A32::VAddr addr, T value, T expected) {\n#ifdef __SWITCH__\n        bool success = false;\n        if (switch_validation::live_exclusive(parent->mem->page_table.get(), addr, value, expected, sizeof(T), success)\n            != switch_validation::watch::Access::Unhandled)\n            return success;\n#endif\n        Ptr<T> ptr{ addr };\n"
+        },
+        {
+          "old": "        config.absolute_offset_page_table = true;\n#ifdef __SWITCH__\n",
+          "new": "        config.absolute_offset_page_table = true;\n#ifdef __SWITCH__\n        if (config.page_table) {\n            config.write_page_table = reinterpret_cast<decltype(config.write_page_table)>(\n                switch_validation::live_write_table(parent->mem->page_table.get()));\n            if (config.write_page_table) {\n                config.detect_misaligned_access_via_page_table = 16 | 32 | 64 | 128;\n                config.only_detect_misalignment_via_page_table_on_page_boundary = true;\n            }\n        }\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/renderer/src/texture/cache.cpp",
+      "base_blob": "42971a44b2d22f2663f29561d4aba2b43b2535d5",
+      "replacements": [
+        {
+          "old": "#include <util/switch_tracelab.h>\n",
+          "new": "#include <util/switch_tracelab.h>\n#include <util/switch_write_watch_api.h>\n"
+        },
+        {
+          "old": "    if (data.address()) {\n        data_hash = hash_data(data.get(mem), texture_size);\n    }\n\n    switch (base_format) {\n    case SCE_GXM_TEXTURE_BASE_FORMAT_P4:\n        return data_hash ^ hash_palette_data(texture, 16, mem);\n    case SCE_GXM_TEXTURE_BASE_FORMAT_P8:\n        return data_hash ^ hash_palette_data(texture, 256, mem);\n    default:\n        return data_hash;\n    }\n",
+          "new": "    const uint32_t palette_count = base_format == SCE_GXM_TEXTURE_BASE_FORMAT_P4 ? 16\n        : base_format == SCE_GXM_TEXTURE_BASE_FORMAT_P8 ? 256 : 0;\n    const auto observation = switch_validation::live_hash_begin(mem.page_table.get(), data.address(),\n        data.address() ? data.get(mem) : nullptr, texture_size,\n        palette_count ? get_texture_palette(texture, mem) : nullptr, palette_count * sizeof(uint32_t));\n    if (data.address()) {\n        data_hash = hash_data(data.get(mem), texture_size);\n    }\n    if (palette_count)\n        data_hash ^= hash_palette_data(texture, palette_count, mem);\n    // Always return the original FULL content Hash. Observation is not used\n    // to decide cache reuse, uploads, GPU barriers, or resource ownership.\n    switch_validation::live_hash_end(observation, data_hash);\n    return data_hash;\n"
+        }
+      ]
+    }
+  ]
+}

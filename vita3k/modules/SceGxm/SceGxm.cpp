@@ -47,6 +47,7 @@
 #include <util/bytes.h>
 #include <util/log.h>
 #include <util/switch_thread.h>
+#include <util/switch_tracelab.h>
 
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceGxm);
@@ -2358,6 +2359,7 @@ EXPORT(int, sceGxmDisplayQueueFinish) {
 }
 
 static void gxmSetUniformBuffers(renderer::State &state, GxmState &gxm, SceGxmContext *context, const SceGxmProgram &program, std::span<UniformBuffer> buffers, const UniformBufferSizes &sizes, const MemState &mem) {
+    tracelab::Scope uniform_setup(tracelab::Metric::GxmStateBuild, tracelab::Domain::Cpu);
     for (size_t i = 0; i < buffers.size(); i++) {
         if (!buffers[i] || sizes.at(i) == 0) {
             continue;
@@ -2387,6 +2389,8 @@ static void gxmSetUniformBuffers(renderer::State &state, GxmState &gxm, SceGxmCo
 }
 
 static int gxmDrawElementGeneral(EmuEnvState &emuenv, const char *export_name, const SceUID thread_id, SceGxmContext *context, SceGxmPrimitiveType primType, SceGxmIndexFormat indexType, Ptr<const void> indexData, uint32_t indexCount, uint32_t instanceCount) {
+    tracelab::Scope front_draw(tracelab::Metric::GxmFrontDraw, tracelab::Domain::Cpu,
+        static_cast<uint64_t>(indexCount) * (indexType == SCE_GXM_INDEX_FORMAT_U16 ? 2 : 4));
     if (!context || !indexData)
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
 

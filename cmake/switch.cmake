@@ -131,18 +131,40 @@ message(STATUS "Switch: using OpenSSL 4.0.1 at ${SWITCH_OPENSSL_DIR}")
 # __SWITCH__ case added to external/sdl/src/dynapi/SDL_dynapi.h (SDL refuses a
 # command-line -DSDL_DYNAMIC_API and requires editing that header).
 
+# Optional performance diagnostic build. Normal builds have no TraceLab
+# instrumentation or runtime memory overhead.
+option(SWITCH_TRACELAB "Enable Vita3K Switch TraceLab diagnostics" OFF)
+if(SWITCH_TRACELAB)
+    add_compile_definitions(VITA3K_SWITCH_TRACELAB=1)
+    execute_process(COMMAND dkp-pacman -Q libnx
+        OUTPUT_VARIABLE _validation_libnx_version
+        OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE _validation_libnx_result)
+    if(_validation_libnx_result EQUAL 0 AND _validation_libnx_version)
+        set(VITA3K_LIBNX_BUILD_VERSION "${_validation_libnx_version}")
+    endif()
+    execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE _validation_revision
+        OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE _validation_revision_result)
+    if(_validation_revision_result EQUAL 0)
+        set(VITA3K_MEMORY_VALIDATION_REVISION "${_validation_revision}")
+    endif()
+endif()
+
 # Features that make no sense / are unavailable on Switch.
 set(USE_DISCORD_RICH_PRESENCE OFF CACHE BOOL "" FORCE)  # x86_64/APPLE only anyway
-# The port is now past early bring-up. Match the Ticu Release configuration and
-# let GCC optimize across Vita3K's many static libraries; this particularly
-# helps the small CPU/JIT/HLE helpers on the serial guest execution path.
-set(USE_LTO RELEASE_ONLY CACHE STRING "" FORCE)
+# Preserve Release LTO for performance comparisons, but honor
+# -DUSE_LTO=NEVER for quick iteration (LTO link-time optimization dominates
+# the edit/build loop and cannot be cached by ccache).
+set(USE_LTO RELEASE_ONLY CACHE STRING "Use interprocedural optimization/link time optimization")
 
 # CMake selects -flto=auto for GCC, but Ninja does not provide GNU make's
 # jobserver and devkitA64 consequently runs the LTRANS partitions serially.
-# Bound the Release link to eight workers explicitly. This changes build
-# parallelism only; the objects remain regular GCC LTO objects.
-add_link_options("$<$<CONFIG:Release>:-flto=8>")
+# Bound the Release link to eight workers when LTO is enabled.
+if(NOT USE_LTO STREQUAL "NEVER")
+	add_link_options("$<$<CONFIG:Release>:-flto=8>")
+else()
+	message(STATUS "Switch: LTO disabled for faster development builds")
+endif()
 
 # ---------------------------------------------------------------------------
 # Unified Mesa NVK/Nouveau/Zink static graphics SDK
