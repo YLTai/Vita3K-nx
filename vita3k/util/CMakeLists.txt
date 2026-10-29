@@ -47,7 +47,7 @@ if(SWITCH)
         if(NOT SWITCH_HOOK_RESULT EQUAL 0)
             message(FATAL_ERROR "Apply pinned experiment hooks: python3 scripts/apply-switch-write-watch-hooks.py")
         endif()
-        target_compile_definitions(util PRIVATE VITA3K_SWITCH_WRITE_SHADOW_DEFAULT=1 VITA3K_SWITCH_CLEAN_CAPTURE_DEFAULT=1 VITA3K_SWITCH_HEAP_FAULT_DEFAULT=1)
+        target_compile_definitions(util PRIVATE VITA3K_SWITCH_WRITE_SHADOW_DEFAULT=1 VITA3K_SWITCH_CLEAN_CAPTURE_DEFAULT=1 VITA3K_SWITCH_HEAP_FAULT_DEFAULT=1 VITA3K_SWITCH_EPOCH_AUDIT_DEFAULT=1)
     endif()
     # Changing the build SHA must not invalidate every cached translation unit.
     # Embed provenance only in the two report-producing sources.

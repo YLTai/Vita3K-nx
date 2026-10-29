@@ -17,7 +17,8 @@ RECIPE = ROOT / 'patches/experiments/switch-live-write-watch.json'
 RECIPES = (RECIPE, ROOT / 'patches/experiments/switch-heap-fault.json',
            ROOT / 'patches/experiments/switch-direct-heap.json',
            ROOT / 'patches/experiments/switch-deferred-import.json',
-           ROOT / 'patches/experiments/switch-mirror-shader.json')
+           ROOT / 'patches/experiments/switch-mirror-shader.json',
+           ROOT / 'patches/experiments/switch-epoch-audit.json')
 
 
 def blob_sha(data):

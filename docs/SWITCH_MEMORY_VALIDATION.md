@@ -1,43 +1,53 @@
-# Switch：GPU 镜像第 2 版——真实 shader/BDA 与链式交接
+# 下一轮：真实游戏写入审计与 JIT 发布宽限期
 
-基线 `f5d441a3`（CI #52 成功），实机会话 `1793294897`，merge revision `ab5b634e60df`。继续 PR #15，不重做静态场景采样，不启用 Hash64 或其他概率跳过。
+基线 `0ee874b6`（CI #54），实测会话 `1793299189`，merge revision `4e8ae13bc237`。沿用 PR #15，不合并，不强推。
 
-## 本轮已经得到的证据
+## 本轮结论
 
-设备报告 144 PASS / 8 SKIP / 0 FAIL（152 条结果记录）。原 GPU 镜像的 13 项内容控制及清理全部通过；15 次完整字节审计、11 次 CPU fault、28 次 fence 等待，所有权上传 65,536 B / 下载 12,288 B。测试从建立到结束累计 11,999,221 ticks / 19.2 MHz，约 0.625 秒，包含渲染回调之间的时间，不是裸 GPU 执行耗时。会话持续 84.378 秒；无需在 DONE 后继续运行。
+34.149303 秒会话、415 个连续渲染循环、145 PASS / 8 SKIP / 0 FAIL。14 步私有镜像控制通过；15 次完整字节审计、11 次 CPU 写 fault、30 次 fence wait、64 KiB 所有权上传、12 KiB 所有权下载。实际 BDA compute 的 5 次 fill 和 5 次 copy、一次链式提交、14 次 GPU guard 审计全部有记录。约 0.624 秒套件时间包括初始化和回调间隔，不是纯 GPU 时间或游戏提速。冻结的导入表为空是自动测试结束得早，不能解释成重场景没有 GPU 导入。
 
-这是 transfer/fill/image 路径的证据，不是 shader store、render attachment、多线程或真实游戏免 Hash 的证明。旧报告的导入统计在退出后已全部 released，因此 `imported=0` 不代表游戏没有使用导入。
+平台/私有资源测试到此不再占用默认实机轮次；转向真实 Guest 和真正的 TextureCache 输入。旧私有套件保留在 `validation_experiment=legacy_heap_fault`。本次不启用游戏 RO，不迁移/拆分 96 MiB 混用映射，不改变 Vulkan 同步，不跳 Hash。
 
-## 下一版改动
+## 一个 NRO，一次 28 秒
 
-仍为自动 14 步、相同私有 16 KiB CPU Heap 和独立 Vulkan 镜像。原 `gpu_fill` 控制改为真正的 compute shader 通过 Buffer Device Address 写入；CPU 局部覆盖、同值覆盖、GPU→CPU 获取等原有 oracle 继续检查完整内容。
+构建成功后替换产物根目录 `Vita3K.nro`。自动执行已有 JIT/观察器正确性控制（不是重复 100 样本矩阵或 GPU 私有套件）。进入目标实际场景，按一次 **L+R+Y**。
 
-图像控制前，在同一个 command buffer 中执行一组 shader 复制，涵盖完整范围、4 字节偏移、非工作组整数长度、跨页、最后一个 word 和零长度。每次刻意多发一个 workgroup，shader 必须在任何物理地址访问前检查 count。GPU buffer 前后各有 512 B 保护区，完整读回核对；保护区仍在实际分配范围内。
+自动执行 **A→B→B→A**，每段 1 秒稳定等待＋6 秒测量。保持同一场景、不打开菜单；任何 DONE 后正常退出保存并交一个完整 TraceLab ZIP。途中暂停/失焦会显示 INTERRUPTED，可恢复场景重新开始，也可直接退出交报告。黄色结果、未归因变化、候选为零不要求为了绿色状态重复同一轮。
 
-每次子范围复制前污染目标，回写前污染原镜像，避免漏执行命令但旧数据碰巧正确。整条 shader 链只有最终一次 fence 等待，阶段之间使用实际 compute/transfer 内存依赖；之后做 buffer→image→buffer 与独立 CPU oracle 对照。所有权仍只在完成后发布。异常处理器内不新增 GPU 等待、锁或分配。
+A：读写页表均保持直达，收集纹理输入。B：只将已登记的纹理后备页及软件别名保持在回调路径，按真正重叠的像素/palette 范围记写入版本。普通无关 Guest 页没有逐 store 全局计数/bitmap 检查。每段受监视写入最多 100,000 次，超限开放页面并明确排除该段。
 
-测试构建使用 Vulkan 1.1 协商，以合法使用物理存储指针所需的 SPIR-V 1.3。shader 不要求 `shaderInt64`。这是明确的测试构建 API 合同变更；非 Switch / 非 TraceLab 构建不变。主机 glslang 编译和 spirv-val 验证在 CI 前置阶段执行；CMake 也按源文件依赖生成目标 shader，设备不编译 GLSL。产物带 shader 二进制、反汇编和来源/工具/摘要 manifest。
+两组都包含独立写页表、跨页检查和 JIT/HLE 边界成本；C/A 旧快照方案已淘汰，本次 **B/A 仅衡量选定页持续追踪的增量**，不是相对无插桩版本的全部成本。严格普通纹理 Hash/禁用场景 memo 仅在正式采集期间启用；导航和完成后恢复原场景复用。
 
-游戏的 Direct Heap、整映射按需导入、Hash/scene memo、上传与同步决策不变。没有给 Guest 内存加 RO、没有启用游戏免 Hash，也没有将测试范围当作任意游戏 shader 的寻址范围。当前只验证私有单 owner compute/transfer/image；attachment、IPC、异步 HLE、并发重新布防及生产资源生命周期仍未获得这套测试的覆盖。
+旧的 `heap_fault` 配置自动跟随新默认，无需修改配置。`mode=off` / `memory_validation=off` 仍生效。保留 Direct Heap 和整映射延迟导入；明确选择 Stack/eager 时报告会排除默认实验比较。
 
-## 一次上机
+## 真正新增的协议
 
-构建成功后替换产物根目录的 `Vita3K.nro`，启动游戏即可。无需固定场景、L+R+Y 或 30 秒等待。首帧之后自动运行；原有启动 CPU/JIT 控制早于 renderer，仍无启动前 overlay。
+每次生产 `jit->Run()`（包括抢占后的重新进入）和 `jit->Step()` 在执行前登记、返回后退出。写表陷阱发布完毕后才推进发布代号。所有可能已经载入旧 PTE 的执行区间退出前，该页的 Hash 只算“宽限期未结束”。后进入的 JIT 无需等待，不要求所有 CPU 同时停机。
 
-面板显示 `GPU MIRROR`、`Step x / 14`、`Compute BDA + image`、真实进度，以及审计 / dispatch / guard 计数和所有权传输量。只有实际完成、内容检查和清理通过才显示 `DONE - REPORT READY`；失败显示 `DONE - CHECK REPORT`。看到任意 DONE 即可正常退出，交一个完整 TraceLab ZIP，不需要为绿色状态重跑。
+这是非阻塞的发布宽限期：不暂停 renderer，不持锁等待 JIT，也不在每个普通 store 插桩。短 mutex 只保护 Run/Step/HLE 边界和元数据；回调执行、HLE 操作、SVC、GPU 等待均不持该 mutex。固定 64 个并发执行槽，溢出/不平衡则不再允许样本取得资格。此协议只解决“旧 PTE 已载入”，不是生产级所有写入者已闭合的证明。
 
-每项危险操作前仍写入并 fsync 故障检查点。异常退出保留检查点和 crash log，不删标记重复触发。未确认 fence 完成或 CPU 权限未恢复时，继续保留资源并阻止 chainload。
+同步 HLE 调用前后有活动代号及在途计数；四个 general-queue 提交入口登记 GPU 边界。这些是保守排除信号，不是“某次 HLE/GPU 已写某纹理”的归因。异步 HLE、IPC、已提交但未完成的 GPU 写入仍明确为未覆盖。
 
-## 报告与验收
+每次实际 Hash 始终计算并返回参考结果。分别计数：宽限期通过、CPU 写版本未变候选、外部边界也未变候选，以及参考 Hash 反证。基线计算期间发生过的外部活动不能在下一次比较时被遗忘。保存前 32 个反例的地址、资源、时刻、发布代号、外部代号及前后摘要，更多反例计入 dropped；不能静默丢失。
 
-保留 `capture_plan=gpu-mirror-1` 的兼容封装，在 `guest_backing.gpu_mirror.probe_version=2` 明确标识新实验。v1 日志仍可分析，但不能通过 v2 shader 验收。
+## Overlay 与报告
 
-v2 要求一次成功的 `shader_program` 记录、至少 5 次 fill dispatch（含零长度负载）、5 次 copy dispatch、恰好一次链式提交，以及 GPU guard 审计；dispatch 总数必须与分类之和一致。旧逐项内容控制、cleanup 和 suite 仍必须各有一次成功记录。缺失/重复/失败、缺 shader 版本或证据都会拒绝通过。每项控制现在记录自身耗时；耗时含布防/清理/同步，不应当作纯 GPU 时间。
+`LIVE EPOCH AUDIT` 显示 A/B 段号、进度、剩余秒数、Grace/pending、CPU/epoch candidates、diff。DONE 由实际渲染回调和采集状态决定，不能凭倒计时归零推断；退出菜单不破坏已经完成的记录。diff 增加不影响渲染，因为完整 Hash 仍是唯一参考。
 
-测试结束时冻结导入元数据，之后的导出表示测试完成瞬间，而不是销毁后的零值；后续生命周期错误仍保留。该快照早于游戏重场景，不是新的场景覆盖率统计。上传/下载量只计所有权交接，不包括所有审计读回或 shader 内部复制流量。
+`capture_plan=epoch-write-1` 保留原有完整缓存判变账本，并新增四段起止 tick、候选/反例、执行区间数量和在途数。完成时冻结导入记录，正常退出后的销毁不会抹去场景状态。分析器核对 15 个观察器控制、四段 ABBA、采样质量、进入/退出配平、候选分类及反例/缓存账本；永远输出 `safe_to_skip_hash=false`。自动 private GPU v2 结果不是本轮通行证。
 
-## 主机与目标检查
+## 轮数预算与停止条件
 
-`test_switch_gpu_mirror.py` 保留 262,144 次所有权转换、真实控制器/HUD/报告及缺项否决测试，并调用共享 BDA ABI/range 测试。后者覆盖 8,192 个固定种子复制、每个保护字节和漏复制/漏回写/无边界判断负例。CPU 数组替身不是 SPIR-V 或 GPU 执行。
+从本轮起，按 **3 轮主线＋最多 2 轮修复预算**规划一个有限资源范围的首次安全优化，不能承诺整个模拟器三轮免 Hash：
 
-安装 devkitA64 时，前置检查使用真实 libnx/Vulkan-Hpp 编译生产后端。主机需 `glslang-tools` 与 `spirv-tools`（CI 已配置），缺工具或 shader 验证失败应直接失败，不能跳过验证冒充成功。
+1. 本轮：真实游戏发布宽限期和写源缺口、追踪成本；不再重复硬件能力测试。
+2. 范围化 HLE/GPU 生命周期接入，只有覆盖可证明的资源启用候选；同版保留独立审计并测净收益。
+3. 动态场景/加载切换/同址复用/渲染目标反馈验收，确定保留与回退的资源范围。
+
+若出现新缺陷预留 1–2 轮；若粗边界让候选为零，直接改范围协议，不要求静态场景重复等待。CI 修复不计作新的实机轮次。零反例只说明该负载未反证，不构成异步写入覆盖证明。
+
+## 构建与验证边界
+
+新增主机回归执行真实观察器和发布域，主动制造持有旧 PTE 的写入、后进入的 JIT、同值/别名写、Hash 中的 HLE 活动、漏记写入、容量失败和 16,384 个并发执行区间；另编译真实控制器/HUD/导出并验证分析器拒绝缺项与不一致数据。主机存储与 GPU 边界为明确的模型，不冒充原生 A64/Horizon/GPU 执行。
+
+第六份整文件 Git blob 固定配方连接实际 Run/Step、HLE、四个 GPU 提交入口与报告；所有原始身份/锚点不匹配时拒绝构建。完整 checkout、devkitA64 编译链接和实机结果分别验收。无需手工应用补丁。
