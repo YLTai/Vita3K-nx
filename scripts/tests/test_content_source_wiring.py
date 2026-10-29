@@ -11,6 +11,8 @@ import tempfile
 ROOT=Path(__file__).resolve().parents[2]
 HEAD=r'''
 #include <util/content_hash_memo.h>
+#include <util/switch_direct_heap_platform.h>
+#include <util/switch_protected_cache_probe.h>
 #include <array>
 #include <cassert>
 #include <memory>

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 
 namespace switch_validation::direct_heap {
 constexpr uint64_t page = 4096, align_bytes = 2 * 1024 * 1024;
@@ -38,6 +39,9 @@ struct State {
     uint64_t first_tick = 0; // Render-thread owned.
 };
 inline State state;
+// Normal control paths only. Never acquired by the exception handler.
+// Serialize the two runtime scratch probes and their shared durable marker.
+inline std::mutex scratch_probe_mutex;
 // Caller has stopped prior session workers; pool allocation counters remain
 // process-lifetime counters, while input samples/progress belong to this session.
 inline void begin_session() noexcept {

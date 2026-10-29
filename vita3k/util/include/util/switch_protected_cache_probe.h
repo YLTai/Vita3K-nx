@@ -19,6 +19,7 @@ using ProtectedHash = uint64_t (*)(const void *, size_t);
 inline void run_protected_cache_probe(ProtectedHash hash) {
     if (!heap_fault_probe_enabled() || !direct_heap::state.active.load()
         || direct_heap::state.cache_attempted.exchange(true)) return;
+    const std::lock_guard<std::mutex> probe_lock(direct_heap::scratch_probe_mutex);
     if (!hash || !heap_fault_jit_allowed()) {
         record("heap_cache", "controls_complete", "fail", "native/JIT recovery prerequisite missing; no pages protected"); return;
     }

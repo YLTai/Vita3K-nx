@@ -3,6 +3,7 @@
 #pragma once
 #if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)
 #include <util/switch_heap_fault_probe.h>
+#include <util/switch_direct_heap.h>
 #include <util/switch_memory_validation.h>
 #include <algorithm>
 #include <bit>
@@ -19,8 +20,10 @@ namespace switch_validation {
 // A deliberately unsupported RO request is a capability result, not a crash test.
 inline void probe_gpu_heap_import(vk::Device device, vk::PhysicalDevice physical,
     const vk::PhysicalDeviceMemoryProperties &properties, vk::BufferUsageFlags usage) {
+    if (!heap_fault_probe_enabled()) return;
+    const std::lock_guard<std::mutex> probe_lock(direct_heap::scratch_probe_mutex);
     static bool ran = false;
-    if (!heap_fault_probe_enabled() || ran) return;
+    if (ran) return;
     ran = true;
     if (!heap_fault_checkpoint("gpu_import_permission", true)) {
         record("heap_import", "checkpoint_unavailable", "skip", "previous fault/checkpoint failure; no import probe attempted");
