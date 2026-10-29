@@ -20,6 +20,7 @@ inline void run_protected_cache_probe(ProtectedHash hash) {
     if (!heap_fault_probe_enabled() || !direct_heap::state.active.load()
         || direct_heap::state.cache_attempted.exchange(true)) return;
     const std::lock_guard<std::mutex> probe_lock(direct_heap::scratch_probe_mutex);
+    struct Finish { ~Finish() { direct_heap::state.cache_finished.store(true, std::memory_order_release); } } finish;
     if (!hash || !heap_fault_jit_allowed()) {
         record("heap_cache", "controls_complete", "fail", "native/JIT recovery prerequisite missing; no pages protected"); return;
     }
@@ -30,11 +31,12 @@ inline void run_protected_cache_probe(ProtectedHash hash) {
     auto *data = allocation + page;
     bool armed = false, ok = heap_fault_checkpoint("protected_cache_controls", true);
     uint64_t digest = 0, reference = 0, hits = 0, rebuilds = 0, audits = 0, faults = 0;
+    HeapFaultResult last_close{};
     const auto full = [&]() { return hash(data, pixel_bytes) ^ hash(data + pixel_bytes, palette_bytes); };
     const auto close = [&]() {
         if (!armed) return true;
-        const auto r = heap_fault_disarm(); armed = false; faults += r.faults;
-        return r.restored;
+        last_close = heap_fault_disarm(); armed = false; faults += last_close.faults;
+        return last_close.restored;
     };
     const auto get = [&]() {
         // One owner, one resource, no GPU/IPC, no concurrent producer. Real
@@ -44,13 +46,38 @@ inline void run_protected_cache_probe(ProtectedHash hash) {
             const auto evidence = heap_fault_peek();
             if (!evidence.last_rc && evidence.dirty_mask == 0) { ++hits; return digest; }
         }
-        if (!close() || !heap_fault_arm(data, bytes)) { ok = false; return uint64_t{0}; }
+        // Clean pages never become writable during a rebuild. Only dirty
+        // pages transition back to R; partial rearm cannot create a baseline.
+        if (armed ? !heap_fault_rearm() : !heap_fault_arm(data, bytes)) {
+            ok = false; return uint64_t{0};
+        }
         armed = true; digest = full(); ++rebuilds; return digest;
     };
     const auto check = [&](const char *name, bool condition) {
         record("heap_cache", name, condition ? "pass" : "fail", "private CPU Heap; real source Hash; no live Guest reuse");
         ok &= condition;
     };
+    // Exercise every four-page dirty subset, including the mixed R/RW state
+    // missing from the earlier native tests. Never rely only on SVC success.
+    for (unsigned mask = 0; mask < 16 && ok; ++mask) {
+        if (!heap_fault_arm(data, bytes)) { ok = false; break; }
+        armed = true;
+        for (unsigned page_index = 0; page_index < 4; ++page_index)
+            if (mask & (1u << page_index)) v3k_heap_store32(data + page_index * page, mask + page_index);
+        const auto evidence = heap_fault_peek();
+        const bool restored = close();
+        char name[48], detail[256];
+        std::snprintf(name, sizeof(name), "cleanup_mask_%02x", mask);
+        std::snprintf(detail, sizeof(detail),
+            "expected=0x%x dirty=0x%x old_R=0x%x old_RW=0x%x restore_rc=0x%x failed=0x%x calls=%u restored=%u",
+            mask, evidence.dirty_mask, last_close.before_read_mask, last_close.before_write_mask,
+            last_close.restore_rc, last_close.restore_failed_mask, last_close.restore_calls, unsigned(restored));
+        const bool pass = restored && evidence.dirty_mask == mask
+            && last_close.before_write_mask == mask && last_close.before_read_mask == (15u ^ mask);
+        record("heap_cache", name, pass ? "pass" : "fail", detail);
+        ok &= pass;
+    }
+    if (ok) std::memset(data, 0xa5, bytes);
     if (ok) {
         const auto candidate = get(); reference = full(); ++audits;
         check("initial_baseline", ok && candidate == reference && rebuilds == 1);
@@ -64,10 +91,20 @@ inline void run_protected_cache_probe(ProtectedHash hash) {
         if (!ok) return;
         const auto previous = digest, before = rebuilds;
         write();
-        const bool seen = heap_fault_peek().dirty_mask != 0;
+        const auto written = heap_fault_peek();
+        const bool seen = written.dirty_mask != 0;
         const auto candidate = get(); const auto expected = full(); ++audits;
-        check(name, seen && ok && rebuilds == before + 1 && candidate == expected
-            && (should_change ? candidate != previous : candidate == previous));
+        const auto after = heap_fault_peek();
+        const bool pass = seen && ok && rebuilds == before + 1 && candidate == expected
+            && after.dirty_mask == 0 && after.rearm_calls > written.rearm_calls
+            && (should_change ? candidate != previous : candidate == previous);
+        char detail[256];
+        std::snprintf(detail, sizeof(detail),
+            "dirty_before=0x%x dirty_after=0x%x faults=%llu rearm_calls=%u rc=0x%x digest_match=%u rebuilds=%llu",
+            written.dirty_mask, after.dirty_mask, (unsigned long long)after.faults,
+            after.rearm_calls, after.last_rc, unsigned(candidate == expected), (unsigned long long)rebuilds);
+        record("heap_cache", name, pass ? "pass" : "fail", detail);
+        ok &= pass;
     };
     changed("pixel_first", [&] { v3k_heap_store32(data, 0x10203040); }, true);
     changed("pixel_middle", [&] { v3k_heap_store32(data + page + 64, 0x11223344); }, true);
@@ -106,6 +143,13 @@ inline void run_protected_cache_probe(ProtectedHash hash) {
     }
     ok &= close();
     const bool safe = heap_fault_safe_to_chainload();
+    direct_heap::state.cache_cleanup_ok.store(safe);
+    char cleanup_detail[192];
+    std::snprintf(cleanup_detail, sizeof(cleanup_detail),
+        "restore_rc=0x%x failed=0x%x old_R=0x%x old_RW=0x%x calls=%u safe=%u; actual permission verification",
+        last_close.restore_rc, last_close.restore_failed_mask, last_close.before_read_mask,
+        last_close.before_write_mask, last_close.restore_calls, unsigned(safe));
+    record("heap_cache", "cleanup_complete", safe ? "pass" : "fail", cleanup_detail);
     bool guards = safe;
     if (safe) for (size_t i = 0; i < page; ++i) guards &= allocation[i] == 0xa5 && data[bytes + i] == 0xa5;
     ok &= guards;

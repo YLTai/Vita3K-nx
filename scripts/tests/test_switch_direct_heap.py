@@ -45,6 +45,7 @@ int main(int argc,char**argv){
  assert(!dh::writable_private(p+1,4096));assert(!dh::writable_private(p,4095));
  assert(dh::activate(p,16*4096));assert(dh::commit(p,p,8192)==0);
  assert(dh::commit(p,p+4096,4096)!=0);assert(dh::recycle(p,p,8192)==0);
+ dh::request_capture();dh::frame(1,1000);
  fixture_attr=4;assert(dh::recycle(p,p,4096)!=0);assert(!dh::writable_private(p,4096));
  dh::observe(p,1024);assert(dh::snapshot().pinned_bytes==1024);
  fixture_attr=0;dh::observe(p+4096,2048);assert(dh::snapshot().plain_bytes==2048);
@@ -54,6 +55,7 @@ int main(int argc,char**argv){
  dh::state.errors.store(0);dh::frame(100,1000);dh::frame(30100,1000);
  assert(dh::snapshot().finished&&!dh::ready(dh::snapshot())); // Too few rendered frames.
  dh::begin_session();assert(!dh::snapshot().finished&&dh::snapshot().ranges==0);
+ dh::frame(1,1000);assert(!dh::snapshot().started);dh::request_capture();
  for(unsigned i=0;i<121;++i)dh::frame(100+i*250,1000);
  dh::state.ranges.store(1);assert(dh::ready(dh::snapshot()));
  dh::state.errors.store(1);assert(!dh::ready(dh::snapshot()));
@@ -118,9 +120,11 @@ int main(int argc,char**argv){
  sv::run_protected_cache_probe(&test_hash);
  assert(sv::direct_heap::state.cache_attempted.load());
  assert(sv::direct_heap::state.cache_passed.load()!=negative);
- unsigned complete=0,fail=0,bench=0;
+ unsigned complete=0,fail=0,bench=0,masks=0;
  for(const auto&r:rows){if(r.name=="controls_complete"){++complete;assert((r.status=="pass")!=negative);}
-   if(r.status=="fail")++fail;if(r.name.find("private_ABBA_")==0)++bench;}
+   if(r.status=="fail")++fail;if(r.name.find("private_ABBA_")==0)++bench;
+   if(r.name.find("cleanup_mask_")==0 && r.status=="pass")++masks;}
+ assert(negative || masks==16);assert(sv::direct_heap::state.cache_finished.load());
  assert(complete==1);assert(negative?fail>0:fail==0);assert(negative?bench==0:bench==4);
  const auto count=rows.size();sv::run_protected_cache_probe(&test_hash);assert(rows.size()==count);
  assert(sv::heap_fault_safe_to_chainload());
@@ -157,6 +161,7 @@ def recipe_regression():
 def main():
     p=argparse.ArgumentParser();p.add_argument('--cxx',default='c++');p.add_argument('--sanitize',action='store_true');a=p.parse_args()
     recipe_regression()
+    load(ROOT/'scripts/tests/test_heap_permission_runs.py','permission_runs').run(a.cxx,a.sanitize)
     old=load(ROOT/'scripts/tests/test_switch_heap_fault.py','heap_fixture')
     stub=old.STUB.replace('uint32_t type=0,attr=0,perm=0;', 'uint32_t type=0,attr=0,perm=0,ipc_refcount=0,device_refcount=0;')
     with tempfile.TemporaryDirectory() as directory:
@@ -188,14 +193,24 @@ def main():
  sv::begin_session("DIRECT");
  sv::record("heap_fault","native_suite_complete","pass","controller fixture");
  sv::record("heap_fault","jit_suite_complete","pass","controller fixture");
- sv::direct_heap::state.ranges.store(4);sv::direct_heap::state.cache_passed.store(true);
+ sv::direct_heap::state.cache_passed.store(true);sv::direct_heap::state.cache_finished.store(true);
+ sv::direct_heap::state.cache_cleanup_ok.store(true);
+ sv::on_render_end(1);assert(sv::status_snapshot().stage==sv::Stage::Waiting);
+ assert(std::strstr(sv::make_hud_text(sv::status_snapshot(),1).title.data(),"WAITING FOR SCENE"));
+ sv::request_benchmark();
  sv::on_render_end(100000);assert(sv::status_snapshot().stage==sv::Stage::Measuring);
+ sv::direct_heap::state.ranges.store(4);
  assert(sv::status_snapshot().remaining_ms==30000);
  assert(std::strstr(sv::make_hud_text(sv::status_snapshot(),100000).title.data(),"GAME VALIDATION"));
  for(unsigned n=1;n<=120;++n)sv::on_render_end(100000+n*250);
  auto direct=sv::status_snapshot();assert(direct.stage==sv::Stage::Complete&&direct.outcome==sv::CaptureOutcome::Ready);
  sv::frontend_poll(true);assert(sv::status_snapshot().stage==sv::Stage::Complete);
  std::filesystem::create_directory("direct-report");sv::write_report("direct-report");sv::end_session();
+ sv::begin_session("SCRATCH_FAILURE");
+ sv::direct_heap::state.cache_finished.store(true);sv::direct_heap::state.cache_passed.store(false);
+ sv::on_render_end(2);assert(sv::status_snapshot().stage==sv::Stage::Complete);
+ assert(sv::status_snapshot().outcome==sv::CaptureOutcome::Invalid);
+ sv::request_benchmark();assert(!sv::direct_heap::state.start_requested.load());sv::end_session();
  sv::direct_heap::state.active.store(false);
 '''
         assert controller.count(anchor)==1;controller=controller.replace(anchor,extra+anchor)
@@ -205,7 +220,7 @@ def main():
             '-o',str(tmp/'controller')],check=True)
         subprocess.run([str(tmp/'controller'),str(tmp)],check=True,timeout=20)
         report=json.loads((tmp/'direct-report/memory-validation.json').read_text())
-        assert report['capture_plan']=='heap-fault-2-direct' and report['guest_backing']['frames']==121
+        assert report['capture_plan']=='heap-fault-3-mixed' and report['guest_backing']['frames']==121
         analyzer=load(ROOT/'scripts/analyze-switch-capture.py','direct_analyzer')
         # A fake summary bit without the individual controls is never evidence.
         assert not analyzer.analyze(report)['protected_cache_controls_passed']

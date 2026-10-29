@@ -9,6 +9,8 @@ struct HeapFaultResult {
     uint64_t faults = 0, handler_ticks = 0;
     uintptr_t last_pc = 0, last_far = 0;
     uint32_t dirty_mask = 0, last_rc = 0;
+    uint32_t restore_rc = 0, restore_failed_mask = 0, restore_calls = 0;
+    uint32_t before_read_mask = 0, before_write_mask = 0, rearm_calls = 0;
     bool restored = false;
 };
 struct HeapPermissionResult {
@@ -21,6 +23,9 @@ bool heap_fault_probe_enabled();
 // All ranges must be private page-aligned allocations, not Guest or GPU memory.
 bool heap_fault_arm(void *begin, size_t size, uintptr_t expected_pc = 0) noexcept;
 HeapFaultResult heap_fault_disarm() noexcept;
+// Same stopped owner only: re-protect opened pages; keep clean pages read-only.
+// A partial failure preserves dirtiness and must be followed by disarm/cleanup.
+bool heap_fault_rearm() noexcept;
 // Owner-thread observation only; does not change permissions or consume dirtiness.
 HeapFaultResult heap_fault_peek() noexcept;
 void run_heap_fault_probe();
@@ -36,6 +41,7 @@ void copy_heap_fault_checkpoint(const char *directory) noexcept;
 inline bool heap_fault_probe_enabled() { return false; }
 inline bool heap_fault_arm(void *, size_t, uintptr_t = 0) noexcept { return false; }
 inline HeapFaultResult heap_fault_disarm() noexcept { return {}; }
+inline bool heap_fault_rearm() noexcept { return false; }
 inline HeapFaultResult heap_fault_peek() noexcept { return {}; }
 inline void run_heap_fault_probe() {}
 inline bool heap_fault_jit_allowed() { return false; }

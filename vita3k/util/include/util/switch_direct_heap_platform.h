@@ -53,7 +53,8 @@ inline uint32_t recycle(void *host, void *source, size_t bytes) noexcept {
     ++state.recycles; return 0;
 }
 inline void observe(const void *pointer, size_t bytes) noexcept {
-    if (!state.active.load(std::memory_order_relaxed) || state.finished.load(std::memory_order_relaxed)
+    if (!state.active.load(std::memory_order_relaxed) || !state.started.load(std::memory_order_relaxed)
+        || state.finished.load(std::memory_order_relaxed)
         || !pointer || !bytes) return;
     const auto begin = reinterpret_cast<uintptr_t>(pointer);
     if (begin + bytes < begin || state.sampling.test_and_set(std::memory_order_acquire)) return;
@@ -64,11 +65,11 @@ inline void observe(const void *pointer, size_t bytes) noexcept {
     State::Key *slot = nullptr;
     for (size_t probe = 0; probe < 8; ++probe) {
         auto &key = state.keys[(mixed + probe) % state.keys.size()];
-        if (key.begin == begin && key.size == bytes) return;
+        if (key.begin == begin && key.size == bytes) { ++key.visits; return; }
         if (!key.begin) { slot = &key; break; }
     }
     if (!slot) { ++state.collisions; return; }
-    *slot = {begin, bytes}; ++state.ranges;
+    *slot = {begin, bytes, 1, 0, 0, 0}; ++state.ranges;
     uint64_t plain = 0, pinned = 0, other = 0;
     uintptr_t pos = begin;
     for (size_t steps = 0; pos < begin + bytes && steps < 256; ++steps) {
@@ -83,6 +84,7 @@ inline void observe(const void *pointer, size_t bytes) noexcept {
         pos = end;
     }
     other += begin + bytes - pos;
+    slot->plain = plain; slot->pinned = pinned; slot->other = other;
     state.plain_bytes.fetch_add(plain); state.pinned_bytes.fetch_add(pinned); state.other_bytes.fetch_add(other);
 }
 } // namespace switch_validation::direct_heap

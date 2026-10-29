@@ -63,6 +63,34 @@
         {
           "old": "HeapFaultResult heap_fault_disarm() noexcept {",
           "new": "HeapFaultResult heap_fault_peek() noexcept {\n    // Only the owner thread calls this between synchronous writes. No reset:\n    // dirty evidence survives until explicit disarm/rearm by that owner.\n    if (auto *slot = own_slot()) return slot->result;\n    HeapFaultResult r; r.last_rc = bad_state; return r;\n}\n\nHeapFaultResult heap_fault_disarm() noexcept {"
+        },
+        {
+          "old": "#include <util/heap_fault_policy.h>",
+          "new": "#include <util/heap_fault_policy.h>\n#include <util/heap_permission_runs.h>"
+        },
+        {
+          "old": "bool writable_heap(uintptr_t begin, size_t size) noexcept {",
+          "new": "fault::PermissionChange normalize_scratch(uintptr_t begin, size_t size, uint32_t target) noexcept {\n    return fault::normalize_private_pages(begin, size, target,\n        [](uintptr_t address) noexcept {\n            MemoryInfo info{}; u32 page_info = 0;\n            const auto rc = svcQueryMemory(&info, &page_info, address);\n            const bool valid = R_SUCCEEDED(rc) && (info.type & 0xff) == MemType_Heap\n                && !info.attr && !info.ipc_refcount && !info.device_refcount;\n            return fault::PagePermission{rc, valid, info.perm};\n        }, [](uintptr_t address, size_t bytes, uint32_t permission) noexcept {\n            return svcSetMemoryPermission(reinterpret_cast<void *>(address), bytes, permission);\n        });\n}\nbool writable_heap(uintptr_t begin, size_t size) noexcept {"
+        },
+        {
+          "old": "|| (info.type & 0xff) != MemType_Heap || info.perm != Perm_Rw || info.attr != 0)",
+          "new": "|| (info.type & 0xff) != MemType_Heap || info.perm != Perm_Rw || info.attr != 0\n            || info.ipc_refcount || info.device_refcount)"
+        },
+        {
+          "old": "        const auto restore = svcSetMemoryPermission(memory, size, Perm_Rw);\n        if (R_FAILED(restore) || !writable_heap(begin, size)) safe_to_chainload.store(false);",
+          "new": "        const auto restore = normalize_scratch(begin, size, Perm_Rw);\n        if (!restore.complete) safe_to_chainload.store(false);"
+        },
+        {
+          "old": "HeapFaultResult heap_fault_disarm() noexcept {",
+          "new": "bool heap_fault_rearm() noexcept {\n    auto *slot = own_slot();\n    if (!slot || slot->result.last_rc || slot->entered.load()) return false;\n    // Only pages opened by a previous fault change RW -> R. Clean pages\n    // remain R throughout. No writer can run concurrently in this scratch API.\n    const auto change = normalize_scratch(slot->begin, slot->size, Perm_R);\n    slot->result.rearm_calls += change.calls;\n    slot->pending.store(change.read_mask, std::memory_order_release);\n    if (!change.complete) {\n        slot->result.last_rc = change.first_rc ? change.first_rc : bad_state;\n        return false; // Never consume dirty evidence on partial rearm.\n    }\n    slot->result.dirty_mask = 0;\n    return true;\n}\n\nHeapFaultResult heap_fault_disarm() noexcept {"
+        },
+        {
+          "old": "    const auto rc = svcSetMemoryPermission(reinterpret_cast<void *>(slot->begin), slot->size, Perm_Rw);\n    auto out = slot->result;\n    out.restored = R_SUCCEEDED(rc) && writable_heap(slot->begin, slot->size);\n    if (R_FAILED(rc)) out.last_rc = rc;",
+          "new": "    const auto change = normalize_scratch(slot->begin, slot->size, Perm_Rw);\n    auto out = slot->result;\n    out.restored = change.complete;\n    out.restore_rc = change.first_rc;\n    out.restore_failed_mask = change.failed_mask;\n    out.restore_calls = change.calls;\n    out.before_read_mask = change.before_read_mask;\n    out.before_write_mask = change.before_write_mask;\n    if (!out.restored) out.last_rc = change.first_rc ? change.first_rc : bad_state;"
+        },
+        {
+          "old": "    if (!checkpoint_ok) return false;\n    FILE *file = std::fopen(checkpoint_path, \"wb\");",
+          "new": "    if (!checkpoint_ok) return false;\n    // A later successful probe or end-session marker must not erase evidence\n    // of any retained, unverified protected allocation in this process.\n    armed = armed || !safe_to_chainload.load(std::memory_order_acquire);\n    FILE *file = std::fopen(checkpoint_path, \"wb\");"
         }
       ]
     },
@@ -115,6 +143,26 @@
         {
           "old": "            const bool ready = heap_control_mask == 3 && !test_failed && !lost_results.load();\n            std::fprintf(file, \"\\n  ],\\n  \\\"controls_complete\\\":%s,\\n  \\\"capture_outcome\\\":\\\"%s\\\",\\n\"\n                \"  \\\"scope\\\":\\\"private CPU Heap, original-PC retry and real JIT; no all-writer/GPU/coherence claim\\\"\\n}\\n\",\n                heap_control_mask == 3 ? \"true\" : \"false\", ready ? \"ready\" : \"invalid\");",
           "new": "            const auto topology = direct_heap::snapshot();\n            const bool controls = heap_control_mask == 3 && (!topology.active || direct_heap::state.cache_passed.load());\n            const bool valid = controls && !test_failed && !lost_results.load() && !topology.errors;\n            const char *outcome = !valid ? \"invalid\" : topology.active && !direct_heap::ready(topology) ? \"inconclusive\" : \"ready\";\n            std::fprintf(file, \"\\n  ],\\n  \\\"controls_complete\\\":%s,\\n  \\\"capture_outcome\\\":\\\"%s\\\",\\n\"\n                \"  \\\"scope\\\":\\\"real Guest Direct Heap topology and isolated no-scan controls; live Guest Hash retained; no GPU/IPC/concurrent-rearm proof\\\"\\n}\\n\",\n                controls ? \"true\" : \"false\", outcome);"
+        },
+        {
+          "old": "    if (!enabled() || options.heap_fault) return;",
+          "new": "    if (!enabled()) return;\n    if (options.heap_fault) {\n        const std::lock_guard<std::mutex> lock(results_mutex);\n        if (heap_control_mask == 3 && !test_failed && !lost_results.load()\n            && direct_heap::state.active.load() && direct_heap::state.cache_finished.load()\n            && direct_heap::state.cache_passed.load() && direct_heap::state.cache_cleanup_ok.load())\n            direct_heap::request_capture();\n        return;\n    }"
+        },
+        {
+          "old": "        completed = !topology.active || topology.finished || topology.errors;\n        public_state.store(completed ? 9 : 1, std::memory_order_release);",
+          "new": "        const bool scratch_failed = direct_heap::state.cache_finished.load(std::memory_order_acquire)\n            && !direct_heap::state.cache_passed.load();\n        completed = !topology.active || topology.finished || topology.errors || scratch_failed;\n        public_state.store(completed ? 9 : topology.started ? 1 : 0, std::memory_order_release);"
+        },
+        {
+          "old": "        out.stage = completed ? Stage::Complete : Stage::Measuring;",
+          "new": "        out.stage = completed ? Stage::Complete : topology.started ? Stage::Measuring : Stage::Waiting;"
+        },
+        {
+          "old": "        out.outcome = !completed ? CaptureOutcome::Pending : topology.errors ? CaptureOutcome::Invalid\n            : !topology.active || direct_heap::ready(topology) ? CaptureOutcome::Ready : CaptureOutcome::Inconclusive;",
+          "new": "        const bool scratch_failed = direct_heap::state.cache_finished.load() && !direct_heap::state.cache_passed.load();\n        out.outcome = !completed ? CaptureOutcome::Pending : topology.errors || scratch_failed ? CaptureOutcome::Invalid\n            : !topology.active || direct_heap::ready(topology) ? CaptureOutcome::Ready : CaptureOutcome::Inconclusive;"
+        },
+        {
+          "old": "\\\"capture_plan\\\":\\\"heap-fault-2-direct\\\"",
+          "new": "\\\"capture_plan\\\":\\\"heap-fault-3-mixed\\\""
         }
       ]
     },
@@ -129,6 +177,14 @@
         {
           "old": "    if (s.heap_fault) {\n        const bool done = s.stage == Stage::Complete;",
           "new": "    if (s.heap_fault && s.direct_guest) {\n        const bool done = s.stage == Stage::Complete;\n        const bool ready = done && s.controls_complete && !s.failed && !s.results_dropped && s.outcome == CaptureOutcome::Ready;\n        text.tone = !done ? HudText::Tone::Running : ready ? HudText::Tone::Ready : HudText::Tone::Warning;\n        std::snprintf(text.title.data(), text.title.size(), \"DIRECT HEAP | %s\", !done ? \"GAME VALIDATION\"\n            : ready ? \"DONE - REPORT READY\" : \"DONE - CHECK REPORT\");\n        std::snprintf(text.timing.data(), text.timing.size(), \"%u%% | Remaining %llus | Pool %llu MiB | No game Hash skip\",\n            s.progress_per_mille / 10, (unsigned long long)left, (unsigned long long)s.direct_pool_mib);\n        std::snprintf(text.samples.data(), text.samples.size(), \"Frames:%llu | Input ranges:%llu | Backing errors:%llu | GPU:%s\",\n            (unsigned long long)s.samples, (unsigned long long)s.direct_ranges, (unsigned long long)s.direct_errors,\n            !s.heap_import_done ? \"not exercised\" : s.heap_import_ro ? \"RO allowed\" : \"RO denied/report\");\n        std::snprintf(text.action.data(), text.action.size(), \"%s\", done\n            ? \"EXIT GAME NORMALLY TO SAVE | Share this run; do not repeat\"\n            : \"Play/load normally | Automatic 30s window | No button required\");\n        return text;\n    }\n    if (s.heap_fault) {\n        const bool done = s.stage == Stage::Complete;"
+        },
+        {
+          "old": "\"DIRECT HEAP | %s\", !done ? \"GAME VALIDATION\"\n            : ready ? \"DONE - REPORT READY\" : \"DONE - CHECK REPORT\"",
+          "new": "\"DIRECT HEAP | %s\", !done ? (s.stage == Stage::Waiting ? \"WAITING FOR SCENE\" : \"GAME VALIDATION\")\n            : ready ? \"DONE - REPORT READY\" : \"DONE - CHECK REPORT\""
+        },
+        {
+          "old": "\"Play/load normally | Automatic 30s window | No button required\"",
+          "new": "(s.stage == Stage::Waiting ? \"Load gameplay then L+R+Y once | 30s capture\" : \"Play normally | Wait for DONE then exit to SAVE\")"
         }
       ]
     },
@@ -155,6 +211,18 @@
         {
           "old": "'Original game mappings and ordinary Hash policy are unchanged. Share one report, not another static scene capture.'",
           "new": "'Direct Heap changes Guest host backing only when active; game Hash remains enabled. Scratch timings are not gameplay gains.'"
+        },
+        {
+          "old": "(\"heap-fault-1\", \"heap-fault-2-direct\")",
+          "new": "(\"heap-fault-1\", \"heap-fault-2-direct\", \"heap-fault-3-mixed\")"
+        },
+        {
+          "old": "    cache_ok = all(sum(t.get('name')",
+          "new": "    if data.get('capture_plan') == 'heap-fault-3-mixed':\n        cache_required |= {f'cleanup_mask_{mask:02x}' for mask in range(16)} | {'cleanup_complete'}\n    cache_ok = all(sum(t.get('name')"
+        },
+        {
+          "old": "        if not cache_ok: issues.append('Missing, duplicate or failed isolated no-scan controls')",
+          "new": "        if not cache_ok: issues.append('Missing, duplicate or failed isolated no-scan controls')\n        if data.get('capture_plan') == 'heap-fault-3-mixed' and (not topology.get('window_started')\n                or not topology.get('scratch_finished') or not topology.get('scratch_cleanup_ok')):\n            issues.append('Focused window not started or scratch cleanup not verified; preserve this report')"
         }
       ]
     },
@@ -175,6 +243,26 @@
         {
           "old": "assert report['capture_plan']=='heap-fault-1' and not report['gameplay_benchmark']",
           "new": "assert report['capture_plan'] in ('heap-fault-1','heap-fault-2-direct') and not report['gameplay_benchmark']"
+        },
+        {
+          "old": "uint32_t type=0,attr=0,perm=0;",
+          "new": "uint32_t type=0,attr=0,perm=0,ipc_refcount=0,device_refcount=0;"
+        },
+        {
+          "old": " if(mprotect(p,n,perm==Perm_R?PROT_READ:PROT_READ|PROT_WRITE))return 2;",
+          "new": " // Horizon CheckMemoryState requires uniform old permission, even with a\n // zero permission mask. Linux mprotect alone does not model this constraint.\n const auto first=(reinterpret_cast<uintptr_t>(p)-fixture_base)/4096;\n if(!n || n%4096 || first+n/4096>16)return 0xd401;\n for(size_t i=1;i<n/4096;++i)if(fixture_perm[first+i]!=fixture_perm[first])return 0xd401;\n if(mprotect(p,n,perm==Perm_R?PROT_READ:PROT_READ|PROT_WRITE))return 2;"
+        },
+        {
+          "old": " fixture_ro_failure=true;assert(!sv::heap_fault_arm(p,4096));assert(sv::heap_fault_safe_to_chainload());",
+          "new": " // Actual controller rearm, including failure before dirty evidence can clear.\n assert(sv::heap_fault_arm(p,4*4096));frame.far=fixture_base;frame.esr=esr;\n assert(sv::v3k_try_heap_fault(0,&frame)==1);p[0]=0x4a;\n assert(sv::heap_fault_rearm());auto clean=sv::heap_fault_peek();\n assert(clean.dirty_mask==0&&clean.faults==1&&clean.rearm_calls==1);\n for(unsigned i=0;i<4;++i)assert(fixture_perm[i]==Perm_R);\n assert(sv::v3k_try_heap_fault(0,&frame)==1);p[0]=0x4b;\n fixture_ro_failure=true;assert(!sv::heap_fault_rearm());\n assert(sv::heap_fault_peek().dirty_mask==1);fixture_ro_failure=false;\n out=sv::heap_fault_disarm();assert(out.restored&&out.faults==2&&!out.restore_failed_mask);\n assert(out.before_read_mask==14&&out.before_write_mask==1&&out.restore_calls==1);\n fixture_ro_failure=true;assert(!sv::heap_fault_arm(p,4096));assert(sv::heap_fault_safe_to_chainload());"
+        },
+        {
+          "old": " assert(sv::heap_fault_checkpoint(\"synthetic_test\",false));sv::copy_heap_fault_checkpoint(\"session\");",
+          "new": " assert(sv::heap_fault_checkpoint(\"synthetic_test\",false));\n std::ifstream retained(\"checkpoint.json\");std::string retained_text((std::istreambuf_iterator<char>(retained)),{});\n assert(retained_text.find(\"armed\")!=std::string::npos); // unsafe cleanup stays sticky\n sv::copy_heap_fault_checkpoint(\"session\");"
+        },
+        {
+          "old": "('heap-fault-1','heap-fault-2-direct')",
+          "new": "('heap-fault-1','heap-fault-2-direct','heap-fault-3-mixed')"
         }
       ]
     }

@@ -1,51 +1,50 @@
-# Switch 下一轮：Direct Heap 真实游戏接入 + 无扫描缓存控制
+# Switch 下一轮：混合权限恢复修复 + 目标场景一次采集
 
-基线：`806c738e`，CI #46 成功；实机日志 `1793281108` 的 revision 为该 PR 的合并提交 `a2b33c51dae2`。
+基线：`50946d93`，成功构建 CI #48；实机日志 `1793286231` 的 revision 为该 PR 合并提交 `469ca674d9fa`。继续同一 PR，不重做已淘汰的快照比较或 100 样本写表矩阵。
 
-## 本轮日志结论
+## 本轮日志与根因边界
 
-103 条记录：95 PASS、8 SKIP、0 FAIL。原生 8/16/32/64/128-bit store、完整寄存器对照、跨页写、host memset、真实 Dynarmic 直写与软件别名均通过。JIT 每个用例一次硬件 fault、零普通 MemoryWrite 回调。64 轮 arm/write/retry/restore 共 9,587 ticks，在 19.2 MHz 下平均约 7.802 us/轮；这不是裸异常延迟。
+会话 48.490 秒、846 条渲染循环；结果 97 PASS、8 SKIP、2 FAIL。Direct Heap 窗口完成：768 MiB 池、516 个循环、后备错误为零。1008 次 commit、1010 次 recycle 是进程累计操作，不能把累计提交字节当作驻留量。
 
-External Host 导入前 RO/RW 成功；导入中 `attr=0x4`、RO 返回 `0xd401`、仍为 RW；解除导入后恢复可改权限。不能将“CPU Heap 可保护”推广成“GPU 导入范围也可保护”。本次没有 GPU 写入/IPC/并发写入证明。
+私有缓存初始基线与 512 次 clean 复用通过；`pixel_first` 失败，随后 controls_complete 失败。故障确实发生（faults=1），但未完成摘要重建（rebuilds=1），最终 safe=0。旧报告没有输出恢复 SVC 返回码，不能声称设备直接记录了具体恢复错误码。
 
-## 一次上机操作
+源码缺陷：首次写入后四页为 RW/R/R/R，旧 disarm 对整段请求 RW。Atmosphère 的 CheckMemoryState 要求整个请求范围的旧 permission 一致；POSIX mprotect 却允许此操作，旧主机替身遗漏了差异。只给替身增加该约束即可复现旧缓存用例失败；分段恢复后通过。下一次实机记录会直接验证恢复码、旧权限掩码、失败页及最终权限。
 
-构建成功后，只替换产物根目录 `Vita3K.nro`。启动游戏并正常操作/加载即可，无须 L+R+Y，也不需要固定重场景的 72 秒 ABBA。
+这次只采到 8 个输入范围，2,686,984 个逻辑输入字节全部在首次查询时为 DeviceShared；不能外推为所有游戏纹理或全部物理内存。下一次将窗口移至用户实际进入的目标场景，避免把启动界面作为主要依据。
 
-启动保留已通过的快速回归。首次普通纹理 Hash 自动调用新的隔离控制，随后首个实际渲染循环开始 **30 秒真实 Direct Heap 检查窗口**。面板显示 `DIRECT HEAP | GAME VALIDATION`、进度、剩余时间、帧数、纹理输入范围数、后备错误和 GPU import 状态。
+## 下一次操作（一个 NRO，一次按键）
 
-看到任意 `DONE` 后正常退出保存，提交一个完整 TraceLab 会话 ZIP。少于 120 个渲染循环、没有纹理输入、自动控制缺失或失败会明确标记，不要求为绿色结果盲目重跑。同一次采集即可提供部分有效证据。启动测试在 renderer 创建前没有逐项 overlay；首帧后显示进度。此窗口不是游戏性能 A/B，也不宣称画面正确性自动通过。
+成功构建后替换产物根目录 `Vita3K.nro` 并启动游戏。隔离控制自动执行，不需要逐项操作。
 
-## 真实 Guest 改动
+- 自动控制失败：首帧起直接显示 `DONE - CHECK REPORT`，无需等待 30 秒。正常退出，提交这一份日志，不为了绿色状态反复运行。
+- 控制通过：面板显示 `DIRECT HEAP | WAITING FOR SCENE`。进入需要分析的实际场景后，按一次 **L + R + Y**，开始 **30 秒**采集。
+- 显示任意 `DONE` 后正常退出保存，提供一个完整 TraceLab 会话 ZIP。若没有纹理输入或不足 120 个循环，照样保留结果，不要求盲目重跑。
 
-TraceLab 默认将原连续页池直接作为 Guest 的宿主 Heap 后备，不再为这些数据页保留 Stack 区域或调用 Heap→Stack svcMapMemory。4-GiB Guest 页表、连续 run 分配器、清零、反向地址映射、软件别名和已有 GPU mapping 路径保留。物理预算保留 512-MiB 最小、768–1280-MiB 偏好及至少 1-GiB 宿主 heap 预算，不再受 Stack 最大空洞约束。预算/分配失败会报告失败，不静默退回旧拓扑。
+启动原生/JIT 自测早于 renderer 创建，那部分尚无游戏 overlay；首帧后显示状态、剩余时间与退出提示。本轮不是性能 A/B，也没有自动证明画面正确性。未开始窗口就退出会明确标为未完成。
 
-Null Guest 页使用空 PTE，不给 malloc 后备页留下 Perm_None。回收前检查 Heap/RW/无 DeviceShared、IPC 或设备引用；未满足时不回收、不强制解除驱动引用。最终释放前重新检查整个池，无法确认时保留后备而非 free。
+## 本次实现
 
-**游戏内没有开启页面 RO、写异常追踪或新的免 Hash。原普通 Hash/scene-memo、Vulkan 同步及上传策略保持。** GPU 导入的 Guest 范围继续 RW；旧线性 PC fault handler 不会启用。
+1. 权限恢复按旧权限相同的连续段处理，已经 RW 的页不重复设置。批量请求失败后有界逐页重试；每次操作后核对所有页面，确认普通私有 Heap、无 IPC/设备引用、预期权限后才允许回收。不能确认的后备继续保留，禁止 chainload。
+2. 新的单 owner `heap_fault_rearm` 只把写入后变成 RW 的页恢复为 R。原本 clean 的 R 页全程保持只读；部分失败不清除 dirty 证据，不建立新缓存基线。此 API 不是生产级并发 rearm。
+3. 设备在私有四页内自动运行全部 **16 种脏页组合**。每项输出 expected/dirty、旧 R/RW 掩码、restore_rc、失败页掩码、调用次数和最终恢复结果。随后继续 clean 512 次独立审计、像素首/中/末、palette、跨页、memset、同值/同页非输入写入、同址新生命周期和私有 ABBA。
+4. 每次变化输出重新布防调用、dirty 前后、故障数及摘要匹配。`cleanup_complete` 单独输出最终清理结果。失败时立即结束等待；保留未执行项的缺失事实，不把它们计为通过。
+5. 未恢复的保护状态具有粘性：后续正常检查点不能将 `armed` 覆盖成 `returned`。异常退出保留 `heap-fault-<revision>.json` 和 crash log，不删除标记反复重试。
+6. 报告增加采集起止 tick、开始标记、scratch 完成/清理状态，以及有限输入范围的地址、大小、出现次数和首次权限分类。只有窗口内采样；已登记范围再出现只计数，不再查询权限。
 
-## 同一版本的自动无扫描控制
+## 保留边界
 
-调用 renderer 实际 Hash 函数，在独立四页 Heap 中建立单一资源（12 KiB 像素 + 1 KiB palette）。在 RO 且未写期间复用摘要，不 memcmp、不复制、不再次扫描；首次写 fault 使其失效，重新布防/计算后建立新基线。
+**真实 Guest 仍采用上一版 Direct Heap，但不对游戏页设置 RO，不新增游戏 Hash 跳过，不改变 Vulkan 上传、同步、GPU 导入策略。** 正常 Hash/scene memo 保留。GPU 导入范围继续 RW；没有通过 DeviceShared 强制改权限或悄悄退到 DoubleBuffer 来制造免 Hash。
 
-控制包括初始基线、512 次 clean 重用逐次独立审计、像素首/中/末变化、palette-only、跨页 store、裸 host memset、同值写入、同页非输入区域写入、同址新生命周期和计时后审计。故意破坏 dirty 证据的主机负例必须被识别为失败。另有私有 13-KiB 输入的 512 次读取 ABBA；独立审计不在计时内，结果仅表示这个隔离输入，不可外推为游戏 FPS。
+缓存自测仅是单 owner、已知生命周期、无 GPU/IPC 的私有内存。不能从此推导全 JIT 安全点、异步 HLE、并发写入、GPU 所有权或任意资源都已具备可靠免 Hash 条件。私有 ABBA 的输入只有 13 KiB，不能外推为游戏 FPS 收益。
 
-该控制限于单 owner、已知生命周期、无 GPU/IPC、无并发生产者。它不解决全 JIT 安全点、并发 rearm、异步 HLE 输出或 GPU 所有权。
+后备分类最多 512 个槽、8 次槽探测、每个新范围最多 256 个内核块。范围可以重叠，首次分类是时间局部快照；不是唯一物理容量、覆盖率或永久可保护授权。冲突、无法查询或导出时正有采样都会明确标记；完整性不足不作过度推断。
 
-## 自动后备分类
+`mode=off`/`memory_validation=off`、显式 legacy 模式保留原行为。`guest_backing=stack_alias` 仅用于排障；不要在运行中改变配置。默认设置无需用户手工修改。
 
-对首次遇到的纹理像素/palette 输入做有界查询，区分普通 Heap、DeviceShared 和其他范围。最多 512 个槽、每次最多 8 次槽探测/256 个内核块；冲突或无法查询明确计数。采样结束后停止查询。
+## 构建与回归
 
-范围统计允许重叠重复计数，是首次观察时的布局快照，不是唯一物理容量、全量覆盖率、永久可保护授权或未来免 Hash 的证据。报告的分配/回收计数是进程累计，纹理采样/帧窗口是本次会话。
+纯权限转换 helper 在主机穷举 16 页全部 R/RW 布局及两个目标权限，共 **131,072 个模型案例**，并覆盖拒绝批量、部分成功、查询失败、外部引用、单页失败及非法范围。模型显式拒绝混合旧权限，不能用 Linux mprotect 的宽松行为冒充 Horizon。
 
-## 配置与退出
+实际 C++ handler + POSIX fault/retry、XXH3 正例与故意丢失 dirty 的反例、独立编译/静态库链接、A64 汇编、控制器/HUD/JSON/analyzer 与导入控制流继续回归。ASan/UBSan 只证明已运行的主机路径；目标 SDK、完整源码接入、NRO 链接和实机执行必须分别验证。
 
-无需修改旧配置即可启用新默认；`mode=off` 或 `memory_validation=off` 仍关闭实验并保留旧拓扑。显式旧开发实验也不切 Direct Heap。仅排查时可设置 `guest_backing=stack_alias` 恢复原 Stack 映射；不要在运行中切换配置。
-
-Scratch 故障测试继续保留每个危险阶段之前 fsync 的 `heap-fault-<revision>.json`。首次执行仍可能异常退出；保留 standalone checkpoint 与 crash log，不删除标记反复试。GPU 导入测试不提交 GPU 命令。无法确认 RW 恢复时保留 scratch 并禁止 chainload。
-
-## 构建/测试
-
-所有集成从精确的原 Git blob 展开。新增的有序 recipe 只能沿用同一个原始 blob pin；原文件或锚点不匹配时事务式拒绝构建，不作模糊替换。构建产物保存所有 recipe 的哈希与实际编译源码身份。
-
-新增测试运行真实 C++ handler + Linux mprotect/重试（Horizon frame 为显式合成）、实际 XXH3、控制器/HUD/JSON/analyzer，并包括丢失 dirty 的负例；本地这不是 A64/Horizon/Vulkan 驱动执行。有 SDK 时先编译新增真实头文件与现有 C++/汇编 ABI gate，再构建完整 NRO。最终仍需目标 CI 与实机证据。
+集成继续采用全 Git blob 固定的有序构建配方；新增恢复、控制器、HUD 和分析器修改均在同一 direct-heap 配方内，不要求手工应用补丁。锚点或原始 blob 不匹配会事务式拒绝，产物保存编译源码身份。
