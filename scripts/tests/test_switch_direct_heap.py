@@ -156,20 +156,37 @@ def recipe_regression():
             return subprocess.run(['git','hash-object','-w','--stdin'],input=data,cwd=root,check=True,capture_output=True).stdout.decode().strip()
         sha=blob(original);sha2=blob(other)
         def spec(path,pin,old,new):return dict(path=path,base_blob=pin,replacements=[dict(old=old,new=new)])
-        recipes=[('switch-live-write-watch.json',[spec('one',sha,'base','middle')]),
-                 ('switch-heap-fault.json',[spec('two',sha2,'other','final')]),
-                 ('switch-direct-heap.json',[spec('one',sha,'middle','done')]),
-                 ('switch-deferred-import.json',[])]
-        for name,files in recipes:(root/'patches/experiments'/name).write_text(json.dumps(dict(files=files)))
+        # Use the engine's actual ordered list rather than silently limiting
+        # the fixture to the four recipes that existed when it was written.
+        engine=load(script,'fixture_recipe_engine')
+        recipes=list(engine.RECIPES)
+        assert len(recipes)>=3 and all(p.parent==root/'patches/experiments' for p in recipes)
+        specs=[[spec('one',sha,'base','middle')],
+               [spec('two',sha2,'other','final')],
+               [spec('one',sha,'middle','done')]]
+        specs.extend([] for _ in recipes[3:])
+        for path,files in zip(recipes,specs):
+            path.write_text(json.dumps(dict(files=files)))
         (root/'one').write_bytes(original);(root/'two').write_bytes(b'unknown\n')
         def run(*args):return subprocess.run(['python3',str(script),*args],cwd=root,capture_output=True)
+        def expect_success(*args):
+            result=run(*args)
+            assert result.returncode==0,result.stderr.decode(errors='replace')
         assert run().returncode and (root/'one').read_bytes()==original
-        (root/'two').write_bytes(other);assert run().returncode==0
+        (root/'two').write_bytes(other)
+        # A missing required recipe must fail before mutating any source, too.
+        last=recipes[-1];saved=last.read_bytes();last.unlink()
+        assert run().returncode and (root/'one').read_bytes()==original
+        assert (root/'two').read_bytes()==other
+        last.write_bytes(saved)
+        expect_success()
         assert (root/'one').read_bytes()==b'done\n' and (root/'two').read_bytes()==b'final\n'
-        assert run().returncode==0 and run('--check-applied').returncode==0
-        path=root/'patches/experiments/switch-direct-heap.json'
-        path.write_text(json.dumps(dict(files=[spec('one',sha2,'middle','done')])))
+        expect_success();expect_success('--check-applied')
+        provenance=json.loads((root/'build-switch-preflight/write-watch-hooks.json').read_text())
+        assert [r['path'] for r in provenance['recipes']]==[p.relative_to(root).as_posix() for p in recipes]
+        recipes[2].write_text(json.dumps(dict(files=[spec('one',sha2,'middle','done')])))
         assert run().returncode and (root/'one').read_bytes()==b'done\n'
+    print('Recipe engine: complete ordered list, missing-file transaction, pin rejection and idempotence passed')
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--cxx',default='c++');p.add_argument('--sanitize',action='store_true');a=p.parse_args()
