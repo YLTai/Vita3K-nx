@@ -28,7 +28,9 @@ POLICY = r'''
 int main(int argc,char**argv){
  assert(argc==2);namespace dh=switch_validation::direct_heap;
  std::filesystem::current_path(argv[1]);std::filesystem::create_directories("sdmc:/switch/vita3k");
- assert(dh::requested());
+ assert(dh::requested());assert(dh::lazy_import_requested());
+ std::ofstream("sdmc:/switch/vita3k/tracelab.cfg")<<"gpu_import=eager\n";assert(!dh::lazy_import_requested());
+ std::ofstream("sdmc:/switch/vita3k/tracelab.cfg")<<"gpu_import=deferred\n";assert(dh::lazy_import_requested());
  std::ofstream("sdmc:/switch/vita3k/tracelab.cfg")<<" guest_backing = stack_alias # comment\n";
  assert(!dh::requested());
  std::ofstream("sdmc:/switch/vita3k/tracelab.cfg")<<"guest_backing=direct_heap\nmode=off\n";
@@ -44,6 +46,9 @@ int main(int argc,char**argv){
  fixture_base=reinterpret_cast<uintptr_t>(p);std::fill_n(fixture_perm,16,Perm_Rw);
  assert(!dh::writable_private(p+1,4096));assert(!dh::writable_private(p,4095));
  assert(dh::activate(p,16*4096));assert(dh::commit(p,p,8192)==0);
+ auto& registry=switch_validation::deferred_import::registry;
+ const auto lease=registry.reserve(1,4096,reinterpret_cast<uintptr_t>(p),4096);assert(lease);
+ assert(dh::recycle(p,p,4096)!=0);registry.release(lease);assert(dh::recycle(p,p,4096)==0);
  assert(dh::commit(p,p+4096,4096)!=0);assert(dh::recycle(p,p,8192)==0);
  dh::request_capture();dh::frame(1,1000);
  fixture_attr=4;assert(dh::recycle(p,p,4096)!=0);assert(!dh::writable_private(p,4096));
@@ -53,6 +58,11 @@ int main(int argc,char**argv){
  fixture_query_failure=true;dh::observe(p+8192,4096);fixture_query_failure=false;
  assert(dh::snapshot().other_bytes==4096);
  dh::state.errors.store(0);dh::frame(100,1000);dh::frame(30100,1000);
+ assert(dh::state.final_classification_complete.load());assert(registry.summary().frozen);
+ unsigned checked=0;for(const auto& key:dh::state.keys)if(key.begin){++checked;
+   assert(key.final_plain==key.size&&key.final_pinned==0&&key.final_other==0);}
+ assert(checked==3);const auto old_ranges=dh::state.ranges.load();dh::observe(p+12288,4096);
+ assert(dh::state.ranges.load()==old_ranges);
  assert(dh::snapshot().finished&&!dh::ready(dh::snapshot())); // Too few rendered frames.
  dh::begin_session();assert(!dh::snapshot().finished&&dh::snapshot().ranges==0);
  dh::frame(1,1000);assert(!dh::snapshot().started);dh::request_capture();
@@ -62,6 +72,8 @@ int main(int argc,char**argv){
  switch_validation::StatusSnapshot s;s.heap_fault=s.direct_guest=true;s.stage=switch_validation::Stage::Measuring;
  s.remaining_ms=1000;s.direct_pool_mib=1280;
  auto text=switch_validation::make_hud_text(s,0);assert(std::strstr(text.title.data(),"GAME VALIDATION")&&!std::strstr(text.title.data(),"DONE"));
+ s.lazy_imports=true;s.lazy_pending_mib=8;s.lazy_imported_mib=4;s.lazy_avoided=3;
+ text=switch_validation::make_hud_text(s,0);assert(std::strstr(text.samples.data(),"Deferred:8 MiB"));
  s.stage=switch_validation::Stage::Complete;s.outcome=switch_validation::CaptureOutcome::Ready;s.controls_complete=true;
  text=switch_validation::make_hud_text(s,0);assert(std::strstr(text.title.data(),"DONE - REPORT READY"));
  s.failed=1;text=switch_validation::make_hud_text(s,0);assert(std::strstr(text.title.data(),"CHECK REPORT"));
@@ -146,7 +158,8 @@ def recipe_regression():
         def spec(path,pin,old,new):return dict(path=path,base_blob=pin,replacements=[dict(old=old,new=new)])
         recipes=[('switch-live-write-watch.json',[spec('one',sha,'base','middle')]),
                  ('switch-heap-fault.json',[spec('two',sha2,'other','final')]),
-                 ('switch-direct-heap.json',[spec('one',sha,'middle','done')])]
+                 ('switch-direct-heap.json',[spec('one',sha,'middle','done')]),
+                 ('switch-deferred-import.json',[])]
         for name,files in recipes:(root/'patches/experiments'/name).write_text(json.dumps(dict(files=files)))
         (root/'one').write_bytes(original);(root/'two').write_bytes(b'unknown\n')
         def run(*args):return subprocess.run(['python3',str(script),*args],cwd=root,capture_output=True)
@@ -220,7 +233,7 @@ def main():
             '-o',str(tmp/'controller')],check=True)
         subprocess.run([str(tmp/'controller'),str(tmp)],check=True,timeout=20)
         report=json.loads((tmp/'direct-report/memory-validation.json').read_text())
-        assert report['capture_plan']=='heap-fault-3-mixed' and report['guest_backing']['frames']==121
+        assert report['capture_plan']=='heap-fault-4-deferred' and report['guest_backing']['frames']==121
         analyzer=load(ROOT/'scripts/analyze-switch-capture.py','direct_analyzer')
         # A fake summary bit without the individual controls is never evidence.
         assert not analyzer.analyze(report)['protected_cache_controls_passed']

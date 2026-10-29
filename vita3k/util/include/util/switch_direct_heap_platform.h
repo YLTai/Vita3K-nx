@@ -38,8 +38,23 @@ inline bool writable_private(const void *pointer, size_t bytes) noexcept {
     }
     return true;
 }
+inline bool lazy_import_requested() noexcept {
+    bool requested = true;
+    if (FILE *f = std::fopen("sdmc:/switch/vita3k/tracelab.cfg", "r")) {
+        char line[512], key[64], value[64];
+        while (std::fgets(line, sizeof(line), f)) {
+            if (std::sscanf(line, " %63[^= \t] = %63[^#; \t\r\n]", key, value) == 2
+                && !std::strcmp(key, "gpu_import")) requested = std::strcmp(value, "eager") != 0;
+        }
+        std::fclose(f);
+    }
+    return requested;
+}
+inline bool finish_census() noexcept;
 inline bool activate(void *pool, size_t bytes) noexcept {
     if (!writable_private(pool, bytes)) return false;
+    if (!deferred_import::registry.configure(lazy_import_requested())) return false;
+    state.finish_census = &finish_census;
     state.pool_bytes.store(bytes); state.active.store(true); return true;
 }
 inline uint32_t commit(void *host, void *source, size_t bytes) noexcept {
@@ -49,27 +64,12 @@ inline uint32_t commit(void *host, void *source, size_t bytes) noexcept {
 inline uint32_t recycle(void *host, void *source, size_t bytes) noexcept {
     // Do not recycle a still-imported/IPC/protected page, even if it is RW.
     // There is no attempt to clear DeviceShared or override driver ownership.
-    if (host != source || !writable_private(source, bytes)) { ++state.errors; return 0xd401; }
+    if (host != source || deferred_import::registry.blocks_recycle(reinterpret_cast<uintptr_t>(source), bytes)
+        || !writable_private(source, bytes)) { ++state.errors; return 0xd401; }
     ++state.recycles; return 0;
 }
-inline void observe(const void *pointer, size_t bytes) noexcept {
-    if (!state.active.load(std::memory_order_relaxed) || !state.started.load(std::memory_order_relaxed)
-        || state.finished.load(std::memory_order_relaxed)
-        || !pointer || !bytes) return;
-    const auto begin = reinterpret_cast<uintptr_t>(pointer);
-    if (begin + bytes < begin || state.sampling.test_and_set(std::memory_order_acquire)) return;
-    struct Unlock { ~Unlock() { state.sampling.clear(std::memory_order_release); } } unlock;
-    uint64_t mixed = begin ^ (uint64_t(bytes) * 0x9e3779b97f4a7c15ull);
-    mixed = (mixed ^ (mixed >> 30)) * 0xbf58476d1ce4e5b9ull;
-    mixed ^= mixed >> 27;
-    State::Key *slot = nullptr;
-    for (size_t probe = 0; probe < 8; ++probe) {
-        auto &key = state.keys[(mixed + probe) % state.keys.size()];
-        if (key.begin == begin && key.size == bytes) { ++key.visits; return; }
-        if (!key.begin) { slot = &key; break; }
-    }
-    if (!slot) { ++state.collisions; return; }
-    *slot = {begin, bytes, 1, 0, 0, 0}; ++state.ranges;
+struct Classification { uint64_t plain = 0, pinned = 0, other = 0; };
+inline Classification classify(uintptr_t begin, size_t bytes) noexcept {
     uint64_t plain = 0, pinned = 0, other = 0;
     uintptr_t pos = begin;
     for (size_t steps = 0; pos < begin + bytes && steps < 256; ++steps) {
@@ -84,6 +84,41 @@ inline void observe(const void *pointer, size_t bytes) noexcept {
         pos = end;
     }
     other += begin + bytes - pos;
+    return {plain, pinned, other};
+}
+inline bool finish_census() noexcept {
+    if (state.final_classification_complete.load()) return true;
+    if (state.sampling.test_and_set(std::memory_order_acquire)) return false;
+    for (auto &key : state.keys) if (key.begin) {
+        const auto final = classify(key.begin, key.size);
+        key.final_plain = final.plain; key.final_pinned = final.pinned; key.final_other = final.other;
+    }
+    state.final_classification_complete.store(true);
+    state.sampling.clear(std::memory_order_release);
+    return true;
+}
+inline void observe(const void *pointer, size_t bytes) noexcept {
+    if (!state.active.load(std::memory_order_relaxed) || !state.started.load(std::memory_order_relaxed)
+        || state.finished.load(std::memory_order_relaxed) || state.final_classification_complete.load(std::memory_order_acquire)
+        || !pointer || !bytes) return;
+    const auto begin = reinterpret_cast<uintptr_t>(pointer);
+    if (begin + bytes < begin || state.sampling.test_and_set(std::memory_order_acquire)) return;
+    struct Unlock { ~Unlock() { state.sampling.clear(std::memory_order_release); } } unlock;
+    // The final census may have acquired the lock after our initial check.
+    if (state.final_classification_complete.load(std::memory_order_acquire)) return;
+    uint64_t mixed = begin ^ (uint64_t(bytes) * 0x9e3779b97f4a7c15ull);
+    mixed = (mixed ^ (mixed >> 30)) * 0xbf58476d1ce4e5b9ull;
+    mixed ^= mixed >> 27;
+    State::Key *slot = nullptr;
+    for (size_t probe = 0; probe < 32; ++probe) {
+        auto &key = state.keys[(mixed + probe) % state.keys.size()];
+        if (key.begin == begin && key.size == bytes) { ++key.visits; return; }
+        if (!key.begin) { slot = &key; break; }
+    }
+    if (!slot) { ++state.collisions; return; }
+    *slot = {begin, bytes, 1, 0, 0, 0}; ++state.ranges;
+    const auto value = classify(begin, bytes);
+    const auto plain = value.plain, pinned = value.pinned, other = value.other;
     slot->plain = plain; slot->pinned = pinned; slot->other = other;
     state.plain_bytes.fetch_add(plain); state.pinned_bytes.fetch_add(pinned); state.other_bytes.fetch_add(other);
 }

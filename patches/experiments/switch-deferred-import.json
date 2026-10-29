@@ -1,0 +1,156 @@
+{
+  "base_commit": "1c6825d5179abc2f1da33a591c18cfff2ee9c6ba",
+  "purpose": "Demand materialization of whole GPU buffer mappings; no live RO, no new Hash reuse. Ordered exact-pin extension.",
+  "files": [
+    {
+      "path": "vita3k/util/src/switch_memory_validation.cpp",
+      "base_blob": "e805efbd80f3880ab8561fc46289dedc5dcff565",
+      "replacements": [
+        {
+          "old": "        out.direct_pool_mib = topology.pool_bytes >> 20;",
+          "new": "        out.direct_pool_mib = topology.pool_bytes >> 20;\n        const auto imports = deferred_import::registry.summary();\n        out.lazy_imports = imports.enabled; out.lazy_pending_mib = imports.pending_bytes >> 20;\n        out.lazy_imported_mib = imports.imported_bytes >> 20;\n        out.lazy_avoided = imports.avoided; out.lazy_errors = imports.errors;"
+        },
+        {
+          "old": "\\\"capture_plan\\\":\\\"heap-fault-3-mixed\\\"",
+          "new": "\\\"capture_plan\\\":\\\"heap-fault-4-deferred\\\""
+        },
+        {
+          "old": "completed = !topology.active || topology.finished || topology.errors || scratch_failed;",
+          "new": "completed = !topology.active || topology.finished || topology.errors || scratch_failed || deferred_import::registry.summary().errors;"
+        },
+        {
+          "old": "topology.errors || scratch_failed ? CaptureOutcome::Invalid",
+          "new": "topology.errors || scratch_failed || deferred_import::registry.summary().errors ? CaptureOutcome::Invalid"
+        },
+        {
+          "old": "const bool valid = controls && !test_failed && !lost_results.load() && !topology.errors;",
+          "new": "const bool valid = controls && !test_failed && !lost_results.load() && !topology.errors && !deferred_import::registry.summary().errors;"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/switch_validation_status.h",
+      "base_blob": "d8f950aa3a9d4d563284584063a0fc373ac7953a",
+      "replacements": [
+        {
+          "old": "    bool direct_guest = false;",
+          "new": "    bool direct_guest = false, lazy_imports = false;\n    uint64_t lazy_pending_mib = 0, lazy_imported_mib = 0, lazy_avoided = 0, lazy_errors = 0;"
+        },
+        {
+          "old": "        std::snprintf(text.action.data(), text.action.size(), \"%s\", done\n            ? \"EXIT GAME NORMALLY TO SAVE | Share this run; do not repeat\"",
+          "new": "        if (s.lazy_imports) {\n            std::snprintf(text.samples.data(), text.samples.size(), \"Deferred:%llu MiB | GPU:%llu MiB | Avoided:%llu | Errors:%llu\",\n                (unsigned long long)s.lazy_pending_mib, (unsigned long long)s.lazy_imported_mib,\n                (unsigned long long)s.lazy_avoided, (unsigned long long)(s.lazy_errors + s.direct_errors));\n        }\n        std::snprintf(text.action.data(), text.action.size(), \"%s\", done\n            ? \"EXIT GAME NORMALLY TO SAVE | Share this run; do not repeat\""
+        }
+      ]
+    },
+    {
+      "path": "scripts/analyze-switch-capture.py",
+      "base_blob": "9cfa77fd4be7b2a7fd8ea6f58c9bfaf638844bef",
+      "replacements": [
+        {
+          "old": "(\"heap-fault-1\", \"heap-fault-2-direct\", \"heap-fault-3-mixed\")",
+          "new": "(\"heap-fault-1\", \"heap-fault-2-direct\", \"heap-fault-3-mixed\", \"heap-fault-4-deferred\")"
+        },
+        {
+          "old": "    if data.get('capture_plan') == 'heap-fault-3-mixed':",
+          "new": "    if data.get('capture_plan') in ('heap-fault-3-mixed', 'heap-fault-4-deferred'):"
+        },
+        {
+          "old": "        if data.get('capture_plan') == 'heap-fault-3-mixed' and (not topology.get('window_started')",
+          "new": "        if data.get('capture_plan') in ('heap-fault-3-mixed', 'heap-fault-4-deferred') and (not topology.get('window_started')"
+        },
+        {
+          "old": "    hz = data.get('timebase_hz', 0)\n    timing = next((t for t in tests if t.get('name') == 'rearm_64'), {})",
+          "new": "    if data.get('capture_plan') == 'heap-fault-4-deferred':\n        imports = topology.get('deferred_imports', {})\n        if imports.get('errors'): issues.append('Deferred mapping lifetime/materialization failure')\n        if topology.get('active') and (not imports.get('enabled') or not imports.get('frozen_at_window_end')):\n            issues.append('Deferred import mode disabled or focused window not completed')\n        if imports.get('capacity_fallbacks'): issues.append('Deferred registry capacity reached: original eager fallback used')\n        if not topology.get('final_classification_complete'):\n            issues.append('Missing end-of-window permission census')\n    hz = data.get('timebase_hz', 0)\n    timing = next((t for t in tests if t.get('name') == 'rearm_64'), {})"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/run-switch-performance-tests.sh",
+      "base_blob": "5810c5ce63221fa1e9539e5196b773c96c71345c",
+      "replacements": [
+        {
+          "old": "python3 \"$ROOT/scripts/tests/test_switch_direct_heap.py\" --cxx \"${CXX:-c++}\"",
+          "new": "python3 \"$ROOT/scripts/tests/test_switch_direct_heap.py\" --cxx \"${CXX:-c++}\"\npython3 \"$ROOT/scripts/tests/test_switch_deferred_import.py\" --require-source --cxx \"${CXX:-c++}\""
+        }
+      ]
+    },
+    {
+      "path": "vita3k/renderer/src/vulkan/renderer.cpp",
+      "base_blob": "4f62037e80751c16c2aedeaee34e9903fa4fe154",
+      "replacements": [
+        {
+          "old": "#include <renderer/vulkan/state.h>",
+          "new": "#include <renderer/vulkan/state.h>\n#include <renderer/vulkan/switch_deferred_import_impl.h>"
+        },
+        {
+          "old": "bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {",
+          "new": "bool VKState::map_memory_eager(MemState &mem, Ptr<void> address, uint32_t size) {"
+        },
+        {
+          "old": "        if (mapped_memory->first + mapped_memory->second.size > address.address())\n            return std::make_tuple(mapped_memory->second.buffer,\n                mapped_memory->second.buffer_offset + address.address() - mapped_memory->first);",
+          "new": "        if (static_cast<uint64_t>(mapped_memory->first) + mapped_memory->second.size > address.address()) {\n#ifdef __SWITCH__\n            if (!switch_ensure_mapping(mapped_memory->first, switch_validation::deferred_import::Buffer))\n                throw std::runtime_error(\"Missing deferred buffer mapping\");\n#endif\n            return std::make_tuple(mapped_memory->second.buffer,\n                mapped_memory->second.buffer_offset + address.address() - mapped_memory->first);\n        }"
+        },
+        {
+          "old": "    const int64_t offset = address - mapped_memory->first;",
+          "new": "#ifdef __SWITCH__\n    if (!switch_ensure_mapping(mapped_memory->first, switch_validation::deferred_import::DeviceAddress))\n        throw std::runtime_error(\"Missing deferred device-address mapping\");\n#endif\n    const int64_t offset = address - mapped_memory->first;"
+        },
+        {
+          "old": "    MappedMemory &mapping = mem_it->second;\n    // Imported mappings alias guest memory:",
+          "new": "    if (!state.switch_ensure_mapping(mem_it->first, switch_validation::deferred_import::CpuSync\n            | (always_trap ? uint32_t(switch_validation::deferred_import::Writable) : 0u)\n            | (cover_everything ? uint32_t(switch_validation::deferred_import::Uniform) : 0u)))\n        throw std::runtime_error(\"Missing deferred CPU-sync mapping\");\n    MappedMemory &mapping = mem_it->second;\n    // Imported mappings alias guest memory:"
+        },
+        {
+          "old": "    mapped_memories.erase(ite);\n}",
+          "new": "#ifdef __SWITCH__\n    switch_validation::deferred_import::registry.release(ite->second.switch_lazy_token);\n#endif\n    mapped_memories.erase(ite);\n}"
+        },
+        {
+          "old": "    mapped_memories.clear();\n    buffer_trapping.trapped_buffers.clear();",
+          "new": "    mapped_memories.clear();\n#ifdef __SWITCH__\n    // GPU objects have just been destroyed, after the existing idle wait.\n    switch_validation::deferred_import::registry.release_owner(reinterpret_cast<uintptr_t>(this));\n#endif\n    buffer_trapping.trapped_buffers.clear();"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/renderer/include/renderer/vulkan/state.h",
+      "base_blob": "81824e3d188d744c75303ead79b4dfdb5a6a7ab9",
+      "replacements": [
+        {
+          "old": "    bool map_memory(MemState &mem, Ptr<void> address, uint32_t size) override;",
+          "new": "    bool map_memory(MemState &mem, Ptr<void> address, uint32_t size) override;\n    bool map_memory_eager(MemState &mem, Ptr<void> address, uint32_t size);\n#ifdef __SWITCH__\n    bool switch_ensure_mapping(Address base, uint32_t uses);\n#endif"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/renderer/include/renderer/vulkan/types.h",
+      "base_blob": "67b36190540e435a037fa4f399d27fdc5105015d",
+      "replacements": [
+        {
+          "old": "    uint32_t buffer_offset = 0;\n#ifdef __SWITCH__",
+          "new": "    uint32_t buffer_offset = 0;\n#ifdef __SWITCH__\n    uint64_t switch_lazy_token = 0;\n    uint32_t switch_lazy_uses = 0;"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/renderer/src/vulkan/context.cpp",
+      "base_blob": "fb80c669ca47e0095ae1b66b01722fd038d6ffcc",
+      "replacements": [
+        {
+          "old": "#include <util/log.h>",
+          "new": "#include <util/log.h>\n#include <util/switch_deferred_import.h>"
+        },
+        {
+          "old": "                           if (std::holds_alternative<ExternalBuffer>(mem_it->second.buffer_impl)) {",
+          "new": "                           if (mem_it->second.switch_lazy_token && !mem_it->second.buffer) {\n                               switch_validation::deferred_import::registry.fail(mem_it->second.switch_lazy_token);\n                               LOG_CRITICAL(\"Readback reached an unmaterialized mapping; refusing stale data\");\n                               state.device_lost.store(true, std::memory_order_release);\n                               return;\n                           }\n                           if (std::holds_alternative<ExternalBuffer>(mem_it->second.buffer_impl)) {"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/test_switch_heap_fault.py",
+      "base_blob": "548bb8190f096d005070ba77de1dda5f42f2fecd",
+      "replacements": [
+        {
+          "old": "('heap-fault-1','heap-fault-2-direct','heap-fault-3-mixed')",
+          "new": "('heap-fault-1','heap-fault-2-direct','heap-fault-3-mixed','heap-fault-4-deferred')"
+        }
+      ]
+    }
+  ]
+}

@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <util/switch_deferred_import.h>
 
 namespace switch_validation::direct_heap {
 constexpr uint64_t page = 4096, align_bytes = 2 * 1024 * 1024;
@@ -35,10 +36,13 @@ struct State {
     std::atomic<uint64_t> ranges{0}, plain_bytes{0}, pinned_bytes{0}, other_bytes{0}, collisions{0};
     std::atomic<uint64_t> frames{0}, elapsed_ms{0};
     std::atomic_flag sampling = ATOMIC_FLAG_INIT;
-    struct Key { uintptr_t begin = 0; size_t size = 0; uint64_t visits = 0, plain = 0, pinned = 0, other = 0; };
-    std::array<Key, 512> keys{}; // First-seen input spans, not unique physical bytes.
+    struct Key { uintptr_t begin = 0; size_t size = 0; uint64_t visits = 0, plain = 0, pinned = 0, other = 0;
+        uint64_t final_plain = 0, final_pinned = 0, final_other = 0; };
+    std::array<Key, 2048> keys{}; // First-seen input spans, not unique physical bytes.
     uint64_t first_tick = 0; // Render-thread owned.
     std::atomic<uint64_t> start_tick{0}, end_tick{0};
+    std::atomic<bool> final_classification_complete{false};
+    bool (*finish_census)() noexcept = nullptr; // Installed during pool activation, before workers.
 };
 inline State state;
 // Normal control paths only. Never acquired by the exception handler.
@@ -49,7 +53,7 @@ inline std::mutex scratch_probe_mutex;
 inline void begin_session() noexcept {
     state.finished.store(false); state.started.store(false); state.start_requested.store(false);
     state.cache_attempted.store(false); state.cache_passed.store(false); state.cache_finished.store(false);
-    state.cache_cleanup_ok.store(false); state.start_tick.store(0); state.end_tick.store(0);
+    state.cache_cleanup_ok.store(false); state.final_classification_complete.store(false); state.start_tick.store(0); state.end_tick.store(0);
     state.frames.store(0); state.elapsed_ms.store(0); state.first_tick = 0;
     state.ranges.store(0); state.plain_bytes.store(0); state.pinned_bytes.store(0);
     state.other_bytes.store(0); state.collisions.store(0); state.keys.fill({});
@@ -80,13 +84,19 @@ inline void frame(uint64_t tick, uint64_t hz) noexcept {
         state.other_bytes.store(0); state.collisions.store(0); state.keys.fill({});
         state.frames.store(0); state.elapsed_ms.store(0); state.finished.store(false);
         state.first_tick = tick; state.start_tick.store(tick); state.end_tick.store(0);
+        state.final_classification_complete.store(false); deferred_import::registry.start_window();
         state.started.store(true); state.sampling.clear(std::memory_order_release);
     }
     if (!state.started.load() || state.finished.load()) return;
     ++state.frames;
     const auto ms = tick >= state.first_tick ? (tick - state.first_tick) * 1000 / hz : 0;
     state.elapsed_ms.store(ms);
-    if (ms >= 30000) { state.end_tick.store(tick); state.finished.store(true); }
+    if (ms >= 30000) {
+        // One bounded metadata-only census before GPU objects can be torn down.
+        // A concurrent sampler delays DONE by a frame rather than racing its keys.
+        if (state.finish_census && !state.finish_census()) return;
+        state.end_tick.store(tick); deferred_import::registry.freeze_window(); state.finished.store(true);
+    }
 }
 inline bool ready(const Snapshot &s) noexcept {
     return s.active && s.started && s.finished && s.frames >= 120 && s.ranges && s.commits && !s.errors;
@@ -117,14 +127,20 @@ inline void write_json(FILE *file) {
         bool first = true;
         for (const auto &key : state.keys) if (key.begin) {
             std::fprintf(file, "%s{\"host\":%llu,\"bytes\":%zu,\"hash_observations\":%llu,"
-                "\"first_plain_bytes\":%llu,\"first_pinned_bytes\":%llu,\"first_other_bytes\":%llu}",
+                "\"first_plain_bytes\":%llu,\"first_pinned_bytes\":%llu,\"first_other_bytes\":%llu,"
+                "\"final_plain_bytes\":%llu,\"final_pinned_bytes\":%llu,\"final_other_bytes\":%llu}",
                 first ? "" : ",", (unsigned long long)key.begin, key.size,
                 (unsigned long long)key.visits, (unsigned long long)key.plain,
-                (unsigned long long)key.pinned, (unsigned long long)key.other);
+                (unsigned long long)key.pinned, (unsigned long long)key.other,
+                (unsigned long long)key.final_plain, (unsigned long long)key.final_pinned,
+                (unsigned long long)key.final_other);
             first = false;
         }
         state.sampling.clear(std::memory_order_release);
     }
-    std::fputs("]}", file);
+    std::fprintf(file, "],\"final_classification_complete\":%s,\"deferred_imports\":",
+        state.final_classification_complete.load() ? "true" : "false");
+    deferred_import::registry.write_json(file);
+    std::fputs("}", file);
 }
 } // namespace switch_validation::direct_heap
