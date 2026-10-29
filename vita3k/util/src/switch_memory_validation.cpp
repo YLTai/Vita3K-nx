@@ -4,6 +4,7 @@
 
 #if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)
 #include <util/switch_validation_schedule.h>
+#include <util/switch_capture_plan.h>
 #include <util/switch_write_watch.h>
 #include <util/log.h>
 #include <switch/arm/counter.h>
@@ -28,6 +29,11 @@ constexpr size_t kMaxIntervals = 32768;
 struct Options {
     bool enabled = true;
     bool automatic = true;
+#ifdef VITA3K_SWITCH_CLEAN_CAPTURE_DEFAULT
+    bool compact = true;
+#else
+    bool compact = false; // Existing deterministic legacy fixtures remain testable.
+#endif
 #ifdef VITA3K_SWITCH_WRITE_SHADOW_DEFAULT
     bool write_shadow = true;
 #else
@@ -62,10 +68,24 @@ struct Phase {
 
 Options options;
 watch::Table live_watch;
-uint32_t phase_count() { return options.write_shadow ? 4 : 8; }
+thread_local watch::Audit last_hash_audit;
+thread_local uint32_t last_hash_address = 0;
+thread_local uint64_t last_hash_size = 0;
+uint32_t phase_count() { return options.compact ? compact_order.size() : options.write_shadow ? 4 : 8; }
+CaptureMode phase_mode(uint32_t phase) {
+    if (phase >= phase_count()) return CaptureMode::Open;
+    if (options.compact) return compact_order[phase];
+    return staging_dedup_order[phase] ? CaptureMode::Exact : CaptureMode::Open;
+}
+void apply_watch_phase(uint32_t phase, bool restart = false) {
+    if (!options.write_shadow) return;
+    const auto mode = phase_mode(phase);
+    live_watch.phase(phase, mode != CaptureMode::Open, restart, mode == CaptureMode::Exact);
+}
 PhasePosition position_at(uint64_t elapsed, uint64_t settle, uint64_t measure) {
     auto result = phase_position(elapsed, settle, measure);
     if (result.index >= phase_count()) return {phase_count(), true, false, false};
+    if (options.compact) result.deduplicate = phase_mode(result.index) != CaptureMode::Open;
     return result;
 }
 std::string title;
@@ -73,12 +93,15 @@ std::vector<Result> results;
 std::mutex results_mutex;
 std::atomic<uint64_t> lost_results{0};
 uint32_t test_passed = 0, test_failed = 0, test_skipped = 0; // results_mutex
+uint32_t control_mask = 0;
+bool duplicate_control = false; // results_mutex
 std::mutex status_mutex;
 StatusSnapshot published_status; // status_mutex; UI never reads live renderer counters
 
 std::array<Interval, kMaxIntervals> intervals{};
 std::array<Phase, staging_dedup_order.size()> phases{};
 std::atomic<bool> is_enabled{false};
+std::atomic<bool> capture_active{false};
 std::atomic<bool> dedup_enabled{false};
 std::atomic<bool> start_requested{false};
 std::atomic<bool> abort_requested{false};
@@ -108,9 +131,9 @@ Options read_options() {
     Options out;
     bool collector_off = false;
     auto *file = std::fopen("sdmc:/switch/vita3k/tracelab.cfg", "rb");
-    if (!file) return out;
+    if (!file && !out.compact) return out;
     char line[256]{};
-    while (std::fgets(line, sizeof(line), file)) {
+    while (file && std::fgets(line, sizeof(line), file)) {
         std::string text(line);
         if (const auto comment = text.find('#'); comment != std::string::npos)
             text.resize(comment);
@@ -122,8 +145,9 @@ Options read_options() {
         if (key == "mode") {
             collector_off = value == "off";
         } else if (key == "validation_experiment") {
-            if (value == "write_shadow") out.write_shadow = true;
-            else if (value == "staging") out.write_shadow = false;
+            if (value == "compact") { out.compact = true; out.write_shadow = true; }
+            else if (value == "write_shadow") out.write_shadow = true;
+            else if (value == "staging") { out.compact = false; out.write_shadow = false; }
         } else if (key == "memory_validation") {
             if (value == "off") { out.enabled = false; out.automatic = false; }
             else if (value == "on") { out.enabled = true; out.automatic = false; }
@@ -139,7 +163,13 @@ Options read_options() {
             if (key == "validation_settle_seconds" && n >= 1 && n <= 30) out.settle_seconds = n;
         }
     }
-    std::fclose(file);
+    if (file) std::fclose(file);
+    if (out.compact) {
+        // One preset supersedes old multi-experiment duration knobs.
+        out.automatic = false; out.write_shadow = true; out.warmup_seconds = 0;
+        out.settle_seconds = compact_settle_seconds;
+        out.measure_seconds = compact_measure_seconds;
+    }
     if (collector_off) out.enabled = false;
     return out;
 }
@@ -169,11 +199,12 @@ void reset_run(uint64_t tick) {
     previous_tick = tick;
     ++run_id;
     requested = true;
+    capture_active.store(true, std::memory_order_release);
     completed = aborted = false;
     auto_consumed = true;
     dedup_enabled.store(false, std::memory_order_release);
     public_state.store(1, std::memory_order_release);
-    if (options.write_shadow) live_watch.phase(0, false, true);
+    apply_watch_phase(0, true);
 }
 
 // Render thread only. Fixed-size copy, no string formatting or disk I/O.
@@ -186,14 +217,21 @@ void publish_status(uint64_t tick) {
     const uint64_t total = duration * phase_count();
     out.phase_count = phase_count();
     out.write_shadow = options.write_shadow;
+    out.compact = options.compact;
     const auto observation = live_watch.snapshot();
     out.watched_pages = observation.backing_pages;
     out.watch_failed = observation.failed;
     for (const auto &p : observation.phases) {
         out.first_write_pages += p.first_write_pages;
         out.unobserved_changes += p.changed_unobserved;
+        out.exact_write_hits += p.exact_resource_hits;
+        out.page_only_writes += p.page_only_stores;
+        out.host_write_hits += p.host_resource_hits;
+        out.content_changes += p.changed;
+        out.guard_budget_exhausted |= p.guard_budget_exhausted != 0;
         out.watch_failed |= p.invalid_accesses != 0;
     }
+    out.cache_changes = observation.cache.changes;
     out.automatic = options.automatic;
     out.run_id = run_id;
     out.source_tick = tick;
@@ -210,13 +248,13 @@ void publish_status(uint64_t tick) {
         out.phase = phase_count();
         out.progress_per_mille = 1000;
         for (size_t i = 0; i < phase_count(); ++i) {
-            out.insufficient_samples |= !phases[i].complete || phases[i].intervals < 100
+            out.insufficient_samples |= !phases[i].complete || phases[i].intervals < (options.compact ? compact_min_samples : 100)
                 || phases[i].ticks < measure * 9 / 10;
-            out.missing_treatment |= staging_dedup_order[i] && (options.write_shadow
+            out.missing_treatment |= (phase_mode(i) != CaptureMode::Open) && (options.write_shadow
                 ? (!observation.bound || observation.phases[i].armed_pages == 0 || observation.phases[i].covered_checks == 0)
                 : (phases[i].dedup_calls == 0 || phases[i].dedup_bytes == 0));
         }
-        out.outcome = overflow || out.insufficient_samples || (options.write_shadow && out.watch_failed) ? CaptureOutcome::Invalid
+        out.outcome = overflow || out.insufficient_samples || (options.write_shadow && (out.watch_failed || out.guard_budget_exhausted)) ? CaptureOutcome::Invalid
             : out.missing_treatment ? CaptureOutcome::Inconclusive : CaptureOutcome::Ready;
     } else if (aborted) {
         out.stage = Stage::Interrupted;
@@ -233,6 +271,7 @@ void publish_status(uint64_t tick) {
         const auto position = position_at(elapsed, settle, measure);
         out.phase = position.index + 1;
         out.deduplicate = position.deduplicate;
+        out.policy_letter = options.compact ? capture_mode_letter(phase_mode(position.index)) : (position.deduplicate ? 'B' : 'A');
         const uint64_t actual_elapsed = tick >= phase_entry_tick ? tick - phase_entry_tick : 0;
         const bool actually_settled = actual_elapsed >= settle;
         out.stage = position.measuring && actually_settled ? Stage::Measuring : Stage::Settling;
@@ -275,6 +314,7 @@ void begin_session(const char *title_id) {
         const std::lock_guard<std::mutex> lock(results_mutex);
         results.clear();
         test_passed = test_failed = test_skipped = 0;
+        control_mask = 0; duplicate_control = false;
     }
     lost_results.store(0, std::memory_order_relaxed);
     phases.fill({});
@@ -293,6 +333,7 @@ void begin_session(const char *title_id) {
         published_status.stage = options.enabled ? Stage::Startup : Stage::Disabled;
         published_status.automatic = options.automatic;
     }
+    capture_active.store(false, std::memory_order_release);
     is_enabled.store(options.enabled, std::memory_order_release);
     if (options.enabled)
         LOG_INFO("[memory-validation] isolated tests enabled; strict Hash; capture {}s + {}s settle; L+R+Y starts/restarts; auto={} after {}s",
@@ -306,13 +347,16 @@ void begin_session(const char *title_id) {
 
 void end_session() {
     // Owner calls this only after workers have stopped and TraceLab exported.
+    capture_active.store(false, std::memory_order_release);
     is_enabled.store(false, std::memory_order_release);
     dedup_enabled.store(false, std::memory_order_release);
     live_watch.phase(watch::no_index, false);
 }
 
 bool enabled() { return is_enabled.load(std::memory_order_relaxed); }
-bool strict_hash() { return enabled(); }
+bool strict_hash() {
+    return enabled() && (!options.compact || capture_active.load(std::memory_order_acquire));
+}
 
 StatusSnapshot status_snapshot() {
     if (!enabled()) return {};
@@ -322,6 +366,7 @@ StatusSnapshot status_snapshot() {
     StatusSnapshot out = published_status;
     out.passed = test_passed; out.failed = test_failed; out.skipped = test_skipped;
     out.results_dropped = lost_results.load(std::memory_order_relaxed);
+    out.controls_complete = !options.compact || (control_mask == compact_controls_mask && !duplicate_control);
     out.restart_pending = start_requested.load(std::memory_order_acquire);
     if (out.stage != Stage::Complete) {
         const bool paused = is_paused.load(std::memory_order_acquire);
@@ -329,7 +374,12 @@ StatusSnapshot status_snapshot() {
             out.stage = out.run_id ? Stage::Interrupted : Stage::Paused;
             if (out.run_id) out.outcome = CaptureOutcome::Invalid;
         }
-    } else if (out.failed || out.results_dropped) {
+    } else if (out.failed || out.results_dropped || !out.controls_complete) {
+        out.outcome = CaptureOutcome::Invalid;
+    }
+    if (options.compact && out.stage != Stage::Startup && !out.run_id
+        && (!out.controls_complete || out.failed || out.results_dropped || out.watch_failed)) {
+        out.stage = Stage::Blocked;
         out.outcome = CaptureOutcome::Invalid;
     }
     return out;
@@ -348,6 +398,13 @@ void record(const char *suite, const char *test, const char *status,
         }
         results.push_back({ suite ? suite : "unknown", test ? test : "unknown",
             status ? status : "fail", detail ? detail : "", elapsed_ticks, iterations_count });
+        if (results.back().suite == "write_watch_canary") {
+            for (uint32_t i = 0; i < compact_controls.size(); ++i) {
+                if (results.back().name != compact_controls[i]) continue;
+                duplicate_control |= (control_mask & (1u << i)) != 0;
+                if (results.back().status == "pass") control_mask |= 1u << i;
+            }
+        }
         const auto &saved = results.back().status;
         if (saved == "pass") ++test_passed;
         else if (saved == "skip") ++test_skipped;
@@ -359,7 +416,13 @@ void record(const char *suite, const char *test, const char *status,
 }
 
 void request_benchmark() {
-    if (enabled()) start_requested.store(true, std::memory_order_release);
+    if (!enabled()) return;
+    if (options.compact) {
+        const std::lock_guard<std::mutex> lock(results_mutex);
+        if (control_mask != compact_controls_mask || duplicate_control || test_failed || lost_results.load())
+            return; // Do not ask for 72 seconds of gameplay after a failed startup control.
+    }
+    start_requested.store(true, std::memory_order_release);
 }
 
 void note_staging_publish(uint64_t bytes, bool deduplicated) {
@@ -383,6 +446,7 @@ void on_render_end(uint64_t tick) {
     if (abort_requested.exchange(false, std::memory_order_acq_rel)) {
         if (run_start_tick && !completed) {
             aborted = true;
+            capture_active.store(false, std::memory_order_release);
             auto_consumed = true;
             public_state.store(10, std::memory_order_release);
         } else if (!run_start_tick) {
@@ -429,7 +493,7 @@ void on_render_end(uint64_t tick) {
     for (uint32_t i = 0; i < position.index && i < phases.size(); ++i)
         phases[i].complete = true;
     if (position_at(previous, settle, measure).index != position.index) {
-        if (options.write_shadow) live_watch.phase(position.complete ? watch::no_index : position.index, position.deduplicate);
+        apply_watch_phase(position.complete ? watch::no_index : position.index);
         phase_entry_tick = tick;
 #if defined(__aarch64__)
         if (options.write_shadow) phase_entry_tick = std::max(tick, uint64_t(armGetSystemTick()));
@@ -438,6 +502,7 @@ void on_render_end(uint64_t tick) {
     previous_tick = tick;
     if (position.complete) {
         completed = true;
+        capture_active.store(false, std::memory_order_release);
         dedup_enabled.store(false, std::memory_order_release);
         public_state.store(9, std::memory_order_release);
     } else {
@@ -455,8 +520,8 @@ void frontend_poll(bool paused) {
     last_logged_state = state;
     if (state >= 1 && state <= staging_dedup_order.size())
         LOG_INFO("[memory-validation] phase {}/{}: {} (strict Hash, {}s settle + {}s measurement)",
-            state, phase_count(), options.write_shadow
-                ? (staging_dedup_order[state - 1] ? "B: first-write observation" : "A: mirror table, observe off")
+            state, phase_count(), options.compact ? capture_mode_name(phase_mode(state - 1)) : options.write_shadow
+                ? (staging_dedup_order[state - 1] ? "B: write observation" : "A: mirror table, observe off")
                 : (staging_dedup_order[state - 1] ? "B: noncoherent staging dedup" : "A: original cache maintenance"),
             options.settle_seconds, options.measure_seconds);
     else if (state == 9)
@@ -499,19 +564,35 @@ watch::Access live_exclusive(uint8_t **normal, uint32_t address, uint64_t value,
 }
 watch::Token live_hash_begin(uint8_t **normal, uint32_t address, const void *pixels,
     uint64_t size, const void *palette, uint64_t palette_size) {
+    last_hash_audit = {};
+    last_hash_address = address; last_hash_size = size;
     if (!enabled() || !options.write_shadow) return {};
     return live_watch.before(normal, address, pixels, size, palette, palette_size);
 }
 void live_hash_end(watch::Token token, uint64_t hash) {
-    if (token.resource != watch::no_index) live_watch.after(token, hash);
+    last_hash_audit = {};
+    if (token.resource != watch::no_index) last_hash_audit = live_watch.after(token, hash);
+}
+void live_host_written(const void *host, uint64_t size, watch::HostWriter writer) {
+    if (enabled() && options.write_shadow) live_watch.host_written(host, size, writer);
+}
+void live_cache_decision(uint32_t slot, uint32_t address, uint64_t size,
+    uint64_t previous_hash, uint64_t current_hash, bool ordinary) {
+    if (!enabled() || !options.write_shadow) return;
+    const auto audit = ordinary && last_hash_address == address && last_hash_size == size
+        ? last_hash_audit : watch::Audit{};
+    // Ordinary TextureCache hashes are xor-1 tagged; registry hashes are raw.
+    live_watch.cache_decision(audit, slot, address, size,
+        previous_hash ^ (ordinary ? 1 : 0), current_hash ^ (ordinary ? 1 : 0), ordinary);
+    last_hash_audit = {};
 }
 
 static void write_shadow_report(FILE *file) {
     const auto snapshot = live_watch.snapshot();
     using U = unsigned long long;
     std::fprintf(file, ",\n  \"write_shadow\": {\n"
-        "    \"schema_version\":1,\n    \"bound\":%s,\n    \"failed\":%s,\n"
-        "    \"hash_skip_authority\":false,\n    \"scope\":\"JIT_first_write_only_observational\",\n"
+        "    \"schema_version\":2,\n    \"bound\":%s,\n    \"failed\":%s,\n"
+        "    \"hash_skip_authority\":false,\n    \"scope\":\"JIT_persistent_range_plus_HLE_notices_observational\",\n"
         "    \"arm_safepoint\":false,\n    \"HLE_GPU_coverage\":false,\n"
         "    \"resources\":%llu,\n    \"backing_pages\":%llu,\n    \"late_resources\":%llu,\n"
         "    \"events_dropped\":%llu,\n    \"phases\":[",
@@ -523,11 +604,17 @@ static void write_shadow_report(FILE *file) {
             "\"changed\":%llu,\"changed_cpu_seen\":%llu,\"changed_unobserved\":%llu,\"changed_uncovered\":%llu,"
             "\"callback_stores\":%llu,\"callback_reads\":%llu,\"exclusive_success\":%llu,\"invalid_accesses\":%llu,"
             "\"first_write_pages\":%llu,\"armed_pages\":%llu,\"armed_aliases\":%llu,"
-            "\"mapping_updates\":%llu,\"resources_rejected\":%llu}",
+            "\"mapping_updates\":%llu,\"resources_rejected\":%llu",
             i ? "," : "", i, U(c.hash_checks), U(c.hash_bytes), U(c.covered_checks), U(c.changed),
             U(c.changed_cpu_seen), U(c.changed_unobserved), U(c.changed_uncovered),
             U(c.callback_stores), U(c.callback_reads), U(c.exclusive_success), U(c.invalid_accesses),
             U(c.first_write_pages), U(c.armed_pages), U(c.armed_aliases), U(c.mapping_updates), U(c.resources_rejected));
+        std::fprintf(file, ",\"watched_stores\":%llu,\"exact_resource_hits\":%llu,\"page_only_stores\":%llu,"
+            "\"host_notices\":%llu,\"host_resource_hits\":%llu,\"changed_host_seen\":%llu,"
+            "\"changed_raced\":%llu,\"discarded_tokens\":%llu,\"guard_budget_exhausted\":%llu}",
+            U(c.watched_stores), U(c.exact_resource_hits), U(c.page_only_stores), U(c.host_notices),
+            U(c.host_resource_hits), U(c.changed_host_seen), U(c.changed_raced), U(c.discarded_tokens),
+            U(c.guard_budget_exhausted));
     }
     std::fputs("\n    ],\n    \"events\":[", file);
     for (uint64_t i = 0; i < snapshot.event_count; ++i) {
@@ -547,7 +634,23 @@ static void write_shadow_report(FILE *file) {
             "\"palette_host_hex\":\"%016llx\",\"palette_size\":%llu}", i ? "," : "", r.id, r.address,
             U(r.key.pixels), U(r.key.size), U(r.key.palette), U(r.key.palette_size));
     }
-    std::fprintf(file, "\n    ],\n    \"capacity_limited\":%s\n  }", snapshot.capacity_limited ? "true" : "false");
+    std::fprintf(file, "\n    ],\n    \"capacity_limited\":%s,\n"
+        "    \"persistent_selected_pages\":true,\n    \"cache_ledger\":{\n"
+        "      \"scope\":\"session_including_warmup_and_restarts\",\n"
+        "      \"comparisons\":%llu,\n      \"changes\":%llu,\n      \"events_dropped\":%llu,\n      \"reasons\":{",
+        snapshot.capacity_limited ? "true" : "false", U(snapshot.cache.comparisons), U(snapshot.cache.changes), U(snapshot.cache.dropped));
+    for (size_t i = 0; i < snapshot.cache.reasons.size(); ++i)
+        std::fprintf(file, "%s\"%s\":%llu", i ? "," : "", watch::cache_reason_name(static_cast<watch::CacheReason>(i)), U(snapshot.cache.reasons[i]));
+    std::fputs("},\n      \"events\":[", file);
+    for (uint64_t i = 0; i < snapshot.cache.stored; ++i) {
+        const auto &e = snapshot.cache.events[i];
+        std::fprintf(file, "%s\n        {\"phase\":%u,\"slot\":%u,\"address\":%u,\"size\":%llu,\"resource\":%u,"
+            "\"tick\":%llu,\"epoch\":%llu,\"reason\":\"%s\",\"previous_hash_hex\":\"%016llx\","
+            "\"current_hash_hex\":\"%016llx\",\"observer_previous_hash_hex\":\"%016llx\"}",
+            i ? "," : "", e.phase, e.slot, e.address, U(e.size), e.resource, U(e.tick), U(e.epoch),
+            watch::cache_reason_name(e.reason), U(e.previous_hash), U(e.current_hash), U(e.observer_previous_hash));
+    }
+    std::fputs("\n      ]\n    }\n  }", file);
 }
 
 void write_report(const char *directory) {
@@ -586,7 +689,7 @@ void write_report(const char *directory) {
         "    \"auto_start\":%s,\n    \"warmup_seconds\":%u,\n    \"settle_seconds\":%u,\n    \"measure_seconds\":%u,\n"
         "    \"requested\":%s,\n    \"completed\":%s,\n    \"aborted\":%s,\n    \"run_id\":%u,\n"
         "    \"frames_overflow\":%llu,\n    \"phases\":[",
-        options.write_shadow ? "ABBA" : "ABBA/BAAB", options.write_shadow ? "live_write_shadow" : "staging_dedup",
+        options.compact ? "ABCCBA" : options.write_shadow ? "ABBA" : "ABBA/BAAB", options.compact ? "compact_write_audit" : options.write_shadow ? "live_write_shadow" : "staging_dedup",
         options.automatic ? "true" : "false", options.warmup_seconds, options.settle_seconds, options.measure_seconds,
         requested ? "true" : "false", completed ? "true" : "false", aborted ? "true" : "false", run_id,
         static_cast<unsigned long long>(overflow));
@@ -603,7 +706,7 @@ void write_report(const char *directory) {
             "\"duration_ms\":%.6f,\"loops_per_second\":%.6f,\"p50_ms\":%.6f,\"p95_ms\":%.6f,\"p99_ms\":%.6f,"
             "\"publish_calls\":%llu,\"publish_bytes\":%llu,\"dedup_calls\":%llu,\"dedup_bytes\":%llu,"
             "\"excluded_intervals\":%llu,\"excluded_duration_ms\":%.6f}",
-            i ? "," : "", i, staging_dedup_order[i] ? (options.write_shadow ? "write_watch" : "dedup") : "baseline", p.complete ? "true" : "false",
+            i ? "," : "", i, options.compact ? capture_mode_name(phase_mode(i)) : staging_dedup_order[i] ? (options.write_shadow ? "write_watch" : "dedup") : "baseline", p.complete ? "true" : "false",
             static_cast<unsigned long long>(p.intervals), duration_ms,
             p.ticks ? double(p.intervals) * hz / p.ticks : 0,
             percentile(milliseconds, 0.50), percentile(milliseconds, 0.95), percentile(milliseconds, 0.99),
@@ -612,9 +715,15 @@ void write_report(const char *directory) {
             static_cast<unsigned long long>(p.excluded_intervals), 1000.0 * p.excluded_ticks / hz);
     }
     const auto summary = status_snapshot();
-    std::fprintf(file, "\n    ]\n  },\n  \"validation_revision\":3,\n"
+    std::fprintf(file, "\n    ]\n  },\n  \"validation_revision\":4,\n"
         "  \"capture_outcome\":\"%s\",\n  \"overlay_refresh_hz\":4,\n"
         "  \"overlay_completion_is_not_graphics_validation\":true", outcome_name(summary.outcome));
+    if (options.compact) std::fputs(
+        ",\n  \"capture_plan\":\"compact-1\",\n"
+        "  \"baseline_commit\":\"4101bf2cf13a21fdac1792caf26e34324166398b\",\n"
+        "  \"strict_reference_scope\":\"capture_only\",\n"
+        "  \"min_phase_samples\":50,\n  \"startup_matrix_repeated\":false", file);
+    if (options.compact) std::fprintf(file, ",\n  \"controls_complete\":%s", summary.controls_complete ? "true" : "false");
     if (options.write_shadow) write_shadow_report(file);
     std::fputs("\n}\n", file);
     const bool write_error = std::ferror(file) != 0;

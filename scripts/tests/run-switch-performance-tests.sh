@@ -29,3 +29,7 @@ python3 "$ROOT/scripts/tests/test_switch_render_core_spread.py"
 python3 "$ROOT/scripts/tests/test_switch_write_watch.py" --cxx "${CXX:-c++}"
 python3 "$ROOT/scripts/tests/test_switch_write_shadow_controller.py" --cxx "${CXX:-c++}"
 python3 "$ROOT/scripts/apply-switch-write-watch-hooks.py" --check-applied
+
+python3 "$ROOT/scripts/tests/test_switch_write_range.py" --cxx "${CXX:-c++}"
+python3 "$ROOT/scripts/tests/test_switch_observer_canaries.py" --cxx "${CXX:-c++}"
+python3 "$ROOT/scripts/tests/test_switch_compact_capture.py" --cxx "${CXX:-c++}"

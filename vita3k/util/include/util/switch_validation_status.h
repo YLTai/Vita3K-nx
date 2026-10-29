@@ -9,7 +9,7 @@
 namespace switch_validation {
 
 enum class Stage : uint8_t {
-    Disabled, Startup, Waiting, Warmup, Settling, Measuring, Paused, Interrupted, Complete
+    Disabled, Startup, Waiting, Warmup, Settling, Measuring, Paused, Interrupted, Complete, Blocked
 };
 enum class CaptureOutcome : uint8_t { Pending, Ready, Inconclusive, Invalid };
 
@@ -21,7 +21,12 @@ struct StatusSnapshot {
     bool automatic = false;
     bool deduplicate = false;
     bool write_shadow = false, watch_failed = false;
+    bool compact = false;
+    bool controls_complete = true;
+    char policy_letter = 'A';
     uint64_t watched_pages = 0, first_write_pages = 0, unobserved_changes = 0;
+    uint64_t exact_write_hits = 0, page_only_writes = 0, host_write_hits = 0, content_changes = 0, cache_changes = 0;
+    bool guard_budget_exhausted = false;
     bool restart_pending = false;
     uint32_t run_id = 0;
     uint32_t phase = 0; // 1-based while active; phase_count after completion.
@@ -70,9 +75,9 @@ inline HudText make_hud_text(const StatusSnapshot &s, uint64_t now_tick) {
     std::snprintf(text.samples.data(), text.samples.size(), "Samples: %llu | B uploads: %llu | Hash: FULL",
         static_cast<unsigned long long>(s.samples), static_cast<unsigned long long>(s.dedup_calls));
     if (s.write_shadow)
-        std::snprintf(text.samples.data(), text.samples.size(), "Pages: %llu | First writes: %llu | Unobserved: %llu | FULL Hash",
-            static_cast<unsigned long long>(s.watched_pages), static_cast<unsigned long long>(s.first_write_pages),
-            static_cast<unsigned long long>(s.unobserved_changes));
+        std::snprintf(text.samples.data(), text.samples.size(), "Pages:%llu | Exact:%llu | HLE:%llu | Cache changes:%llu | FULL Hash",
+            static_cast<unsigned long long>(s.watched_pages), static_cast<unsigned long long>(s.exact_write_hits),
+            static_cast<unsigned long long>(s.host_write_hits), static_cast<unsigned long long>(s.cache_changes));
     std::snprintf(text.action.data(), text.action.size(), "L+R+Y: start/restart | Keep the scene stable");
     std::snprintf(text.timing.data(), text.timing.size(), "Run %u | %u%% | Remaining %02llu:%02llu",
         s.run_id, s.progress_per_mille / 10,
@@ -83,7 +88,7 @@ inline HudText make_hud_text(const StatusSnapshot &s, uint64_t now_tick) {
         break;
     case Stage::Waiting:
         std::snprintf(text.title.data(), text.title.size(), "MEMORY VALIDATION | Ready to start");
-        std::snprintf(text.timing.data(), text.timing.size(), "Enter a repeatable heavy scene, then press L+R+Y");
+        std::snprintf(text.timing.data(), text.timing.size(), "Enter the test scene | L+R+Y once | 72s automatic capture");
         break;
     case Stage::Warmup:
         std::snprintf(text.title.data(), text.title.size(), "MEMORY VALIDATION | WARM-UP");
@@ -95,7 +100,7 @@ inline HudText make_hud_text(const StatusSnapshot &s, uint64_t now_tick) {
         text.tone = HudText::Tone::Running;
         std::snprintf(text.title.data(), text.title.size(), "MEMORY VALIDATION | %s | %u/%u %c",
             s.stage == Stage::Settling ? "SETTLING" : "MEASURING", s.phase, s.phase_count,
-            s.deduplicate ? 'B' : 'A');
+            s.compact ? s.policy_letter : s.deduplicate ? 'B' : 'A');
         std::snprintf(text.timing.data(), text.timing.size(), "%u%% | Phase %llus | Total remaining %02llu:%02llu",
             s.progress_per_mille / 10, static_cast<unsigned long long>(phase_left),
             static_cast<unsigned long long>(left / 60), static_cast<unsigned long long>(left % 60));
@@ -111,6 +116,12 @@ inline HudText make_hud_text(const StatusSnapshot &s, uint64_t now_tick) {
         std::snprintf(text.timing.data(), text.timing.size(), "Current run is invalid; partial results retained");
         std::snprintf(text.action.data(), text.action.size(), "L+R+Y: restart | Or exit normally and share report");
         break;
+    case Stage::Blocked:
+        text.tone = HudText::Tone::Error;
+        std::snprintf(text.title.data(), text.title.size(), "MEMORY VALIDATION | STARTUP CHECK FAILED");
+        std::snprintf(text.timing.data(), text.timing.size(), "No gameplay test needed; share the startup failure report");
+        std::snprintf(text.action.data(), text.action.size(), "EXIT GAME NORMALLY TO SAVE | Do not force-close");
+        break;
     case Stage::Complete:
         text.tone = s.outcome == CaptureOutcome::Ready ? HudText::Tone::Ready
             : s.outcome == CaptureOutcome::Invalid ? HudText::Tone::Error : HudText::Tone::Warning;
@@ -121,6 +132,10 @@ inline HudText make_hud_text(const StatusSnapshot &s, uint64_t now_tick) {
             s.outcome == CaptureOutcome::Invalid ? "A test or capture-quality check failed"
             : s.outcome == CaptureOutcome::Inconclusive ? (s.write_shadow ? "No observed texture coverage; share this report" : "No B uploads in at least one phase; no speed claim")
             : "All phases recorded (not proof of graphics correctness)");
+        if (s.write_shadow && !s.content_changes && s.outcome == CaptureOutcome::Ready) {
+            text.tone = HudText::Tone::Warning;
+            std::snprintf(text.timing.data(), text.timing.size(), "No comparable observer changes; share report, do not repeat");
+        }
         if (s.write_shadow && s.unobserved_changes && s.outcome != CaptureOutcome::Invalid) {
             text.tone = HudText::Tone::Warning;
             std::snprintf(text.timing.data(), text.timing.size(), "Unobserved changes captured; no need to repeat this run");

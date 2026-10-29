@@ -6,6 +6,7 @@
 
 #if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)
 
+#include <util/switch_write_watch.h>
 #include <dynarmic/interface/A32/a32.h>
 #include <dynarmic/interface/exclusive_monitor.h>
 
@@ -65,6 +66,7 @@ public:
     std::array<Mapping, kDataPages + 1> mappings{};
     Dynarmic::ExclusiveMonitor monitor{1};
     Dynarmic::A32::Jit *active_jit = nullptr;
+    switch_validation::watch::Table *observer = nullptr; // Isolated real-observer canaries only.
     uint64_t writes = 0;
     uint64_t reads = 0;
     uint64_t invalid_writes = 0;
@@ -235,6 +237,11 @@ private:
 
     template <typename T>
     T read(uint32_t address) {
+        if (observer) {
+            T value{};
+            observer->read(read_table->data(), address, &value, sizeof(T));
+            return value;
+        }
         ++reads;
         if (!valid(address, sizeof(T))) {
             ++invalid_reads;
@@ -248,6 +255,10 @@ private:
 
     template <typename T>
     void write(uint32_t address, T value) {
+        if (observer) {
+            observer->write(read_table->data(), address, &value, sizeof(T));
+            return;
+        }
         ++writes;
         if (!valid(address, sizeof(T))) {
             ++invalid_writes;
@@ -427,6 +438,149 @@ void run_correctness(MemoryFixture &memory) {
         "single writer only; no production HLE/GPU coherence, concurrent rearm, or exclusive-store claim");
 }
 
+// Real Dynarmic stores feed the SAME observer implementation as live gameplay.
+// Four-byte equality is collision-free for these deliberate word mutations;
+// these tests do not exercise Vulkan or claim concurrent Guest revocation.
+void run_observer_canaries(MemoryFixture &memory) {
+    namespace w = switch_validation::watch;
+    auto table = std::make_unique<w::Table>();
+    auto **writes = table->bind(memory.read_table->data());
+    if (!writes) {
+        switch_validation::record("write_watch_canary", "bind", "fail", "could not bind isolated observer");
+        return;
+    }
+    auto config = config_for(memory, TableMode::Mirror, true);
+    config.write_page_table = reinterpret_cast<decltype(config.write_page_table)>(writes);
+    Dynarmic::A32::Jit jit(config);
+    memory.observer = table.get();
+    struct Reset {
+        MemoryFixture &memory;
+        ~Reset() { memory.observer = nullptr; memory.active_jit = nullptr; }
+    } reset{memory};
+    memory.reset_bytes();
+    const auto word = [&](unsigned backing, unsigned offset) {
+        uint32_t value = 0;
+        std::memcpy(&value, memory.backing(backing) + offset, 4);
+        return value;
+    };
+    const auto inspect = [&](unsigned offset) {
+        const auto token = table->before(memory.read_table->data(), kDataBase + offset,
+            memory.backing(0) + offset, 4);
+        return table->after(token, word(0, offset));
+    };
+    const auto native_store = [&](uint32_t address, uint32_t value) {
+        memory.reset_events(); memory.prepare(jit, memory.store32, address);
+        jit.Regs()[1] = value; jit.Run();
+        return memory.clean_stop();
+    };
+    const auto record = [&](const char *name, bool ok, const char *detail) {
+        switch_validation::record("write_watch_canary", name, ok ? "pass" : "fail", detail);
+    };
+    table->phase(0, false, true);
+    inspect(128); inspect(132);
+    table->phase(6, true); // First-write design, same production observer.
+    inspect(128); inspect(132);
+    bool first_ok = native_store(kDataBase + 128, 7);
+    auto first_audit = inspect(128);
+    record("first_write_reopens_aliases", first_ok && first_audit.reason == w::HashReason::CpuWrite
+        && writes[kDataBase / kPageSize] && writes[kAliasBase / kPageSize],
+        "first-write policy catches one write and reopens both aliases");
+    first_ok = native_store(kAliasBase + 128, 8);
+    first_audit = inspect(128);
+    record("open_page_repeat_negative_control", first_ok && first_audit.reason == w::HashReason::Unobserved,
+        "expected blind spot after opening a page; must not be misreported as CPU-attributed");
+    table->phase(1, true, false, true);
+    inspect(128); inspect(132);
+    bool ok = native_store(kDataBase + 128, 11);
+    auto a = inspect(128);
+    record("native_exact_store", ok && a.reason == w::HashReason::CpuWrite && !writes[kDataBase / kPageSize],
+        "real JIT callback; exact four-byte resource; persistent guard remains closed");
+    ok = native_store(kAliasBase + 128, 22);
+    a = inspect(128);
+    record("native_repeat_alias_store", ok && a.reason == w::HashReason::CpuWrite
+        && table->snapshot().phases[1].watched_stores == 2 && !writes[kAliasBase / kPageSize],
+        "second store to same backing is observed without rearming");
+    ok = native_store(kAliasBase + 128, 22);
+    a = inspect(128);
+    record("native_same_value_store", ok && a.reason == w::HashReason::Unchanged
+        && table->snapshot().phases[1].watched_stores == 3,
+        "same-value write is seen but does not manufacture a content change");
+    uint32_t value = 33;
+    std::memcpy(memory.backing(0) + 128, &value, 4);
+    a = inspect(128);
+    record("raw_after_cpu_negative_control", a.reason == w::HashReason::Unobserved,
+        "intentional raw-pointer write; earlier CPU evidence must NOT mask this change");
+    ok = native_store(kDataBase, 44); // Same PAGE, outside both four-byte footprints.
+    value = 55; std::memcpy(memory.backing(0) + 132, &value, 4);
+    a = inspect(132);
+    record("page_neighbor_negative_control", ok && a.reason == w::HashReason::Unobserved
+        && table->snapshot().phases[1].page_only_stores == 1,
+        "adjacent page bytes are not evidence of a texture-content store");
+    value = 66; std::memcpy(memory.backing(0) + 128, &value, 4);
+    table->host_written(memory.backing(0) + 128, 4, w::HostWriter::Memcpy);
+    a = inspect(128);
+    record("host_notice_positive_control", a.reason == w::HashReason::HostNotice,
+        "explicit post-write notice; not a complete HLE/GPU coverage claim");
+    bool success = true;
+    table->exclusive<uint32_t>(memory.read_table->data(), kDataBase + 132, 77, 0, success);
+    const bool failed_cas = !success;
+    table->exclusive<uint32_t>(memory.read_table->data(), kDataBase + 132, 77, 55, success);
+    a = inspect(132);
+    record("observer_CAS_contract", failed_cas && success && a.reason == w::HashReason::CpuWrite,
+        "actual existing CAS primitive; failed CAS leaves no write evidence (not native STREX testing)");
+    // Exercise the actual observer->cache ledger discontinuity from the v3 capture.
+    table->phase(2, true, false, true);
+    a = inspect(128); // A fresh observer baseline; cached prior value is deliberately different.
+    table->cache_decision(a, 7, kDataBase + 128, 4, 1, 66, true);
+    record("cache_first_baseline_ledger", table->snapshot().cache.reasons[size_t(w::CacheReason::FirstBaseline)] == 1,
+        "cache change is recorded even when observer has no comparable previous Hash");
+    a = inspect(128);
+    table->cache_decision(a, 8, kDataBase + 128, 4, 65, 66, true);
+    record("cache_shared_history_ledger", table->snapshot().cache.reasons[size_t(w::CacheReason::DifferentBaseline)] == 1,
+        "different cache-slot history is not confused with unchanged backing history");
+    const auto stale = table->before(memory.read_table->data(), kDataBase + 128, memory.backing(0) + 128, 4);
+    table->publish(memory.read_table->data(), kDataBase / kPageSize,
+        reinterpret_cast<uint8_t *>(uintptr_t(memory.backing(3)) - kDataBase));
+    a = table->after(stale, 99);
+    record("remap_discards_inflight_hash", a.reason == w::HashReason::Raced
+        && table->snapshot().phases[2].discarded_tokens == 1,
+        "retired backing cannot train the replacement mapping baseline");
+    // Restore fixture before its original matrix reuses the source table.
+    table->publish(memory.read_table->data(), kDataBase / kPageSize,
+        reinterpret_cast<uint8_t *>(uintptr_t(memory.backing(0)) - kDataBase));
+    table->phase(0, false);
+    const auto palette = [&] {
+        const auto t = table->before(memory.read_table->data(), kDataBase + 128,
+            memory.backing(0) + 128, 4, memory.backing(1) + 64, 4);
+        return table->after(t, word(0, 128) ^ word(1, 64));
+    };
+    const auto half = [&](uint32_t address, uint8_t *host) {
+        uint16_t value = 0; std::memcpy(&value, host, 2);
+        const auto t = table->before(memory.read_table->data(), address, host, 2);
+        return table->after(t, value);
+    };
+    palette();
+    half(kDataBase + kPageSize - 2, memory.backing(0) + kPageSize - 2);
+    half(kDataBase + kPageSize, memory.backing(1));
+    table->phase(7, true, false, true);
+    palette();
+    half(kDataBase + kPageSize - 2, memory.backing(0) + kPageSize - 2);
+    half(kDataBase + kPageSize, memory.backing(1));
+    ok = native_store(kDataBase + kPageSize + 64, 0x12345678);
+    a = palette();
+    record("native_palette_only_store", ok && a.reason == w::HashReason::CpuWrite,
+        "unchanged pixels and changed separate palette; real JIT writes palette backing");
+    ok = native_store(kDataBase + kPageSize - 2, 0x12345678);
+    const auto lo = half(kDataBase + kPageSize - 2, memory.backing(0) + kPageSize - 2);
+    const auto hi = half(kDataBase + kPageSize, memory.backing(1));
+    record("native_crosspage_exact_ranges", ok && lo.reason == w::HashReason::CpuWrite
+        && hi.reason == w::HashReason::CpuWrite && memory.backing(0)[kPageSize] == 0xa5,
+        "two exact ranges on deliberately noncontiguous host pages; guard untouched");
+    table->phase(w::no_index, false);
+    record("canary_cleanup", writes[kDataBase / kPageSize] && writes[kAliasBase / kPageSize],
+        "all observer guards open before JIT/table destruction; game memory was never used");
+}
+
 void run_config_rejections(MemoryFixture &memory) {
     for (bool missing_read_table : {false, true}) {
         bool rejected = false;
@@ -520,7 +674,7 @@ void matrix_sample(MemoryFixture &memory, Dynarmic::A32::Jit &jit, TableMode mod
     switch_validation::record("store_matrix_v2", name, passed ? "pass" : "fail", detail, elapsed, kBenchStores);
 }
 
-void run_bench_matrix(MemoryFixture &memory) {
+[[maybe_unused]] void run_bench_matrix(MemoryFixture &memory) {
     switch_validation::record("store_matrix_v2", "scope", "pass",
         "100 samples: two boundary policies x two allocation/compile orders x five Latin rows x five modes; "
         "open/first-write/preopened share one JIT; CPU tick bracket includes query overhead; "
@@ -562,10 +716,12 @@ void run_jit_memory_validation() {
             MemoryFixture memory;
             run_config_rejections(memory);
             run_correctness(memory);
-            run_bench_matrix(memory);
+            run_observer_canaries(memory);
+            switch_validation::record("capture_plan", "skip_repeated_matrix", "skip",
+                "matrix already validated in hardware capture 1793256692; run only correctness and observer controls");
         }
         switch_validation::record("jit_selftest", "allocation_scope", "pass",
-            "isolated 16 MiB tables released; at most three 8 MiB code slices live during matrix; no real Guest mappings changed; caller closes idle shared code pool");
+            "isolated tables released; one 8 MiB JIT code slice live at a time; no real Guest mappings changed; caller closes idle shared code pool");
     } catch (const std::bad_alloc &) {
         switch_validation::record("jit_selftest", "allocation", "skip",
             "insufficient isolated page-table/backing/JIT memory; production configuration unchanged");

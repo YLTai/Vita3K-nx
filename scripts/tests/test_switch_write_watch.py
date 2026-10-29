@@ -25,7 +25,7 @@ def main():
         except ValueError: pass
         else: raise AssertionError('ambiguous / missing anchor was accepted')
     data = json.loads((ROOT/'patches/experiments/switch-live-write-watch.json').read_text())
-    assert len(data['files']) == 3
+    assert len(data['files']) == 5
     all_new = '\n'.join(r['new'] for f in data['files'] for r in f['replacements'])
     for required in ['MappingGuard', 'publish_page_entry', 'live_detach_table', 'live_read', 'live_write(',
                      'live_exclusive', 'config.write_page_table', '16 | 32 | 64 | 128', 'live_hash_begin', 'live_hash_end', 'palette_count']:

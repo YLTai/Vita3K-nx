@@ -6,7 +6,7 @@ on:
     paths-ignore:
       - '**.md'
   pull_request:
-    branches: [ci/switch-build]
+    branches: [ci/switch-build, baseline/switch-capture-1793256692]
     paths-ignore:
       - '**.md'
   # GitHub only exposes this button once the workflow is on the default branch.
@@ -195,9 +195,7 @@ jobs:
           cp switch-launcher/Vita3K.nro build-switch/artifacts/Vita3K.nro
           cp build-switch/Vita3K.nro build-switch/artifacts/core/Vita3K.nro
           cp docs/SWITCH_MEMORY_VALIDATION.md build-switch/artifacts/READ-MEMORY-VALIDATION.md
-          cp scripts/analyze-switch-tracelab.mjs build-switch/artifacts/
-          cp scripts/analyze-switch-memory-v2.py build-switch/artifacts/
-          cp scripts/analyze-switch-memory-v3.py build-switch/artifacts/
+          cp scripts/analyze-switch-capture.py build-switch/artifacts/
           cp build-switch-preflight/write-watch-hooks.json build-switch/artifacts/
           cp scripts/tracelab-memory-validation.cfg build-switch/artifacts/tracelab-memory-validation.cfg
           {
