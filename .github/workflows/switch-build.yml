@@ -113,7 +113,9 @@ jobs:
 
       # Check pinned submodules before spending time building the SDKs.
       - name: Apply Switch submodule patches
-        run: bash scripts/apply-switch-submodule-patches.sh
+        run: |
+          bash scripts/apply-switch-submodule-patches.sh
+          python3 scripts/apply-switch-write-watch-hooks.py
 
       - name: Validate language catalog generation
         run: |
@@ -195,6 +197,8 @@ jobs:
           cp docs/SWITCH_MEMORY_VALIDATION.md build-switch/artifacts/READ-MEMORY-VALIDATION.md
           cp scripts/analyze-switch-tracelab.mjs build-switch/artifacts/
           cp scripts/analyze-switch-memory-v2.py build-switch/artifacts/
+          cp scripts/analyze-switch-memory-v3.py build-switch/artifacts/
+          cp build-switch-preflight/write-watch-hooks.json build-switch/artifacts/
           cp scripts/tracelab-memory-validation.cfg build-switch/artifacts/tracelab-memory-validation.cfg
           {
             printf 'Vita3K commit: %s\n' "$(git rev-parse HEAD)"

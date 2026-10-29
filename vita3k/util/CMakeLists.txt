@@ -33,6 +33,15 @@ endif()
 target_compile_definitions(util PRIVATE $<$<CONFIG:Debug,RelWithDebInfo>:TRACY_ENABLE>)
 
 if(SWITCH)
+    if(SWITCH_TRACELAB)
+        find_program(SWITCH_HOOK_PYTHON NAMES python3 REQUIRED)
+        execute_process(COMMAND "${SWITCH_HOOK_PYTHON}" "${CMAKE_SOURCE_DIR}/scripts/apply-switch-write-watch-hooks.py" --check-applied
+            RESULT_VARIABLE SWITCH_HOOK_RESULT)
+        if(NOT SWITCH_HOOK_RESULT EQUAL 0)
+            message(FATAL_ERROR "Apply pinned experiment hooks: python3 scripts/apply-switch-write-watch-hooks.py")
+        endif()
+        target_compile_definitions(util PRIVATE VITA3K_SWITCH_WRITE_SHADOW_DEFAULT=1)
+    endif()
     # Changing the build SHA must not invalidate every cached translation unit.
     # Embed provenance only in the two report-producing sources.
     if(SWITCH_TRACELAB AND VITA3K_MEMORY_VALIDATION_REVISION)

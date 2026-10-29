@@ -20,6 +20,8 @@ struct StatusSnapshot {
     CaptureOutcome outcome = CaptureOutcome::Pending;
     bool automatic = false;
     bool deduplicate = false;
+    bool write_shadow = false, watch_failed = false;
+    uint64_t watched_pages = 0, first_write_pages = 0, unobserved_changes = 0;
     bool restart_pending = false;
     uint32_t run_id = 0;
     uint32_t phase = 0; // 1-based while active; phase_count after completion.
@@ -67,6 +69,10 @@ inline HudText make_hud_text(const StatusSnapshot &s, uint64_t now_tick) {
         s.passed, s.failed, s.skipped);
     std::snprintf(text.samples.data(), text.samples.size(), "Samples: %llu | B uploads: %llu | Hash: FULL",
         static_cast<unsigned long long>(s.samples), static_cast<unsigned long long>(s.dedup_calls));
+    if (s.write_shadow)
+        std::snprintf(text.samples.data(), text.samples.size(), "Pages: %llu | First writes: %llu | Unobserved: %llu | FULL Hash",
+            static_cast<unsigned long long>(s.watched_pages), static_cast<unsigned long long>(s.first_write_pages),
+            static_cast<unsigned long long>(s.unobserved_changes));
     std::snprintf(text.action.data(), text.action.size(), "L+R+Y: start/restart | Keep the scene stable");
     std::snprintf(text.timing.data(), text.timing.size(), "Run %u | %u%% | Remaining %02llu:%02llu",
         s.run_id, s.progress_per_mille / 10,
@@ -113,8 +119,12 @@ inline HudText make_hud_text(const StatusSnapshot &s, uint64_t now_tick) {
             : s.outcome == CaptureOutcome::Invalid ? "CHECK REPORT" : "INCONCLUSIVE");
         std::snprintf(text.timing.data(), text.timing.size(), "%s",
             s.outcome == CaptureOutcome::Invalid ? "A test or capture-quality check failed"
-            : s.outcome == CaptureOutcome::Inconclusive ? "No B uploads in at least one phase; no speed claim"
+            : s.outcome == CaptureOutcome::Inconclusive ? (s.write_shadow ? "No observed texture coverage; share this report" : "No B uploads in at least one phase; no speed claim")
             : "All phases recorded (not proof of graphics correctness)");
+        if (s.write_shadow && s.unobserved_changes && s.outcome != CaptureOutcome::Invalid) {
+            text.tone = HudText::Tone::Warning;
+            std::snprintf(text.timing.data(), text.timing.size(), "Unobserved changes captured; no need to repeat this run");
+        }
         std::snprintf(text.action.data(), text.action.size(), "EXIT GAME NORMALLY TO SAVE | Do not force-close");
         break;
     default:
