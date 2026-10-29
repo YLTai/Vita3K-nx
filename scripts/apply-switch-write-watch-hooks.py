@@ -14,7 +14,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RECIPE = ROOT / 'patches/experiments/switch-live-write-watch.json'
-RECIPES = (RECIPE, ROOT / 'patches/experiments/switch-heap-fault.json')
+RECIPES = (RECIPE, ROOT / 'patches/experiments/switch-heap-fault.json',
+           ROOT / 'patches/experiments/switch-direct-heap.json')
 
 
 def blob_sha(data):
@@ -35,9 +36,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check-applied', action='store_true')
     args = parser.parse_args()
-    specs = [item for path in RECIPES for item in json.loads(path.read_text())['files']]
-    if len({item['path'] for item in specs}) != len(specs):
-        raise ValueError('Two recipes must not own the same integration source')
+    # An ordered extension must pin the SAME original blob. Merge anchors and
+    # transform once from that original; never patch an arbitrary intermediate.
+    merged = {}
+    for recipe in RECIPES:
+        for item in json.loads(recipe.read_text())['files']:
+            key = item['path']
+            if key in merged:
+                if merged[key]['base_blob'] != item['base_blob']:
+                    raise ValueError(f'{key}: extension changed the original blob pin')
+                merged[key]['replacements'].extend(item['replacements'])
+            else:
+                merged[key] = dict(item, replacements=list(item['replacements']))
+    specs = list(merged.values())
     pending, provenance = [], []
     for spec in specs:
         rel = Path(spec['path'])

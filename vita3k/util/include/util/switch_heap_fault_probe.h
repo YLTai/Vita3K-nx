@@ -21,6 +21,8 @@ bool heap_fault_probe_enabled();
 // All ranges must be private page-aligned allocations, not Guest or GPU memory.
 bool heap_fault_arm(void *begin, size_t size, uintptr_t expected_pc = 0) noexcept;
 HeapFaultResult heap_fault_disarm() noexcept;
+// Owner-thread observation only; does not change permissions or consume dirtiness.
+HeapFaultResult heap_fault_peek() noexcept;
 void run_heap_fault_probe();
 bool heap_fault_jit_allowed();
 bool heap_fault_checkpoint(const char *test, bool armed) noexcept;
@@ -34,6 +36,7 @@ void copy_heap_fault_checkpoint(const char *directory) noexcept;
 inline bool heap_fault_probe_enabled() { return false; }
 inline bool heap_fault_arm(void *, size_t, uintptr_t = 0) noexcept { return false; }
 inline HeapFaultResult heap_fault_disarm() noexcept { return {}; }
+inline HeapFaultResult heap_fault_peek() noexcept { return {}; }
 inline void run_heap_fault_probe() {}
 inline bool heap_fault_jit_allowed() { return false; }
 inline bool heap_fault_checkpoint(const char *, bool) noexcept { return false; }

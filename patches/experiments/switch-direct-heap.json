@@ -1,0 +1,182 @@
+{
+  "base_commit": "806c738e3db7c3095a566172f338ad157a9e64e6",
+  "purpose": "Ordered extensions sharing the exact original blob pins; no fuzzy patching.",
+  "files": [
+    {
+      "path": "vita3k/mem/src/mem.cpp",
+      "base_blob": "69de52e101fbc5032fb399063d0297eb1e2cb6f0",
+      "replacements": [
+        {
+          "old": "#include <util/switch_write_watch_api.h>",
+          "new": "#include <util/switch_write_watch_api.h>\n#include <util/switch_direct_heap_platform.h>"
+        },
+        {
+          "old": "static bool g_switch_pool_ready = false;",
+          "new": "static bool g_switch_pool_ready = false;\nstatic bool g_switch_direct_heap = false;"
+        },
+        {
+          "old": "    u64 stack_a = 0, stack_s = 0;",
+          "new": "#if defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::direct_heap::requested()) {\n        u64 total = 0, heap_base = 0;\n        svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);\n        svcGetInfo(&heap_base, InfoType_HeapRegionAddress, CUR_PROCESS_HANDLE, 0);\n        const auto heap_end = reinterpret_cast<uintptr_t>(fake_heap_end);\n        const auto bytes = switch_validation::direct_heap::budget(total,\n            heap_base && heap_end > heap_base ? heap_end - heap_base : 0);\n        if (!bytes || !switch_pool_init(bytes, static_cast<uint32_t>(TOTAL_MEM_SIZE / STANDARD_PAGE_SIZE))) {\n            LOG_CRITICAL(\"Direct Heap pool unavailable; no silent Stack fallback\");\n            return false;\n        }\n        g_switch_direct_heap = true;\n        g_switch_base = g_switch_pool;\n        g_switch_host_size = bytes;\n        if (!switch_validation::direct_heap::activate(g_switch_pool, bytes)) {\n            g_switch_pool_cleanup_failed = true;\n            LOG_CRITICAL(\"Direct Heap query failed; retain pool for verified cleanup\");\n            return false;\n        }\n        LOG_INFO(\"Direct Heap guest backing: {} MiB at {}; no Stack alias reservation\", bytes >> 20, fmt::ptr(g_switch_pool));\n        return true;\n    }\n#endif\n    u64 stack_a = 0, stack_s = 0;"
+        },
+        {
+          "old": "const Result ret = svcMapMemory(try_host, try_src, static_cast<size_t>(need) * STANDARD_PAGE_SIZE);",
+          "new": "const Result ret = g_switch_direct_heap\n                ? switch_validation::direct_heap::commit(try_host, try_src, static_cast<size_t>(need) * STANDARD_PAGE_SIZE)\n                : svcMapMemory(try_host, try_src, static_cast<size_t>(need) * STANDARD_PAGE_SIZE);"
+        },
+        {
+          "old": "            switch_pool_free_run(run, need);\n            // Walk the destination;",
+          "new": "            switch_pool_free_run(run, need);\n            if (g_switch_direct_heap) break;\n            // Walk the destination;"
+        },
+        {
+          "old": "const Result rc = svcUnmapMemory(host, src, static_cast<size_t>(runlen) * 0x1000);",
+          "new": "const Result rc = g_switch_direct_heap\n            ? switch_validation::direct_heap::recycle(host, src, static_cast<size_t>(runlen) * 0x1000)\n            : svcUnmapMemory(host, src, static_cast<size_t>(runlen) * 0x1000);"
+        },
+        {
+          "old": "const Result rc = svcUnmapMemory(host, src, runlen * 0x1000);",
+          "new": "const Result rc = g_switch_direct_heap\n                ? switch_validation::direct_heap::recycle(host, src, runlen * 0x1000)\n                : svcUnmapMemory(host, src, runlen * 0x1000);"
+        },
+        {
+          "old": "    if (g_switch_pool) {\n        free(g_switch_pool);",
+          "new": "    if (g_switch_pool) {\n        if (g_switch_direct_heap && !switch_validation::direct_heap::writable_private(g_switch_pool, g_switch_host_size)) {\n            ++switch_validation::direct_heap::state.errors;\n            g_switch_pool_cleanup_failed = true;\n            LOG_ERROR(\"Direct Heap pool retained: protected or externally referenced pages remain\");\n            return false;\n        }\n        free(g_switch_pool);"
+        },
+        {
+          "old": "    g_switch_pool_ready = false;\n    g_switch_pool_cleanup_failed = false;",
+          "new": "    g_switch_pool_ready = false;\n    g_switch_direct_heap = false;\n    g_switch_pool_cleanup_failed = false;"
+        },
+        {
+          "old": "    svcSetMemoryPermission(state.memory.get(), state.host_page_size, Perm_None);",
+          "new": "    if (g_switch_direct_heap) {\n        // Null guest address is invalid via the PTE, not a protected allocator\n        // page. Do not leave a PROT_NONE Heap page behind for free()/chainload.\n        publish_page_entry(state, 0, SWITCH_UNBACKED_PAGE);\n    } else {\n        svcSetMemoryPermission(state.memory.get(), state.host_page_size, Perm_None);\n    }"
+        },
+        {
+          "old": "// Access-violation-driven features (fault-based lazy commit, GPU write-protection\n// sync) are unavailable \u2014 memory is committed explicitly at allocation time.",
+          "new": "// TraceLab can instead keep this same pool in Heap and bypass Stack aliases.\n// Live Guest protection remains disabled; only isolated fault controls use RO."
+        },
+        {
+          "old": "    if (!aliases_released) {\n        LOG_ERROR(\"Guest page-table pool retained because one or more aliases are still live\");",
+          "new": "    if (!aliases_released) {\n        g_switch_pool_cleanup_failed = true;\n        LOG_ERROR(\"Guest page-table pool retained because one or more aliases are still live\");"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/src/switch_heap_fault_probe.cpp",
+      "base_blob": "ed8e98bcd25abf7120039821800ed324a94711a4",
+      "replacements": [
+        {
+          "old": "HeapFaultResult heap_fault_disarm() noexcept {",
+          "new": "HeapFaultResult heap_fault_peek() noexcept {\n    // Only the owner thread calls this between synchronous writes. No reset:\n    // dirty evidence survives until explicit disarm/rearm by that owner.\n    if (auto *slot = own_slot()) return slot->result;\n    HeapFaultResult r; r.last_rc = bad_state; return r;\n}\n\nHeapFaultResult heap_fault_disarm() noexcept {"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/renderer/src/texture/cache.cpp",
+      "base_blob": "42971a44b2d22f2663f29561d4aba2b43b2535d5",
+      "replacements": [
+        {
+          "old": "#include <util/switch_content_compare.h>",
+          "new": "#include <util/switch_content_compare.h>\n#include <util/switch_direct_heap_platform.h>\n#include <util/switch_protected_cache_probe.h>"
+        },
+        {
+          "old": "    // Every byte is checked on each call. B independently verifies and returns",
+          "new": "    switch_validation::run_protected_cache_probe(&hash_data);\n    switch_validation::direct_heap::observe(data.address() ? data.get(mem) : nullptr, data.address() ? texture_size : 0);\n    if (palette_count)\n        switch_validation::direct_heap::observe(get_texture_palette(texture, mem), palette_count * sizeof(uint32_t));\n    // Every byte is checked on each call. B independently verifies and returns"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/src/switch_memory_validation.cpp",
+      "base_blob": "e805efbd80f3880ab8561fc46289dedc5dcff565",
+      "replacements": [
+        {
+          "old": "#include <util/switch_heap_fault_probe.h>",
+          "new": "#include <util/switch_heap_fault_probe.h>\n#include <util/switch_direct_heap.h>"
+        },
+        {
+          "old": "    options = read_options();\n    content_memo.reset();",
+          "new": "    options = read_options();\n    direct_heap::begin_session();\n    content_memo.reset();"
+        },
+        {
+          "old": "    if (options.heap_fault) {\n        completed = true; public_state.store(9, std::memory_order_release);\n        return; // Startup tests are already finished. No 72-second static run.\n    }",
+          "new": "    if (options.heap_fault) {\n        direct_heap::frame(tick, armGetSystemTickFreq());\n        const auto topology = direct_heap::snapshot();\n        completed = !topology.active || topology.finished || topology.errors;\n        public_state.store(completed ? 9 : 1, std::memory_order_release);\n        return; // One automatic 30s real-Guest topology window; no A/B speed claim.\n    }"
+        },
+        {
+          "old": "    if (options.heap_fault) {\n        out.stage = Stage::Complete; out.progress_per_mille = 1000; out.outcome = CaptureOutcome::Ready;\n    }",
+          "new": "    if (options.heap_fault) {\n        const auto topology = direct_heap::snapshot();\n        out.direct_guest = topology.active;\n        out.direct_ranges = topology.ranges;\n        out.direct_errors = topology.errors;\n        out.direct_pool_mib = topology.pool_bytes >> 20;\n        out.samples = topology.frames;\n        out.stage = completed ? Stage::Complete : Stage::Measuring;\n        out.total_ms = topology.active ? 30000 : 0;\n        out.remaining_ms = completed ? 0 : topology.remaining_ms;\n        out.progress_per_mille = completed ? 1000 : static_cast<uint32_t>(std::min<uint64_t>(1000, topology.elapsed_ms / 30));\n        out.outcome = !completed ? CaptureOutcome::Pending : topology.errors ? CaptureOutcome::Invalid\n            : !topology.active || direct_heap::ready(topology) ? CaptureOutcome::Ready : CaptureOutcome::Inconclusive;\n    }"
+        },
+        {
+          "old": "out.controls_complete = options.heap_fault ? heap_control_mask == 3 :",
+          "new": "out.controls_complete = options.heap_fault ? heap_control_mask == 3\n        && (!direct_heap::state.active.load() || direct_heap::state.cache_passed.load()) :"
+        },
+        {
+          "old": "\\\"capture_plan\\\":\\\"heap-fault-1\\\"",
+          "new": "\\\"capture_plan\\\":\\\"heap-fault-2-direct\\\""
+        },
+        {
+          "old": "            \"  \\\"gameplay_benchmark\\\":false,\\n  \\\"snapshot_candidate_enabled\\\":false,\\n  \\\"timebase_hz\\\":%llu,\\n  \\\"tests_dropped\\\":%llu,\\n  \\\"tests\\\":[\",\n            static_cast<unsigned long long>(hz), static_cast<unsigned long long>(lost_results.load()));",
+          "new": "            \"  \\\"gameplay_benchmark\\\":false,\\n  \\\"snapshot_candidate_enabled\\\":false,\\n  \\\"timebase_hz\\\":%llu,\\n  \\\"tests_dropped\\\":%llu,\\n  \\\"guest_backing\\\":\",\n            static_cast<unsigned long long>(hz), static_cast<unsigned long long>(lost_results.load()));\n        direct_heap::write_json(file);\n        std::fputs(\",\\n  \\\"tests\\\":[\", file);"
+        },
+        {
+          "old": "            const bool ready = heap_control_mask == 3 && !test_failed && !lost_results.load();\n            std::fprintf(file, \"\\n  ],\\n  \\\"controls_complete\\\":%s,\\n  \\\"capture_outcome\\\":\\\"%s\\\",\\n\"\n                \"  \\\"scope\\\":\\\"private CPU Heap, original-PC retry and real JIT; no all-writer/GPU/coherence claim\\\"\\n}\\n\",\n                heap_control_mask == 3 ? \"true\" : \"false\", ready ? \"ready\" : \"invalid\");",
+          "new": "            const auto topology = direct_heap::snapshot();\n            const bool controls = heap_control_mask == 3 && (!topology.active || direct_heap::state.cache_passed.load());\n            const bool valid = controls && !test_failed && !lost_results.load() && !topology.errors;\n            const char *outcome = !valid ? \"invalid\" : topology.active && !direct_heap::ready(topology) ? \"inconclusive\" : \"ready\";\n            std::fprintf(file, \"\\n  ],\\n  \\\"controls_complete\\\":%s,\\n  \\\"capture_outcome\\\":\\\"%s\\\",\\n\"\n                \"  \\\"scope\\\":\\\"real Guest Direct Heap topology and isolated no-scan controls; live Guest Hash retained; no GPU/IPC/concurrent-rearm proof\\\"\\n}\\n\",\n                controls ? \"true\" : \"false\", outcome);"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/switch_validation_status.h",
+      "base_blob": "d8f950aa3a9d4d563284584063a0fc373ac7953a",
+      "replacements": [
+        {
+          "old": "    bool heap_fault = false, heap_import_done = false, heap_import_ro = false;",
+          "new": "    bool heap_fault = false, heap_import_done = false, heap_import_ro = false;\n    bool direct_guest = false;\n    uint64_t direct_ranges = 0, direct_errors = 0, direct_pool_mib = 0;"
+        },
+        {
+          "old": "    if (s.heap_fault) {\n        const bool done = s.stage == Stage::Complete;",
+          "new": "    if (s.heap_fault && s.direct_guest) {\n        const bool done = s.stage == Stage::Complete;\n        const bool ready = done && s.controls_complete && !s.failed && !s.results_dropped && s.outcome == CaptureOutcome::Ready;\n        text.tone = !done ? HudText::Tone::Running : ready ? HudText::Tone::Ready : HudText::Tone::Warning;\n        std::snprintf(text.title.data(), text.title.size(), \"DIRECT HEAP | %s\", !done ? \"GAME VALIDATION\"\n            : ready ? \"DONE - REPORT READY\" : \"DONE - CHECK REPORT\");\n        std::snprintf(text.timing.data(), text.timing.size(), \"%u%% | Remaining %llus | Pool %llu MiB | No game Hash skip\",\n            s.progress_per_mille / 10, (unsigned long long)left, (unsigned long long)s.direct_pool_mib);\n        std::snprintf(text.samples.data(), text.samples.size(), \"Frames:%llu | Input ranges:%llu | Backing errors:%llu | GPU:%s\",\n            (unsigned long long)s.samples, (unsigned long long)s.direct_ranges, (unsigned long long)s.direct_errors,\n            !s.heap_import_done ? \"not exercised\" : s.heap_import_ro ? \"RO allowed\" : \"RO denied/report\");\n        std::snprintf(text.action.data(), text.action.size(), \"%s\", done\n            ? \"EXIT GAME NORMALLY TO SAVE | Share this run; do not repeat\"\n            : \"Play/load normally | Automatic 30s window | No button required\");\n        return text;\n    }\n    if (s.heap_fault) {\n        const bool done = s.stage == Stage::Complete;"
+        }
+      ]
+    },
+    {
+      "path": "scripts/analyze-switch-capture.py",
+      "base_blob": "9cfa77fd4be7b2a7fd8ea6f58c9bfaf638844bef",
+      "replacements": [
+        {
+          "old": "if data.get(\"capture_plan\") == \"heap-fault-1\":",
+          "new": "if data.get(\"capture_plan\") in (\"heap-fault-1\", \"heap-fault-2-direct\"):"
+        },
+        {
+          "old": "return dict(capture_plan='heap-fault-1', title=data.get('title'),",
+          "new": "return dict(capture_plan=data.get('capture_plan'), title=data.get('title'),\n                guest_backing=data.get('guest_backing'),\n                protected_cache_controls=[t for t in tests if t.get('suite') == 'heap_cache'],\n                protected_cache_controls_passed=any(t.get('suite') == 'heap_cache' and t.get('name') == 'controls_complete' and t.get('status') == 'pass' for t in tests),\n                no_game_hash_skip=True,"
+        },
+        {
+          "old": "    hz = data.get('timebase_hz', 0)\n    timing = next((t for t in tests if t.get('name') == 'rearm_64'), {})",
+          "new": "    cache_tests = [t for t in tests if t.get('suite') == 'heap_cache']\n    cache_required = {'initial_baseline','clean_512_no_scan','pixel_first','pixel_middle','pixel_last',\n        'palette_only','cross_page_store','host_memset','same_value_write','same_page_outside_input',\n        'same_address_new_lifetime','post_timing_audit','controls_complete'}\n    cache_ok = all(sum(t.get('name') == name and t.get('status') == 'pass' for t in cache_tests) == 1\n        and sum(t.get('name') == name for t in cache_tests) == 1 for name in cache_required)\n    cache_ok = cache_ok and not any(t.get('status') == 'fail' for t in cache_tests)\n    topology = data.get('guest_backing', {})\n    if topology.get('active'):\n        if not cache_ok: issues.append('Missing, duplicate or failed isolated no-scan controls')\n        if not topology.get('finished') or topology.get('frames',0) < 120 or not topology.get('input_ranges'):\n            issues.append('Incomplete Direct Heap gameplay window or no texture inputs; share once, no blind repeat')\n        if topology.get('errors'): issues.append('Backing retained after permission/lifetime validation failure')\n        if topology.get('game_hash_skipping') is not False or topology.get('game_pages_protected') is not False:\n            issues.append('Unexpected live Guest tracking scope')\n    hz = data.get('timebase_hz', 0)\n    timing = next((t for t in tests if t.get('name') == 'rearm_64'), {})"
+        },
+        {
+          "old": "protected_cache_controls_passed=any(t.get('suite') == 'heap_cache' and t.get('name') == 'controls_complete' and t.get('status') == 'pass' for t in tests),",
+          "new": "protected_cache_controls_passed=cache_ok,"
+        },
+        {
+          "old": "'Original game mappings and ordinary Hash policy are unchanged. Share one report, not another static scene capture.'",
+          "new": "'Direct Heap changes Guest host backing only when active; game Hash remains enabled. Scratch timings are not gameplay gains.'"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/run-switch-performance-tests.sh",
+      "base_blob": "5810c5ce63221fa1e9539e5196b773c96c71345c",
+      "replacements": [
+        {
+          "old": "python3 \"$ROOT/scripts/tests/test_switch_heap_fault.py\" --cxx \"${CXX:-c++}\"",
+          "new": "python3 \"$ROOT/scripts/tests/test_switch_heap_fault.py\" --cxx \"${CXX:-c++}\"\npython3 \"$ROOT/scripts/tests/test_switch_direct_heap.py\" --cxx \"${CXX:-c++}\""
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/test_switch_heap_fault.py",
+      "base_blob": "548bb8190f096d005070ba77de1dda5f42f2fecd",
+      "replacements": [
+        {
+          "old": "assert report['capture_plan']=='heap-fault-1' and not report['gameplay_benchmark']",
+          "new": "assert report['capture_plan'] in ('heap-fault-1','heap-fault-2-direct') and not report['gameplay_benchmark']"
+        }
+      ]
+    }
+  ]
+}
