@@ -63,6 +63,13 @@ int main(){
 }
 '''
 SDK_CPP = r'''
+// Match vita3k/vkutil/include/vkutil/vkutil.h on Switch. The dispatch
+// table is dynamic; the desktop dlopen/LoadLibrary helper is NOT used.
+#define VK_USE_PLATFORM_VI_NN
+#define VK_NO_PROTOTYPES
+#define VULKAN_HPP_NO_CONSTRUCTORS
+#define VULKAN_HPP_NO_SPACESHIP_OPERATOR
+#define VULKAN_HPP_ENABLE_DYNAMIC_LOADER_TOOL 0
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
 #include <vulkan/vulkan.hpp>
 #include <util/switch_direct_heap.h>
