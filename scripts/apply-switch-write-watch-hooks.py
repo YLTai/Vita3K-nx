@@ -14,6 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RECIPE = ROOT / 'patches/experiments/switch-live-write-watch.json'
+RECIPES = (RECIPE, ROOT / 'patches/experiments/switch-heap-fault.json')
 
 
 def blob_sha(data):
@@ -34,9 +35,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check-applied', action='store_true')
     args = parser.parse_args()
-    recipe = json.loads(RECIPE.read_text())
+    specs = [item for path in RECIPES for item in json.loads(path.read_text())['files']]
+    if len({item['path'] for item in specs}) != len(specs):
+        raise ValueError('Two recipes must not own the same integration source')
     pending, provenance = [], []
-    for spec in recipe['files']:
+    for spec in specs:
         rel = Path(spec['path'])
         if rel.is_absolute() or '..' in rel.parts:
             raise ValueError('unsafe recipe path')
@@ -60,8 +63,9 @@ def main():
     if not args.check_applied:
         dest = ROOT / 'build-switch-preflight/write-watch-hooks.json'
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(json.dumps(dict(recipe_sha256=hashlib.sha256(RECIPE.read_bytes()).hexdigest(),
-                                       files=provenance), indent=2) + '\n')
+        dest.write_text(json.dumps(dict(recipe_sha256=hashlib.sha256(b''.join(p.read_bytes() for p in RECIPES)).hexdigest(),
+            recipes=[dict(path=p.relative_to(ROOT).as_posix(), sha256=hashlib.sha256(p.read_bytes()).hexdigest()) for p in RECIPES],
+            files=provenance), indent=2) + '\n')
     print('Live write-watch hooks: exact pinned source and compiled identities verified')
 
 

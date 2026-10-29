@@ -1,59 +1,81 @@
-# 一次采集：完整 Hash、逐字节审计、逐字节比较
+# 当前实验：私有 Heap 写保护异常恢复，一次启动完成
 
-当前实验 `content-1` 在 PR #15 的实测提交 `58964c1e` 上继续修改，不回到已关闭的 PR #13。
+## 为什么结束上一轮
 
-## 为什么不再重复写入观察
+实机 capture `1793271342`（源提交 `1490a2fc`）中，完整字节快照比较
+C 为 7.412535 Loop/s，完整 Hash A 为 10.133981 Loop/s，吞吐下降 26.855%。
+B 的 415,781 次逐次审计无差异，但不能抵消性能退步。默认不再分配纹理快照，
+不再重复 72 秒静态扫描比较。旧实验仅保留为显式 `legacy_content_compare` 开发回归。
 
-实机日志 `1793268853`：六段完整，75 PASS / 7 SKIP，15 个隔离控制全通过；B 首次写与 C 持续观察相对 A 的吞吐变化约 -0.262% / -0.255%，而 A 首尾已漂移 -1.174%，不能把小差值当成稳定开销。正式采集未发生受监视纹理写入或可比较内容变化。213 次 TextureCache 判变出现在约 25–33、81、84 秒，早于约 95–167 秒的正式采集；全会话账本的 `missing_observation` 不是 B/C 漏写证明。
+## 本次最少操作
 
-当前仍要逐次扫描内容，但不必在字节完全相同时反复执行 XXH3。下一步直接比较这个替代路径的正确性与净成本，而不是等待静态场景偶然写入。
+替换成功构建产物根目录的 `Vita3K.nro`，启动游戏即可。测试自动在真实 Guest
+启动前执行；进入游戏首帧后，原生面板显示结果。无需进入固定重场景、按组合键
+或再等 72 秒。看到 `DONE - REPORT READY` 或 `DONE - CHECK REPORT` 后，正常
+退出保存，提交一个完整 TraceLab 会话 ZIP。
 
-## 最少操作
+GPU 导入能力测试在第一次 External Host 映射时自动完成；如果游戏从未走该路径，
+报告明确为 not_exercised，不假装通过。面板会显示是否检测到该测试及 RO 能力。
+启动的原生/JIT 测试发生在 renderer 创建之前，不能在尚不存在的 overlay 上绘制
+逐测试进度；首帧显示汇总。本版没有额外的游戏计时阶段。
 
-用构建产物根目录的 **Vita3K.nro** 替换原版本，进入固定重场景，按一次 **L + R + Y**。自动运行 **A/B/C/C/B/A**，每段 2 秒稳定等待、10 秒测量，合计约 **72 秒**。看到任何 DONE 后正常退出，提供一个 TraceLab 会话 ZIP。不要强杀进程；日志仍在正常退出时保存。
+**这次会故意向独立 RO Heap 页写入，以验证能否恢复。首次尝试存在应用退出风险。**
+每个危险阶段前写并 fsync `sdmc:/switch/vita3k/logs/heap-fault-<revision>.json`。
+如果应用异常退出，提供该文件和 crash log；不要反复重试。相同构建下一次启动
+检测到未返回/不完整标记会禁止再触发故障，并把标记复制进正常导出的会话目录。
+正常返回的阶段标记不代表全部控制通过，仍以报告为准。
 
-A = 原始完整 XXH3。B = 完整逐字节比较 + 每一次候选结果的独立完整 XXH3 审计，**总是返回独立参考 Hash**。C = 同一个逐字节比较器，只有字节完全相同才复用私有快照的 Hash。B 的额外审计开销不作为提速结果；主要比较 C/A。
+已有配置未提供新键或写着旧 content_compare/compact/write_shadow 时，默认进入
+本轮；显式 `mode=off` 或 `memory_validation=off` 仍关闭实验。
 
-不需要在阶段之间改配置。旧 `compact` / `write_shadow` 配置在此构建中自动进入新的默认比较实验；明确 `mode=off` 或 `memory_validation=off` 仍关闭诊断。仅开发回归需要 `validation_experiment=write_audit` 回到旧实验。不要为这次测试重跑 100 样本写表微基准或 staging A/B。
+## 一版集中验证的内容
 
-## 每次比较的内容与边界
+- 原生 8/16/32/64/128 位 store：原 PC 恢复、首次 fault 后第二次直接写。
+- 寄存器实际前后比较：全部 X/Q、SP、NZCV、FPCR/FPSR；故意异常期间不改 frame PC。
+- 128 位跨页 store、四页裸宿主 `memset`、64 轮重新保护/写入/恢复及计时。
+- 实际 Dynarmic 普通页表直接 store：8/16/32/64 位、两个 Guest 地址的软件别名。
+  成功条件包括硬件 fault 发生、MemoryWrite 软件回调为零和数据/guard 正确。
+- 私有 Vulkan External Host buffer 的导入前、绑定后、解除导入后 RO/RW 能力。
+  这里只导入，不提交 GPU 工作，不宣称捕获 GPU 写入或证明 IPC 输出兼容。
+- 原有自动隔离控制继续作为回归；不重复性能矩阵或 staging A/B。
 
-范围与普通 `hash_texture_data` 相同：完整已有像素 footprint 和 P4/P8 独立 palette。不是采样、不是每 N 帧检查、不是“页没脏就跳过”。任意未通知的 CPU/HLE 写入，只要对当前 CPU 可见，仍会由每次完整字节比较发现。小于 4 KiB 或超出容量的输入退回原 Hash。
+## 实现边界
 
-命中时执行完整 `memcmp(source, snapshot)`，不复制。发现变化或首次使用时复制输入，**对实际复制出来的私有字节计算 Hash**，避免把旧源 Hash 与新快照错误配对。palette Hash 与像素 Hash 保持原 XOR 规则；缓存槽的 XOR-1 标记不变。地址重用必须重新比较内容，不信任地址身份。
+链接器只包装 libnx 的异常入口。默认入口的 PLR 小栈不足以保存全部 SIMD 状态，
+所以先切换到独立 16 KiB 异常栈，再保存现场。处理器只接收同测试线程、登记的
+私有 Heap 范围内、有效 FAR 的 A64 写权限异常；原生测试还匹配指定 PC。
+处理器内无分配、日志、mutex、文件操作、GPU 调用或等待，只解除对应页保护。
+恢复寄存器后执行 ReturnFromException，内核重试原指令；其他异常仍走 libnx
+原 crash handler。异常栈不位于被保护范围内。
 
-快照字节预算 64 MiB、最多 1024 个条目，LRU 在分配前淘汰，元数据另计。本次日志 509 个 footprint 的逻辑大小合计约 32.75 MiB，预算不是已证明足够所有游戏的保证。每次切换阶段清空快照，冷启动代价位于稳定等待；退出/完成清空字节存储。分配失败退回原 Hash并停止当前比较。
+未确认恢复 RW 的 scratch backing 不返还给 allocator；禁止带残留保护 chainload
+下一个 NRO。内核用户异常串行规则不等于已经证明多线程追踪正确，本版只做
+单写入线程控制。软件 Guest 别名指向同一宿主 VA；不同宿主 VA 的物理别名未测。
 
-B 中任何不一致都返回原始完整 Hash，禁用本会话的候选路径并尽早显示 DONE - CHECK REPORT。它可能是算法/接线问题，也可能是两次读取之间的并发写入，报告不伪称已经定位根因。不要为了获得绿色而重跑。
+**游戏仍使用原映射、原 JIT 和普通完整 Hash/场景 memo 策略。** 不保护游戏内存，
+不启用固定间隔跳过，不启用当前失败的快照候选。没有完成 Direct Heap Guest
+转换、所有 JIT 安全点、完整 HLE/GPU 所有权或通用 hashless 缓存。
 
-这是字节 Hash 计算的优化实验，不是完整脏页架构。CPU/GPU 可见性、Guest 映射生命周期、GPU 私有图像、并发写入和 surface-cache 一致性仍依赖现有协议。比较器与原 Hash 读取相同的 CPU 映射，不新增或删除 Vulkan 同步。重复扫描仍存在，并且比较需要读取 source 和 shadow 两条数据流，可能受带宽限制甚至更慢；必须看同版本 C/A 实测。
+## 结果与停止条件
 
-## 默认关闭游戏内写入观察器
-
-此实验的 A/B/C 都使用原游戏 JIT 页表路径，不绑定额外写表、不启用额外跨页检查，也不对 callback read / exclusive write 加入观察器 mutex 或登记。既有 JIT 本身的回调、原子操作与调度语义不变。这消除了上版各组共同存在的观察器开销；不能把新 A 与旧 A 的差值归功于 memcmp，必须比较新版本内部 C/A。
-
-场景 Hash memo 仍仅在正式采集时禁用，导航与完成后恢复旧行为。所有 unsafe interval skip 保持关闭。`strict_hash` 配置含义在这里是“禁用场景 memo 的完整内容参考”，报告另外明确 `full_hash_every_call=false`、`full_byte_validation=true` 和 `exact_byte_equality_only`。
-
-## 自动控制与 UI
-
-保留已经通过的 15 个观察器隔离控制作为回归。第一次普通纹理 Hash 时，渲染线程使用实际 `hash_data/XXH3` 自动跑另外 12 项私有内存控制：首中尾字节变化、palette、同址重用、span key、LRU/容量回退、每次命中审计、复制后源改变、快照与 Hash 绑定、碰撞仍需比较字节、清理。输入是独立 scratch，不改游戏 RAM。
-
-控制缺失/失败时禁止开始采集。HUD 显示 Equal / Audits / Diff / Shadow MiB、当前 A/B/C、剩余时间及保存提示。无自然内容变化不再要求重复测试；缓存相同内容本来就是 C 的工作负载。发生不一致或分配失败会尽早停止，显示原 Hash 已恢复；已完成后打开退出菜单不损坏结果。
-
-## 输出与分析
-
-仍是同一个 `memory-validation.json`，新增 `content_compare`：六段真实 begin/end tick、输入字节、相等比较、刷新复制、digest 次数/字节、逐次审计、不一致、淘汰、峰值内存、首次差异。计数包括 settle，性能时间排除 settle。逻辑字节量不是测得的 DRAM 带宽。
-
-唯一分析入口：
+`memory-validation.json` 的 `capture_plan` 为 `heap-fault-1`，同时复制
+`heap-fault-checkpoint.json`。构建内仍附一个分析器，支持目录或 ZIP：
 
 ```sh
-python3 analyze-switch-capture.py tracelab-session.zip --html report.html > report.json
+python3 analyze-switch-capture.py tracelab-session.zip --html report.html
 ```
 
-分析器同时支持旧 compact-1。新模式检查完整六段、至少 50 个测量间隔、90% 有效测量时长、所有自动控制、B 每个候选结果都审计、零差异、C 实际有相等命中、各计数对账及预算。失败不输出收益比率。两份对称样本仍只是描述性比较，不是统计显著性证明；尾延迟、A 首尾漂移同样保留。
+CPU 恢复控制通过与 GPU 导入后可否改权限分别报告。GPU 导入后返回拒绝但保持 RW
+是能力边界（skip），不是让你重跑的理由。任何失败、缺项或未覆盖直接共享报告。
+64 轮平均值包括布防、异常、重试与恢复，不是单独裸 fault latency，更不是游戏收益。
 
-## 构建与验证
+后续预算按 **2–3 轮决策与验收**：本轮解决异常恢复与 GPU 导入约束；通过后把可追踪
+Heap 路径和不兼容范围回退放入同版游戏对照；最后用动态场景回归。这个预算不是
+保证所有资源在三轮内无 Hash。能力失败时本轮就决定替代路线，不再重复静态扫描。
 
-保持单 core + 单内嵌 core 的 launcher。普通纹理接线继续使用原先 whole-blob 固定配方，新增比较器/controller/analyzer 为普通跟踪源码。CI 在完整 checkout 应用配方并验证，用户不用应用补丁。
+## 构建/主机验证
 
-主机测试编译真实比较器、控制器、HUD、导出和分析器；完整 checkout 时使用固定 xxHash 子模块，局部环境可以使用系统 XXH3并明确报告。设备上的实际 Hash 控制和真实帧耗时必须由这个 NRO 执行，主机结果不冒充实机结果。
+原有完整 preflight 之外，新增实际 handler 的 POSIX mprotect/合成异常帧测试、
+真实控制器/导出/HUD、A64 汇编与 --wrap 链接检查。主机测试不冒充 Horizon
+异常投递、原 PC 执行、实际 GPU 导入或实机性能。最终 ELF 另校验入口确实跳至 wrapper。
+首轮实机结果之前保持 PR 草稿。

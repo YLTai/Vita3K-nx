@@ -34,18 +34,20 @@ target_compile_definitions(util PRIVATE $<$<CONFIG:Debug,RelWithDebInfo>:TRACY_E
 
 if(SWITCH)
     if(SWITCH_TRACELAB)
+        target_sources(util PRIVATE src/switch_heap_fault_probe.cpp src/switch_heap_fault_entry.cpp)
+        target_link_options(util INTERFACE "-Wl,--wrap=__libnx_exception_entry")
         find_program(SWITCH_HOOK_PYTHON NAMES python3 REQUIRED)
         execute_process(COMMAND "${SWITCH_HOOK_PYTHON}" "${CMAKE_SOURCE_DIR}/scripts/apply-switch-write-watch-hooks.py" --check-applied
             RESULT_VARIABLE SWITCH_HOOK_RESULT)
         if(NOT SWITCH_HOOK_RESULT EQUAL 0)
             message(FATAL_ERROR "Apply pinned experiment hooks: python3 scripts/apply-switch-write-watch-hooks.py")
         endif()
-        target_compile_definitions(util PRIVATE VITA3K_SWITCH_WRITE_SHADOW_DEFAULT=1 VITA3K_SWITCH_CLEAN_CAPTURE_DEFAULT=1 VITA3K_SWITCH_CONTENT_COMPARE_DEFAULT=1)
+        target_compile_definitions(util PRIVATE VITA3K_SWITCH_WRITE_SHADOW_DEFAULT=1 VITA3K_SWITCH_CLEAN_CAPTURE_DEFAULT=1 VITA3K_SWITCH_HEAP_FAULT_DEFAULT=1)
     endif()
     # Changing the build SHA must not invalidate every cached translation unit.
     # Embed provenance only in the two report-producing sources.
     if(SWITCH_TRACELAB AND VITA3K_MEMORY_VALIDATION_REVISION)
-        set_property(SOURCE src/switch_memory_validation.cpp APPEND PROPERTY
+        set_property(SOURCE src/switch_memory_validation.cpp src/switch_heap_fault_probe.cpp APPEND PROPERTY
             COMPILE_DEFINITIONS "VITA3K_MEMORY_VALIDATION_REVISION=\"${VITA3K_MEMORY_VALIDATION_REVISION}\"")
     endif()
     if(SWITCH_TRACELAB AND VITA3K_LIBNX_BUILD_VERSION)

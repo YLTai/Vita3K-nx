@@ -1,0 +1,173 @@
+{
+  "base_commit": "1490a2fcd0caf329cbcb80bec668ea5a02530706",
+  "files": [
+    {
+      "path": "vita3k/util/src/switch_memory_capabilities.cpp",
+      "base_blob": "4d896eb1680fabf8b96027d31e89f2cde32e070b",
+      "replacements": [
+        {
+          "old": "bool memory_capabilities_allow_chainload() {\n    return allow_chainload;\n}",
+          "new": "bool memory_capabilities_allow_chainload() {\n#if defined(VITA3K_SWITCH_HEAP_FAULT_DEFAULT)\n    extern bool heap_fault_safe_to_chainload() noexcept;\n    return allow_chainload && heap_fault_safe_to_chainload();\n#else\n    return allow_chainload;\n#endif\n}"
+        },
+        {
+          "old": "not tested: default libnx handler is not a resumable store handler; requires separately validated custom exception entry and complete context restoration",
+          "new": "not part of this basic permission suite; see heap_fault results in the dedicated recovery experiment (default libnx C handler alone is not resumable)"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/renderer/src/vulkan/renderer.cpp",
+      "base_blob": "4f62037e80751c16c2aedeaee34e9903fa4fe154",
+      "replacements": [
+        {
+          "old": "#include <vkutil/vkutil.h>\n",
+          "new": "#include <vkutil/vkutil.h>\n#include <renderer/vulkan/switch_heap_import_probe.h>\n"
+        },
+        {
+          "old": "    case MappingMethod::ExernalHost: {\n        void *host_address = address.get(mem);",
+          "new": "    case MappingMethod::ExernalHost: {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        switch_validation::probe_gpu_heap_import(device, physical_device, physical_device_memory, mapped_memory_flags);\n#endif\n        void *host_address = address.get(mem);"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/cpu/src/switch_memory_validation.cpp",
+      "base_blob": "eae6d01349778c87dc1731ad47675e04965b71ad",
+      "replacements": [
+        {
+          "old": "#include <cpu/switch_memory_validation.h>\n#include <util/switch_memory_validation.h>\n#include <util/switch_validation_bench.h>\n\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n\n",
+          "new": "#include <cpu/switch_memory_validation.h>\n#include <util/switch_memory_validation.h>\n#include <util/switch_validation_bench.h>\n#include <util/switch_heap_fault_probe.h>\n\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n\n"
+        },
+        {
+          "old": "    }\n}\n\nvoid prepare_bench(MemoryFixture &memory, Dynarmic::A32::Jit &jit, TableMode mode, uint32_t stores) {\n    memory.reset_bytes();\n    memory.reset_events();\n",
+          "new": "    }\n}\n\nvoid run_hardware_fault_jit(MemoryFixture &memory) {\n    namespace sv = switch_validation;\n    if (!sv::heap_fault_probe_enabled()) return;\n    if (!sv::heap_fault_jit_allowed()) {\n        sv::record(\"heap_fault\", \"jit_suite_complete\", \"skip\", \"native recovery controls did not pass; no JIT page protected\");\n        return;\n    }\n    bool all_ok = true;\n    struct Cleanup {\n        MemoryFixture &memory;\n        ~Cleanup() {\n            (void)sv::heap_fault_disarm();\n            if (!sv::heap_fault_safe_to_chainload()) (void)memory.bytes.release();\n            memory.active_jit = nullptr;\n        }\n    } cleanup{memory};\n    // Use the ordinary read/write table. A successful test must have zero\n    // MemoryWrite callbacks: the actual generated host STR faults and retries.\n    Dynarmic::A32::Jit jit(config_for(memory, TableMode::Original, true));\n    const std::array<uint32_t, 4> stores{memory.store8, memory.store16, memory.store32, memory.store64};\n    for (size_t i = 0; i < stores.size() && all_ok; ++i) {\n        memory.reset_bytes(); memory.arm(0);\n        memory.prepare(jit, stores[i]); jit.Run(); // Compile outside protected interval.\n        memory.reset_bytes(); memory.reset_events();\n        char name[48]; std::snprintf(name, sizeof(name), \"jit_direct_%zu\", size_t{8} << i);\n        if (!sv::heap_fault_checkpoint(name, true) || !sv::heap_fault_arm(memory.backing(0), kPageSize)) {\n            sv::record(\"heap_fault\", name, \"fail\", \"could not arm private JIT backing\"); all_ok = false; break;\n        }\n        for (unsigned n = 0; n < 2; ++n) { memory.prepare(jit, stores[i]); jit.Run(); }\n        const auto r = sv::heap_fault_disarm();\n        const uint64_t value = i == 3 ? 0xfedcba9876543210ull : kTestValue;\n        const bool ok = r.restored && r.faults == 1 && memory.writes == 0 && memory.clean_stop()\n            && memory.stopped == 2 && memory.matches(kDataBase + 128, value, uint32_t{1} << i) && memory.guards_intact();\n        char detail[256]; std::snprintf(detail, sizeof(detail),\n            \"faults=%llu callbacks=%llu restored=%u last_pc=0x%llx; ordinary JIT table; two stores; private Heap only\",\n            static_cast<unsigned long long>(r.faults), static_cast<unsigned long long>(memory.writes), unsigned(r.restored),\n            static_cast<unsigned long long>(r.last_pc));\n        sv::record(\"heap_fault\", name, ok ? \"pass\" : \"fail\", detail);\n        all_ok &= ok && sv::heap_fault_checkpoint(name, false);\n    }\n    if (all_ok) {\n        memory.reset_bytes(); memory.reset_events(); memory.arm(0);\n        memory.prepare(jit, memory.alias_store, kAliasBase + 128); jit.Regs()[3] = kDataBase + 128;\n        jit.Run(); // Compile alias block with writable backing.\n        memory.reset_bytes(); memory.reset_events();\n        if (sv::heap_fault_checkpoint(\"jit_software_alias\", true) && sv::heap_fault_arm(memory.backing(0), kPageSize)) {\n            memory.prepare(jit, memory.alias_store, kAliasBase + 128);\n            jit.Regs()[2] = 0x12345678; jit.Regs()[3] = kDataBase + 128; jit.Run();\n            const auto r = sv::heap_fault_disarm();\n            const bool ok = r.restored && r.faults == 1 && memory.writes == 0 && memory.clean_stop()\n                && memory.matches(kDataBase + 128, 0x12345678, 4)\n                && memory.matches(kAliasBase + 128, 0x12345678, 4) && memory.guards_intact();\n            sv::record(\"heap_fault\", \"jit_software_alias\", ok ? \"pass\" : \"fail\", \"two Guest VAs resolve to the same protected Heap page; zero software write callbacks required\");\n            all_ok &= ok && sv::heap_fault_checkpoint(\"jit_software_alias\", false);\n        } else { sv::record(\"heap_fault\", \"jit_software_alias\", \"fail\", \"arm/checkpoint failed\"); all_ok = false; }\n    }\n    sv::record(\"heap_fault\", \"jit_suite_complete\", all_ok ? \"pass\" : \"fail\",\n        \"8/16/32/64-bit direct JIT stores and software alias; no live Guest or GPU memory changed\");\n}\n\nvoid prepare_bench(MemoryFixture &memory, Dynarmic::A32::Jit &jit, TableMode mode, uint32_t stores) {\n    memory.reset_bytes();\n    memory.reset_events();\n"
+        },
+        {
+          "old": "    }\n}\n\n} // namespace\n\nvoid run_jit_memory_validation() {\n",
+          "new": "    }\n}\n\n\n\n} // namespace\n\nvoid run_jit_memory_validation() {\n"
+        },
+        {
+          "old": "        return;\n    try {\n        {\n            MemoryFixture memory;\n            run_config_rejections(memory);\n            run_correctness(memory);\n            run_observer_canaries(memory);\n            switch_validation::record(\"capture_plan\", \"skip_repeated_matrix\", \"skip\",\n                \"matrix already validated in hardware capture 1793256692; run only correctness and observer controls\");\n        }\n",
+          "new": "        return;\n    try {\n        {\n            switch_validation::run_heap_fault_probe();\n            MemoryFixture memory;\n            run_config_rejections(memory);\n            run_correctness(memory);\n            run_observer_canaries(memory);\n            run_hardware_fault_jit(memory);\n            switch_validation::heap_fault_probe_finished();\n            switch_validation::record(\"capture_plan\", \"skip_repeated_matrix\", \"skip\",\n                \"matrix already validated in hardware capture 1793256692; run only correctness and observer controls\");\n        }\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/src/switch_memory_validation.cpp",
+      "base_blob": "e805efbd80f3880ab8561fc46289dedc5dcff565",
+      "replacements": [
+        {
+          "old": "// Vita3K Switch memory validation. All measurements stay in RAM until exit.\n// SPDX-License-Identifier: GPL-2.0-or-later\n#include <util/switch_memory_validation.h>\n\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/switch_validation_schedule.h>\n",
+          "new": "// Vita3K Switch memory validation. All measurements stay in RAM until exit.\n// SPDX-License-Identifier: GPL-2.0-or-later\n#include <util/switch_memory_validation.h>\n#include <util/switch_heap_fault_probe.h>\n\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/switch_validation_schedule.h>\n"
+        },
+        {
+          "old": "#include <vector>\n\nnamespace switch_validation {\nnamespace {\nconstexpr size_t kMaxTests = 256;\nconstexpr size_t kMaxIntervals = 32768;\n\nstruct Options {\n#ifdef VITA3K_SWITCH_CONTENT_COMPARE_DEFAULT\n    bool content_compare = true;\n#else\n",
+          "new": "#include <vector>\n\nnamespace switch_validation {\n// Host controller-only tests omit the platform probe translation unit.\nextern void copy_heap_fault_checkpoint(const char *) noexcept __attribute__((weak));\nnamespace {\nconstexpr size_t kMaxTests = 256;\nconstexpr size_t kMaxIntervals = 32768;\n\nstruct Options {\n#ifdef VITA3K_SWITCH_HEAP_FAULT_DEFAULT\n    bool heap_fault = true;\n#else\n    bool heap_fault = false;\n#endif\n#ifdef VITA3K_SWITCH_CONTENT_COMPARE_DEFAULT\n    bool content_compare = true;\n#else\n"
+        },
+        {
+          "old": "thread_local watch::Audit last_hash_audit;\nthread_local uint32_t last_hash_address = 0;\nthread_local uint64_t last_hash_size = 0;\nuint32_t phase_count() { return options.compact ? compact_order.size() : options.write_shadow ? 4 : 8; }\nCaptureMode phase_mode(uint32_t phase) {\n    if (phase >= phase_count()) return CaptureMode::Open;\n    if (options.compact) return compact_order[phase];\n",
+          "new": "thread_local watch::Audit last_hash_audit;\nthread_local uint32_t last_hash_address = 0;\nthread_local uint64_t last_hash_size = 0;\nuint32_t phase_count() { if (options.heap_fault) return 0; return options.compact ? compact_order.size() : options.write_shadow ? 4 : 8; }\nCaptureMode phase_mode(uint32_t phase) {\n    if (phase >= phase_count()) return CaptureMode::Open;\n    if (options.compact) return compact_order[phase];\n"
+        },
+        {
+          "old": "std::atomic<uint64_t> lost_results{0};\nuint32_t test_passed = 0, test_failed = 0, test_skipped = 0; // results_mutex\nuint32_t control_mask = 0;\nbool duplicate_control = false; // results_mutex\nstd::mutex status_mutex;\nStatusSnapshot published_status; // status_mutex; UI never reads live renderer counters\n",
+          "new": "std::atomic<uint64_t> lost_results{0};\nuint32_t test_passed = 0, test_failed = 0, test_skipped = 0; // results_mutex\nuint32_t control_mask = 0;\nuint32_t heap_control_mask = 0;\nbool heap_import_done = false, heap_import_ro = false;\nbool duplicate_control = false; // results_mutex\nstd::mutex status_mutex;\nStatusSnapshot published_status; // status_mutex; UI never reads live renderer counters\n"
+        },
+        {
+          "old": "        if (key == \"mode\") {\n            collector_off = value == \"off\";\n        } else if (key == \"validation_experiment\") {\n            if (value == \"content_compare\") { out.content_compare = true; out.compact = true; }\n            else if (value == \"write_audit\") { out.content_compare = false; out.compact = true; out.write_shadow = true; }\n            else if (value == \"compact\") { out.compact = true; out.write_shadow = true; }\n            else if (value == \"write_shadow\") out.write_shadow = true;\n            else if (value == \"staging\") { out.content_compare = false; out.compact = false; out.write_shadow = false; }\n        } else if (key == \"memory_validation\") {\n            if (value == \"off\") { out.enabled = false; out.automatic = false; }\n            else if (value == \"on\") { out.enabled = true; out.automatic = false; }\n",
+          "new": "        if (key == \"mode\") {\n            collector_off = value == \"off\";\n        } else if (key == \"validation_experiment\") {\n            if (value == \"heap_fault\") out.heap_fault = true;\n            else if (value == \"legacy_content_compare\") { out.heap_fault = false; out.content_compare = true; out.compact = true; }\n            else if (value == \"content_compare\") { if (!out.heap_fault) { out.content_compare = true; out.compact = true; } }\n            else if (value == \"write_audit\") { out.heap_fault = false; out.content_compare = false; out.compact = true; out.write_shadow = true; }\n            else if (value == \"compact\") { out.compact = true; out.write_shadow = true; }\n            else if (value == \"write_shadow\") out.write_shadow = true;\n            else if (value == \"staging\") { out.heap_fault = false; out.content_compare = false; out.compact = false; out.write_shadow = false; }\n        } else if (key == \"memory_validation\") {\n            if (value == \"off\") { out.enabled = false; out.automatic = false; }\n            else if (value == \"on\") { out.enabled = true; out.automatic = false; }\n"
+        },
+        {
+          "old": "        out.measure_seconds = compact_measure_seconds;\n    }\n    if (out.content_compare) out.write_shadow = false; // No live JIT/write-table observer cost in this experiment.\n    if (collector_off) out.enabled = false;\n    return out;\n}\n",
+          "new": "        out.measure_seconds = compact_measure_seconds;\n    }\n    if (out.content_compare) out.write_shadow = false; // No live JIT/write-table observer cost in this experiment.\n    if (out.heap_fault) {\n        out.content_compare = out.write_shadow = out.compact = out.automatic = false;\n        out.warmup_seconds = 0;\n    }\n    if (collector_off) out.enabled = false;\n    return out;\n}\n"
+        },
+        {
+          "old": "    const uint64_t duration = settle + measure;\n    const uint64_t total = duration * phase_count();\n    out.phase_count = phase_count();\n    out.write_shadow = options.write_shadow;\n    out.compact = options.compact;\n    out.content_compare = options.content_compare;\n",
+          "new": "    const uint64_t duration = settle + measure;\n    const uint64_t total = duration * phase_count();\n    out.phase_count = phase_count();\n    out.heap_fault = options.heap_fault;\n    out.write_shadow = options.write_shadow;\n    out.compact = options.compact;\n    out.content_compare = options.content_compare;\n"
+        },
+        {
+          "old": "        out.publish_calls += phase.publish_calls;\n        out.dedup_calls += phase.dedup_calls;\n    }\n    if (content_stopped) {\n        out.stage = Stage::Stopped; out.outcome = CaptureOutcome::Invalid;\n    } else if (completed) {\n        out.stage = Stage::Complete;\n",
+          "new": "        out.publish_calls += phase.publish_calls;\n        out.dedup_calls += phase.dedup_calls;\n    }\n    if (options.heap_fault) {\n        out.stage = Stage::Complete; out.progress_per_mille = 1000; out.outcome = CaptureOutcome::Ready;\n    } else if (content_stopped) {\n        out.stage = Stage::Stopped; out.outcome = CaptureOutcome::Invalid;\n    } else if (completed) {\n        out.stage = Stage::Complete;\n"
+        },
+        {
+          "old": "        const std::lock_guard<std::mutex> lock(results_mutex);\n        results.clear();\n        test_passed = test_failed = test_skipped = 0;\n        control_mask = content_control_mask = 0; duplicate_control = false;\n    }\n    lost_results.store(0, std::memory_order_relaxed);\n    phases.fill({});\n",
+          "new": "        const std::lock_guard<std::mutex> lock(results_mutex);\n        results.clear();\n        test_passed = test_failed = test_skipped = 0;\n        control_mask = content_control_mask = heap_control_mask = 0; duplicate_control = false;\n        heap_import_done = heap_import_ro = false;\n    }\n    lost_results.store(0, std::memory_order_relaxed);\n    phases.fill({});\n"
+        },
+        {
+          "old": "}\n\nbool enabled() { return is_enabled.load(std::memory_order_relaxed); }\nbool strict_hash() {\n    return enabled() && (!options.compact || capture_active.load(std::memory_order_acquire));\n}\n\nStatusSnapshot status_snapshot() {\n",
+          "new": "}\n\nbool enabled() { return is_enabled.load(std::memory_order_relaxed); }\nbool heap_fault_probe_enabled() { return enabled() && options.heap_fault; }\n\nbool strict_hash() {\n    return !options.heap_fault && enabled() && (!options.compact || capture_active.load(std::memory_order_acquire));\n}\n\nStatusSnapshot status_snapshot() {\n"
+        },
+        {
+          "old": "    StatusSnapshot out = published_status;\n    out.passed = test_passed; out.failed = test_failed; out.skipped = test_skipped;\n    out.results_dropped = lost_results.load(std::memory_order_relaxed);\n    out.controls_complete = !options.compact || (control_mask == compact_controls_mask && !duplicate_control\n        && (!options.content_compare || content_control_mask == content::controls_mask));\n    out.restart_pending = start_requested.load(std::memory_order_acquire);\n    if (out.stage != Stage::Complete && out.stage != Stage::Stopped) {\n",
+          "new": "    StatusSnapshot out = published_status;\n    out.passed = test_passed; out.failed = test_failed; out.skipped = test_skipped;\n    out.results_dropped = lost_results.load(std::memory_order_relaxed);\n    out.heap_import_done = heap_import_done; out.heap_import_ro = heap_import_ro;\n    out.controls_complete = options.heap_fault ? heap_control_mask == 3 : !options.compact || (control_mask == compact_controls_mask && !duplicate_control\n        && (!options.content_compare || content_control_mask == content::controls_mask));\n    out.restart_pending = start_requested.load(std::memory_order_acquire);\n    if (out.stage != Stage::Complete && out.stage != Stage::Stopped) {\n"
+        },
+        {
+          "old": "        }\n        results.push_back({ suite ? suite : \"unknown\", test ? test : \"unknown\",\n            status ? status : \"fail\", detail ? detail : \"\", elapsed_ticks, iterations_count });\n        if (results.back().suite == \"write_watch_canary\") {\n            for (uint32_t i = 0; i < compact_controls.size(); ++i) {\n                if (results.back().name != compact_controls[i]) continue;\n",
+          "new": "        }\n        results.push_back({ suite ? suite : \"unknown\", test ? test : \"unknown\",\n            status ? status : \"fail\", detail ? detail : \"\", elapsed_ticks, iterations_count });\n        if (results.back().suite == \"heap_import\") {\n            if (results.back().name == \"suite_complete\") heap_import_done = true;\n            if (results.back().name == \"while_imported\" && results.back().status == \"pass\") heap_import_ro = true;\n        }\n        if (results.back().suite == \"heap_fault\" && results.back().status == \"pass\") {\n            if (results.back().name == \"native_suite_complete\") heap_control_mask |= 1;\n            if (results.back().name == \"jit_suite_complete\") heap_control_mask |= 2;\n        }\n        if (results.back().suite == \"write_watch_canary\") {\n            for (uint32_t i = 0; i < compact_controls.size(); ++i) {\n                if (results.back().name != compact_controls[i]) continue;\n"
+        },
+        {
+          "old": "}\n\nvoid request_benchmark() {\n    if (!enabled()) return;\n    if (options.compact) {\n        const std::lock_guard<std::mutex> lock(results_mutex);\n        if (control_mask != compact_controls_mask || duplicate_control || test_failed || lost_results.load()\n",
+          "new": "}\n\nvoid request_benchmark() {\n    if (!enabled() || options.heap_fault) return;\n    if (options.compact) {\n        const std::lock_guard<std::mutex> lock(results_mutex);\n        if (control_mask != compact_controls_mask || duplicate_control || test_failed || lost_results.load()\n"
+        },
+        {
+          "old": "void on_render_end(uint64_t tick) {\n    if (!enabled()) return;\n    const PublishOnReturn publish{tick};\n    // Attribute publication work only to complete measured frame intervals,\n    // excluding a frame that crosses warm-up, phase, or restart boundaries.\n    const uint64_t calls = frame_publish_calls, bytes = frame_publish_bytes;\n",
+          "new": "void on_render_end(uint64_t tick) {\n    if (!enabled()) return;\n    const PublishOnReturn publish{tick};\n    if (options.heap_fault) {\n        completed = true; public_state.store(9, std::memory_order_release);\n        return; // Startup tests are already finished. No 72-second static run.\n    }\n    // Attribute publication work only to complete measured frame intervals,\n    // excluding a frame that crosses warm-up, phase, or restart boundaries.\n    const uint64_t calls = frame_publish_calls, bytes = frame_publish_bytes;\n"
+        },
+        {
+          "old": "    if (!file) { LOG_ERROR(\"[memory-validation] could not open {}\", path); return; }\n    std::setvbuf(file, nullptr, _IOFBF, 64 * 1024);\n    const uint64_t hz = armGetSystemTickFreq();\n    std::fputs(\"{\\n  \\\"schema_version\\\": 1,\\n  \\\"title\\\": \", file);\n    json_string(file, title);\n    std::fprintf(file, \",\\n  \\\"enabled\\\": true,\\n  \\\"strict_hash\\\": true,\\n  \\\"hash_skipping\\\": false,\\n\"\n",
+          "new": "    if (!file) { LOG_ERROR(\"[memory-validation] could not open {}\", path); return; }\n    std::setvbuf(file, nullptr, _IOFBF, 64 * 1024);\n    const uint64_t hz = armGetSystemTickFreq();\n    if (options.heap_fault) {\n        if (copy_heap_fault_checkpoint) copy_heap_fault_checkpoint(directory);\n        std::fputs(\"{\\n  \\\"schema_version\\\":1,\\n  \\\"capture_plan\\\":\\\"heap-fault-1\\\",\\n  \\\"title\\\":\", file);\n        json_string(file, title);\n        std::fprintf(file, \",\\n  \\\"enabled\\\":true,\\n  \\\"strict_hash\\\":false,\\n  \\\"game_memory_protected\\\":false,\\n\"\n            \"  \\\"gameplay_benchmark\\\":false,\\n  \\\"snapshot_candidate_enabled\\\":false,\\n  \\\"timebase_hz\\\":%llu,\\n  \\\"tests_dropped\\\":%llu,\\n  \\\"tests\\\":[\",\n            static_cast<unsigned long long>(hz), static_cast<unsigned long long>(lost_results.load()));\n        {\n            const std::lock_guard<std::mutex> lock(results_mutex);\n            for (size_t i = 0; i < results.size(); ++i) {\n                const auto &r = results[i];\n                std::fputs(i ? \",\\n    {\\\"suite\\\":\" : \"\\n    {\\\"suite\\\":\", file); json_string(file, r.suite);\n                std::fputs(\",\\\"name\\\":\", file); json_string(file, r.name);\n                std::fputs(\",\\\"status\\\":\", file); json_string(file, r.status);\n                std::fputs(\",\\\"detail\\\":\", file); json_string(file, r.detail);\n                std::fprintf(file, \",\\\"elapsed_ticks\\\":%llu,\\\"iterations\\\":%llu}\",\n                    static_cast<unsigned long long>(r.elapsed_ticks), static_cast<unsigned long long>(r.iterations));\n            }\n            const bool ready = heap_control_mask == 3 && !test_failed && !lost_results.load();\n            std::fprintf(file, \"\\n  ],\\n  \\\"controls_complete\\\":%s,\\n  \\\"capture_outcome\\\":\\\"%s\\\",\\n\"\n                \"  \\\"scope\\\":\\\"private CPU Heap, original-PC retry and real JIT; no all-writer/GPU/coherence claim\\\"\\n}\\n\",\n                heap_control_mask == 3 ? \"true\" : \"false\", ready ? \"ready\" : \"invalid\");\n        }\n        const bool error = std::ferror(file) != 0;\n        const bool close_error = std::fclose(handle.release()) != 0;\n        if (error || close_error) LOG_ERROR(\"[heap-fault] report export failed\");\n        return;\n    }\n    std::fputs(\"{\\n  \\\"schema_version\\\": 1,\\n  \\\"title\\\": \", file);\n    json_string(file, title);\n    std::fprintf(file, \",\\n  \\\"enabled\\\": true,\\n  \\\"strict_hash\\\": true,\\n  \\\"hash_skipping\\\": false,\\n\"\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/CMakeLists.txt",
+      "base_blob": "7d0f96058f919c605dc8bf4a774a49c5a1bde6b8",
+      "replacements": [
+        {
+          "old": "\ttarget_link_libraries(vita3k PRIVATE nx)\n",
+          "new": "\ttarget_link_libraries(vita3k PRIVATE nx)\n\tif(SWITCH_TRACELAB)\n\t\tfind_program(_heap_probe_python NAMES python3 REQUIRED)\n\t\tadd_custom_command(TARGET vita3k POST_BUILD\n\t\t\tCOMMAND \"${_heap_probe_python}\" \"${CMAKE_SOURCE_DIR}/scripts/tests/check_switch_heap_fault_link.py\" \"$<TARGET_FILE:vita3k>\"\n\t\t\t\t--objdump \"${CMAKE_OBJDUMP}\" --nm \"${CMAKE_NM}\"\n\t\t\tCOMMENT \"Checking actual exception wrapper in final A64 ELF\"\n\t\t\tVERBATIM)\n\tendif()\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/switch_validation_status.h",
+      "base_blob": "d8f950aa3a9d4d563284584063a0fc373ac7953a",
+      "replacements": [
+        {
+          "old": "struct StatusSnapshot {\n    Stage stage = Stage::Disabled;\n    CaptureOutcome outcome = CaptureOutcome::Pending;\n    bool automatic = false;\n    bool deduplicate = false;\n    bool write_shadow = false, watch_failed = false;\n",
+          "new": "struct StatusSnapshot {\n    Stage stage = Stage::Disabled;\n    CaptureOutcome outcome = CaptureOutcome::Pending;\n    bool heap_fault = false, heap_import_done = false, heap_import_ro = false;\n    bool automatic = false;\n    bool deduplicate = false;\n    bool write_shadow = false, watch_failed = false;\n"
+        },
+        {
+          "old": "    std::snprintf(text.timing.data(), text.timing.size(), \"Run %u | %u%% | Remaining %02llu:%02llu\",\n        s.run_id, s.progress_per_mille / 10,\n        static_cast<unsigned long long>(left / 60), static_cast<unsigned long long>(left % 60));\n    switch (s.stage) {\n    case Stage::Startup:\n        std::snprintf(text.title.data(), text.title.size(), \"MEMORY VALIDATION | Starting / self-tests\");\n",
+          "new": "    std::snprintf(text.timing.data(), text.timing.size(), \"Run %u | %u%% | Remaining %02llu:%02llu\",\n        s.run_id, s.progress_per_mille / 10,\n        static_cast<unsigned long long>(left / 60), static_cast<unsigned long long>(left % 60));\n    if (s.heap_fault) {\n        const bool done = s.stage == Stage::Complete;\n        const bool ready = done && s.controls_complete && !s.failed && !s.results_dropped;\n        text.tone = ready ? HudText::Tone::Ready : done ? HudText::Tone::Warning : HudText::Tone::Running;\n        std::snprintf(text.title.data(), text.title.size(), \"HEAP FAULT PROBE | %s\",\n            !done ? \"STARTUP TESTS\" : ready ? \"DONE - REPORT READY\" : \"DONE - CHECK REPORT\");\n        std::snprintf(text.timing.data(), text.timing.size(), \"Automatic startup batch | No 72s gameplay capture\");\n        std::snprintf(text.samples.data(), text.samples.size(), \"GPU import: %s | Game mappings unchanged\",\n            !s.heap_import_done ? \"not exercised\" : s.heap_import_ro ? \"RO supported\" : \"see report\");\n        std::snprintf(text.action.data(), text.action.size(), \"EXIT GAME NORMALLY TO SAVE | Share failures; do not repeat\");\n        return text;\n    }\n    switch (s.stage) {\n    case Stage::Startup:\n        std::snprintf(text.title.data(), text.title.size(), \"MEMORY VALIDATION | Starting / self-tests\");\n"
+        }
+      ]
+    },
+    {
+      "path": "scripts/analyze-switch-capture.py",
+      "base_blob": "9cfa77fd4be7b2a7fd8ea6f58c9bfaf638844bef",
+      "replacements": [
+        {
+          "old": "\n\ndef analyze(data, changed_total=None):\n    if data.get(\"capture_plan\") == \"content-1\":\n        return analyze_content(data)\n    reasons, warnings = [], []\n",
+          "new": "\n\ndef analyze(data, changed_total=None):\n    if data.get(\"capture_plan\") == \"heap-fault-1\":\n        return analyze_heap_fault(data)\n    if data.get(\"capture_plan\") == \"content-1\":\n        return analyze_content(data)\n    reasons, warnings = [], []\n"
+        },
+        {
+          "old": "                        'Two symmetric samples per mode are descriptive. B audit cost is not a performance optimization.'])\n\n\ndef load_session(path):\n    def total(summary):\n        rows = [m for m in summary.get('metrics', []) if m.get('metric') == 'texture_hash_changed']\n",
+          "new": "                        'Two symmetric samples per mode are descriptive. B audit cost is not a performance optimization.'])\n\n\ndef analyze_heap_fault(data):\n    tests = data.get('tests', [])\n    names = [t.get('name') for t in tests if t.get('suite') == 'heap_fault']\n    required = {'native_store_8', 'native_store_16', 'native_store_32', 'native_store_64',\n                'native_store_128', 'register_context', 'cross_page_128', 'host_memset',\n                'rearm_64', 'native_cleanup', 'native_suite_complete', 'jit_direct_8',\n                'jit_direct_16', 'jit_direct_32', 'jit_direct_64', 'jit_software_alias', 'jit_suite_complete'}\n    passed = {t.get('name') for t in tests if t.get('suite') == 'heap_fault' and t.get('status') == 'pass'}\n    issues = []\n    if not required <= passed or any(names.count(n) != 1 for n in required):\n        issues.append('Required native/JIT recovery results missing, duplicated, skipped or failed')\n    if data.get('controls_complete') is not True or data.get('tests_dropped') != 0:\n        issues.append('Incomplete controls or lost results')\n    if any(t.get('status') not in ('pass', 'skip') for t in tests):\n        issues.append('Failed result: preserve report/checkpoint; do not repeat to obtain green')\n    if any(data.get(k) is not False for k in ('game_memory_protected', 'gameplay_benchmark', 'snapshot_candidate_enabled')):\n        issues.append('Unexpected experiment safety/scope metadata')\n    imported = [t for t in tests if t.get('suite') == 'heap_import']\n    ro = next((t for t in imported if t.get('name') == 'while_imported'), None)\n    import_status = 'not_exercised' if ro is None else 'RO_supported' if ro.get('status') == 'pass' else 'RO_not_supported' if ro.get('status') == 'skip' else 'failed'\n    hz = data.get('timebase_hz', 0)\n    timing = next((t for t in tests if t.get('name') == 'rearm_64'), {})\n    timing_us = (timing.get('elapsed_ticks', 0) * 1e6 / hz / timing['iterations']\n                 if hz and timing.get('iterations') else None)\n    return dict(capture_plan='heap-fault-1', title=data.get('title'),\n                CPU_recovery_controls_passed=required <= passed and not any(t.get('suite') == 'heap_fault' and t.get('status') == 'fail' for t in tests), comparison_eligible=False,\n                exclusions=issues, GPU_import_reprotect=import_status,\n                arm_fault_restore_mean_us=timing_us,\n                tests=tests, warnings=[\n                    'No gameplay throughput or hashless safety conclusion from scratch tests.',\n                    'GPU import test submits no GPU writes; IPC and concurrent writers are not covered.',\n                    'Original game mappings and ordinary Hash policy are unchanged. Share one report, not another static scene capture.'])\n\n\ndef load_session(path):\n    def total(summary):\n        rows = [m for m in summary.get('metrics', []) if m.get('metric') == 'texture_hash_changed']\n"
+        },
+        {
+          "old": "            args.html.write_text('<!doctype html><meta charset=\"utf-8\"><title>Vita3K compact capture</title>'\n                '<style>body{font:16px system-ui;max-width:1100px;margin:36px auto;padding:0 24px}'\n                'pre{white-space:pre-wrap;overflow-wrap:anywhere}</style>'\n                '<h1>一次采集：A/B/C/C/B/A</h1><p>content-1：A 完整 Hash，B 逐字节比较并全量审计，C 逐字节比较。compact-1 为旧写入观察实验。完成不等于 GPU 同步正确性证明。</p>'\n                '<pre>'+html.escape(text)+'</pre>', encoding='utf-8')\n        print(text)\n    except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as error:\n",
+          "new": "            args.html.write_text('<!doctype html><meta charset=\"utf-8\"><title>Vita3K compact capture</title>'\n                '<style>body{font:16px system-ui;max-width:1100px;margin:36px auto;padding:0 24px}'\n                'pre{white-space:pre-wrap;overflow-wrap:anywhere}</style>'\n                '<h1>Vita3K 实验报告</h1><p>heap-fault-1：自动原 PC 恢复与 GPU 导入权限能力；无游戏性能对照。content-1：A 完整 Hash，B 逐字节比较并全量审计，C 逐字节比较。compact-1 为旧写入观察实验。完成不等于 GPU 同步正确性证明。</p>'\n                '<pre>'+html.escape(text)+'</pre>', encoding='utf-8')\n        print(text)\n    except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as error:\n"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/run-switch-performance-tests.sh",
+      "base_blob": "5810c5ce63221fa1e9539e5196b773c96c71345c",
+      "replacements": [
+        {
+          "old": "python3 \"$ROOT/scripts/tests/test_content_hash_memo.py\" --cxx \"${CXX:-c++}\"\npython3 \"$ROOT/scripts/tests/test_content_capture.py\" --cxx \"${CXX:-c++}\"\npython3 \"$ROOT/scripts/tests/test_content_source_wiring.py\" --cxx \"${CXX:-c++}\"\n",
+          "new": "python3 \"$ROOT/scripts/tests/test_content_hash_memo.py\" --cxx \"${CXX:-c++}\"\npython3 \"$ROOT/scripts/tests/test_content_capture.py\" --cxx \"${CXX:-c++}\"\npython3 \"$ROOT/scripts/tests/test_content_source_wiring.py\" --cxx \"${CXX:-c++}\"\n\npython3 \"$ROOT/scripts/tests/test_switch_heap_fault.py\" --cxx \"${CXX:-c++}\"\npython3 \"$ROOT/scripts/tests/test_switch_heap_import.py\" --cxx \"${CXX:-c++}\"\n"
+        }
+      ]
+    }
+  ]
+}
