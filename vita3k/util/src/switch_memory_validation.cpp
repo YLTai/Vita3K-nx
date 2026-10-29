@@ -62,6 +62,9 @@ struct Phase {
 
 Options options;
 watch::Table live_watch;
+thread_local watch::Audit last_hash_audit;
+thread_local uint32_t last_hash_address = 0;
+thread_local uint64_t last_hash_size = 0;
 uint32_t phase_count() { return options.write_shadow ? 4 : 8; }
 PhasePosition position_at(uint64_t elapsed, uint64_t settle, uint64_t measure) {
     auto result = phase_position(elapsed, settle, measure);
@@ -192,8 +195,14 @@ void publish_status(uint64_t tick) {
     for (const auto &p : observation.phases) {
         out.first_write_pages += p.first_write_pages;
         out.unobserved_changes += p.changed_unobserved;
+        out.exact_write_hits += p.exact_resource_hits;
+        out.page_only_writes += p.page_only_stores;
+        out.host_write_hits += p.host_resource_hits;
+        out.content_changes += p.changed;
+        out.guard_budget_exhausted |= p.guard_budget_exhausted != 0;
         out.watch_failed |= p.invalid_accesses != 0;
     }
+    out.cache_changes = observation.cache.changes;
     out.automatic = options.automatic;
     out.run_id = run_id;
     out.source_tick = tick;
@@ -216,7 +225,7 @@ void publish_status(uint64_t tick) {
                 ? (!observation.bound || observation.phases[i].armed_pages == 0 || observation.phases[i].covered_checks == 0)
                 : (phases[i].dedup_calls == 0 || phases[i].dedup_bytes == 0));
         }
-        out.outcome = overflow || out.insufficient_samples || (options.write_shadow && out.watch_failed) ? CaptureOutcome::Invalid
+        out.outcome = overflow || out.insufficient_samples || (options.write_shadow && (out.watch_failed || out.guard_budget_exhausted)) ? CaptureOutcome::Invalid
             : out.missing_treatment ? CaptureOutcome::Inconclusive : CaptureOutcome::Ready;
     } else if (aborted) {
         out.stage = Stage::Interrupted;
@@ -429,7 +438,7 @@ void on_render_end(uint64_t tick) {
     for (uint32_t i = 0; i < position.index && i < phases.size(); ++i)
         phases[i].complete = true;
     if (position_at(previous, settle, measure).index != position.index) {
-        if (options.write_shadow) live_watch.phase(position.complete ? watch::no_index : position.index, position.deduplicate);
+        if (options.write_shadow) live_watch.phase(position.complete ? watch::no_index : position.index, position.deduplicate, false, true);
         phase_entry_tick = tick;
 #if defined(__aarch64__)
         if (options.write_shadow) phase_entry_tick = std::max(tick, uint64_t(armGetSystemTick()));
@@ -456,7 +465,7 @@ void frontend_poll(bool paused) {
     if (state >= 1 && state <= staging_dedup_order.size())
         LOG_INFO("[memory-validation] phase {}/{}: {} (strict Hash, {}s settle + {}s measurement)",
             state, phase_count(), options.write_shadow
-                ? (staging_dedup_order[state - 1] ? "B: first-write observation" : "A: mirror table, observe off")
+                ? (staging_dedup_order[state - 1] ? "B: persistent range observation" : "A: mirror table, observe off")
                 : (staging_dedup_order[state - 1] ? "B: noncoherent staging dedup" : "A: original cache maintenance"),
             options.settle_seconds, options.measure_seconds);
     else if (state == 9)
@@ -499,19 +508,35 @@ watch::Access live_exclusive(uint8_t **normal, uint32_t address, uint64_t value,
 }
 watch::Token live_hash_begin(uint8_t **normal, uint32_t address, const void *pixels,
     uint64_t size, const void *palette, uint64_t palette_size) {
+    last_hash_audit = {};
+    last_hash_address = address; last_hash_size = size;
     if (!enabled() || !options.write_shadow) return {};
     return live_watch.before(normal, address, pixels, size, palette, palette_size);
 }
 void live_hash_end(watch::Token token, uint64_t hash) {
-    if (token.resource != watch::no_index) live_watch.after(token, hash);
+    last_hash_audit = {};
+    if (token.resource != watch::no_index) last_hash_audit = live_watch.after(token, hash);
+}
+void live_host_written(const void *host, uint64_t size, watch::HostWriter writer) {
+    if (enabled() && options.write_shadow) live_watch.host_written(host, size, writer);
+}
+void live_cache_decision(uint32_t slot, uint32_t address, uint64_t size,
+    uint64_t previous_hash, uint64_t current_hash, bool ordinary) {
+    if (!enabled() || !options.write_shadow) return;
+    const auto audit = ordinary && last_hash_address == address && last_hash_size == size
+        ? last_hash_audit : watch::Audit{};
+    // Ordinary TextureCache hashes are xor-1 tagged; registry hashes are raw.
+    live_watch.cache_decision(audit, slot, address, size,
+        previous_hash ^ (ordinary ? 1 : 0), current_hash ^ (ordinary ? 1 : 0), ordinary);
+    last_hash_audit = {};
 }
 
 static void write_shadow_report(FILE *file) {
     const auto snapshot = live_watch.snapshot();
     using U = unsigned long long;
     std::fprintf(file, ",\n  \"write_shadow\": {\n"
-        "    \"schema_version\":1,\n    \"bound\":%s,\n    \"failed\":%s,\n"
-        "    \"hash_skip_authority\":false,\n    \"scope\":\"JIT_first_write_only_observational\",\n"
+        "    \"schema_version\":2,\n    \"bound\":%s,\n    \"failed\":%s,\n"
+        "    \"hash_skip_authority\":false,\n    \"scope\":\"JIT_persistent_range_plus_HLE_notices_observational\",\n"
         "    \"arm_safepoint\":false,\n    \"HLE_GPU_coverage\":false,\n"
         "    \"resources\":%llu,\n    \"backing_pages\":%llu,\n    \"late_resources\":%llu,\n"
         "    \"events_dropped\":%llu,\n    \"phases\":[",
@@ -523,11 +548,17 @@ static void write_shadow_report(FILE *file) {
             "\"changed\":%llu,\"changed_cpu_seen\":%llu,\"changed_unobserved\":%llu,\"changed_uncovered\":%llu,"
             "\"callback_stores\":%llu,\"callback_reads\":%llu,\"exclusive_success\":%llu,\"invalid_accesses\":%llu,"
             "\"first_write_pages\":%llu,\"armed_pages\":%llu,\"armed_aliases\":%llu,"
-            "\"mapping_updates\":%llu,\"resources_rejected\":%llu}",
+            "\"mapping_updates\":%llu,\"resources_rejected\":%llu",
             i ? "," : "", i, U(c.hash_checks), U(c.hash_bytes), U(c.covered_checks), U(c.changed),
             U(c.changed_cpu_seen), U(c.changed_unobserved), U(c.changed_uncovered),
             U(c.callback_stores), U(c.callback_reads), U(c.exclusive_success), U(c.invalid_accesses),
             U(c.first_write_pages), U(c.armed_pages), U(c.armed_aliases), U(c.mapping_updates), U(c.resources_rejected));
+        std::fprintf(file, ",\"watched_stores\":%llu,\"exact_resource_hits\":%llu,\"page_only_stores\":%llu,"
+            "\"host_notices\":%llu,\"host_resource_hits\":%llu,\"changed_host_seen\":%llu,"
+            "\"changed_raced\":%llu,\"discarded_tokens\":%llu,\"guard_budget_exhausted\":%llu}",
+            U(c.watched_stores), U(c.exact_resource_hits), U(c.page_only_stores), U(c.host_notices),
+            U(c.host_resource_hits), U(c.changed_host_seen), U(c.changed_raced), U(c.discarded_tokens),
+            U(c.guard_budget_exhausted));
     }
     std::fputs("\n    ],\n    \"events\":[", file);
     for (uint64_t i = 0; i < snapshot.event_count; ++i) {
@@ -547,7 +578,23 @@ static void write_shadow_report(FILE *file) {
             "\"palette_host_hex\":\"%016llx\",\"palette_size\":%llu}", i ? "," : "", r.id, r.address,
             U(r.key.pixels), U(r.key.size), U(r.key.palette), U(r.key.palette_size));
     }
-    std::fprintf(file, "\n    ],\n    \"capacity_limited\":%s\n  }", snapshot.capacity_limited ? "true" : "false");
+    std::fprintf(file, "\n    ],\n    \"capacity_limited\":%s,\n"
+        "    \"persistent_selected_pages\":true,\n    \"cache_ledger\":{\n"
+        "      \"scope\":\"session_including_warmup_and_restarts\",\n"
+        "      \"comparisons\":%llu,\n      \"changes\":%llu,\n      \"events_dropped\":%llu,\n      \"reasons\":{",
+        snapshot.capacity_limited ? "true" : "false", U(snapshot.cache.comparisons), U(snapshot.cache.changes), U(snapshot.cache.dropped));
+    for (size_t i = 0; i < snapshot.cache.reasons.size(); ++i)
+        std::fprintf(file, "%s\"%s\":%llu", i ? "," : "", watch::cache_reason_name(static_cast<watch::CacheReason>(i)), U(snapshot.cache.reasons[i]));
+    std::fputs("},\n      \"events\":[", file);
+    for (uint64_t i = 0; i < snapshot.cache.stored; ++i) {
+        const auto &e = snapshot.cache.events[i];
+        std::fprintf(file, "%s\n        {\"phase\":%u,\"slot\":%u,\"address\":%u,\"size\":%llu,\"resource\":%u,"
+            "\"tick\":%llu,\"epoch\":%llu,\"reason\":\"%s\",\"previous_hash_hex\":\"%016llx\","
+            "\"current_hash_hex\":\"%016llx\",\"observer_previous_hash_hex\":\"%016llx\"}",
+            i ? "," : "", e.phase, e.slot, e.address, U(e.size), e.resource, U(e.tick), U(e.epoch),
+            watch::cache_reason_name(e.reason), U(e.previous_hash), U(e.current_hash), U(e.observer_previous_hash));
+    }
+    std::fputs("\n      ]\n    }\n  }", file);
 }
 
 void write_report(const char *directory) {
@@ -612,7 +659,7 @@ void write_report(const char *directory) {
             static_cast<unsigned long long>(p.excluded_intervals), 1000.0 * p.excluded_ticks / hz);
     }
     const auto summary = status_snapshot();
-    std::fprintf(file, "\n    ]\n  },\n  \"validation_revision\":3,\n"
+    std::fprintf(file, "\n    ]\n  },\n  \"validation_revision\":4,\n"
         "  \"capture_outcome\":\"%s\",\n  \"overlay_refresh_hz\":4,\n"
         "  \"overlay_completion_is_not_graphics_validation\":true", outcome_name(summary.outcome));
     if (options.write_shadow) write_shadow_report(file);

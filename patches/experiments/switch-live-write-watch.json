@@ -124,6 +124,58 @@
         {
           "old": "    if (data.address()) {\n        data_hash = hash_data(data.get(mem), texture_size);\n    }\n\n    switch (base_format) {\n    case SCE_GXM_TEXTURE_BASE_FORMAT_P4:\n        return data_hash ^ hash_palette_data(texture, 16, mem);\n    case SCE_GXM_TEXTURE_BASE_FORMAT_P8:\n        return data_hash ^ hash_palette_data(texture, 256, mem);\n    default:\n        return data_hash;\n    }\n",
           "new": "    const uint32_t palette_count = base_format == SCE_GXM_TEXTURE_BASE_FORMAT_P4 ? 16\n        : base_format == SCE_GXM_TEXTURE_BASE_FORMAT_P8 ? 256 : 0;\n    const auto observation = switch_validation::live_hash_begin(mem.page_table.get(), data.address(),\n        data.address() ? data.get(mem) : nullptr, texture_size,\n        palette_count ? get_texture_palette(texture, mem) : nullptr, palette_count * sizeof(uint32_t));\n    if (data.address()) {\n        data_hash = hash_data(data.get(mem), texture_size);\n    }\n    if (palette_count)\n        data_hash ^= hash_palette_data(texture, palette_count, mem);\n    // Always return the original FULL content Hash. Observation is not used\n    // to decide cache reuse, uploads, GPU barriers, or resource ownership.\n    switch_validation::live_hash_end(observation, data_hash);\n    return data_hash;\n"
+        },
+        {
+          "old": "    tracelab::Scope hash_profile(tracelab::Metric::TextureHash, tracelab::Domain::Render, texture_size);\n",
+          "new": "    tracelab::Scope hash_profile(tracelab::Metric::TextureHash, tracelab::Domain::Render, texture_size);\n    switch_validation::live_hash_end({}, 0); // Clear prior TLS audit even on early invalid-range return.\n"
+        },
+        {
+          "old": "                    tracelab::count(upload ? tracelab::Metric::TextureHashChanged\n                        : tracelab::Metric::TextureHashUnchanged);\n",
+          "new": "                    tracelab::count(upload ? tracelab::Metric::TextureHashChanged\n                        : tracelab::Metric::TextureHashUnchanged);\n                    switch_validation::live_cache_decision(static_cast<uint32_t>(info->index),\n                        gxm_texture.data_addr << 2, info->texture_size, previous_hash, info->hash,\n                        !import_textures && !export_textures);\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/modules/SceLibc/SceLibc.cpp",
+      "base_blob": "4147d5f1faead96f46e1688c5861f92213d9e866",
+      "replacements": [
+        {
+          "old": "#include <module/module.h>\n",
+          "new": "#include <module/module.h>\n#include <util/switch_write_watch_api.h>\n"
+        },
+        {
+          "old": "    TRACY_FUNC(memcpy, destination, source, num);\n    memcpy(destination, source, num);\n",
+          "new": "    TRACY_FUNC(memcpy, destination, source, num);\n    void *const observed_destination = destination;\n    memcpy(observed_destination, source, num);\n    switch_validation::live_host_written(observed_destination, num, switch_validation::watch::HostWriter::Memcpy);\n"
+        },
+        {
+          "old": "    TRACY_FUNC(memmove, destination, source, num);\n    memmove(destination, source, num);\n",
+          "new": "    TRACY_FUNC(memmove, destination, source, num);\n    void *const observed_destination = destination;\n    memmove(observed_destination, source, num);\n    switch_validation::live_host_written(observed_destination, num, switch_validation::watch::HostWriter::Memmove);\n"
+        },
+        {
+          "old": "    TRACY_FUNC(memset, str, c, n);\n    memset(str.get(emuenv.mem), c, n);\n",
+          "new": "    TRACY_FUNC(memset, str, c, n);\n    void *const observed_destination = str.get(emuenv.mem);\n    memset(observed_destination, c, n);\n    switch_validation::live_host_written(observed_destination, n, switch_validation::watch::HostWriter::Memset);\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/modules/SceLibKernel/SceLibKernel.cpp",
+      "base_blob": "cf06ee74395bdd42b6638e5302ddc50145361f73",
+      "replacements": [
+        {
+          "old": "#include <modules/module_parent.h>\n",
+          "new": "#include <modules/module_parent.h>\n#include <util/switch_write_watch_api.h>\n"
+        },
+        {
+          "old": "    TRACY_FUNC(sceClibMemcpy, dst, src, len);\n    memcpy(dst.get(emuenv.mem), src, len);\n",
+          "new": "    TRACY_FUNC(sceClibMemcpy, dst, src, len);\n    void *const observed_destination = dst.get(emuenv.mem);\n    memcpy(observed_destination, src, len);\n    switch_validation::live_host_written(observed_destination, len, switch_validation::watch::HostWriter::Memcpy);\n"
+        },
+        {
+          "old": "    TRACY_FUNC(sceClibMemmove, dst, src, len);\n    memmove(dst.get(emuenv.mem), src, len);\n",
+          "new": "    TRACY_FUNC(sceClibMemmove, dst, src, len);\n    void *const observed_destination = dst.get(emuenv.mem);\n    memmove(observed_destination, src, len);\n    switch_validation::live_host_written(observed_destination, len, switch_validation::watch::HostWriter::Memmove);\n"
+        },
+        {
+          "old": "    TRACY_FUNC(sceClibMemset, dst, ch, len);\n    memset(dst.get(emuenv.mem), ch, len);\n",
+          "new": "    TRACY_FUNC(sceClibMemset, dst, ch, len);\n    void *const observed_destination = dst.get(emuenv.mem);\n    memset(observed_destination, ch, len);\n    switch_validation::live_host_written(observed_destination, len, switch_validation::watch::HostWriter::Memset);\n"
         }
       ]
     }

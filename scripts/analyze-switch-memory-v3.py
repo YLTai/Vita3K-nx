@@ -21,7 +21,7 @@ def number(obj, key, *, integer=False):
     return v
 
 
-def analyze(data):
+def analyze(data, cache_changed_total=None):
     tests = data.get('tests', [])
     counts = {s: sum(t.get('status') == s for t in tests) for s in ('pass', 'fail', 'skip')}
     counts['unknown'] = sum(t.get('status') not in counts for t in tests)
@@ -33,7 +33,9 @@ def analyze(data):
     reasons, warnings = [], []
     if data.get('strict_hash') is not True or data.get('hash_skipping') is not False:
         reasons.append('Full-Hash reference not confirmed')
-    if watch.get('hash_skip_authority') is not False or watch.get('scope') != 'JIT_first_write_only_observational':
+    persistent = data.get('validation_revision') == 4
+    expected_scope = 'JIT_persistent_range_plus_HLE_notices_observational' if persistent else 'JIT_first_write_only_observational'
+    if watch.get('hash_skip_authority') is not False or watch.get('scope') != expected_scope or watch.get('schema_version') != (2 if persistent else 1):
         reasons.append('Unrecognized write-observation contract')
     if counts['fail'] or counts['unknown'] or data.get('tests_dropped', 0):
         reasons.append('Failed/unknown/lost startup records')
@@ -66,7 +68,14 @@ def analyze(data):
                       'exclusive_success', 'invalid_accesses', 'first_write_pages', 'armed_pages',
                       'armed_aliases', 'mapping_updates', 'resources_rejected'):
                 number(c, k, integer=True)
-            if c['covered_checks'] > c['hash_checks'] or c['changed'] != c['changed_cpu_seen'] + c['changed_unobserved'] + c['changed_uncovered']:
+            if persistent:
+                for key in ('watched_stores', 'exact_resource_hits', 'page_only_stores', 'host_notices',
+                            'host_resource_hits', 'changed_host_seen', 'changed_raced', 'discarded_tokens', 'guard_budget_exhausted'):
+                    number(c, key, integer=True)
+                if c['guard_budget_exhausted']:
+                    reasons.append(f'Phase {i}: persistent guard budget exhausted; treatment stopped')
+            extra_changes = c.get('changed_host_seen', 0) + c.get('changed_raced', 0) if persistent else 0
+            if c['covered_checks'] > c['hash_checks'] or c['changed'] != c['changed_cpu_seen'] + c['changed_unobserved'] + c['changed_uncovered'] + extra_changes:
                 reasons.append(f'Phase {i}: inconsistent observation counts')
             if c['invalid_accesses']:
                 reasons.append(f'Phase {i}: invalid callback access observed')
@@ -83,6 +92,43 @@ def analyze(data):
     unknown = sum(p.get('changed_unobserved', 0) for p in observed)
     if unknown:
         warnings.append('Hash changes without observed JIT writes were recorded. This does NOT attribute them to HLE/GPU: registration races and other untraced paths remain possible.')
+    content_changes = sum(p.get('changed', 0) for p in observed)
+    if not content_changes:
+        warnings.append('No comparable live content mutations were observed. Zero unobserved changes is a vacuous negative result; submit this capture, do not blindly repeat it.')
+    ledger = watch.get('cache_ledger')
+    ledger_check = dict(available=isinstance(ledger, dict), telemetry_changed_total=cache_changed_total,
+                        matched_to_telemetry=None)
+    if persistent:
+        required = {'native_exact_store', 'native_repeat_alias_store', 'raw_after_cpu_negative_control',
+                    'page_neighbor_negative_control', 'host_notice_positive_control', 'observer_CAS_contract',
+                    'cache_first_baseline_ledger', 'remap_discards_inflight_hash', 'canary_cleanup'}
+        present = [t.get('name') for t in tests if t.get('suite') == 'write_watch_canary' and t.get('status') == 'pass']
+        if set(present) != required or len(present) != len(required):
+            reasons.append('Missing, duplicated or failed automatic mutation canaries')
+        try:
+            if not isinstance(ledger, dict): raise ValueError('Missing actual TextureCache comparison ledger')
+            n = number(ledger, 'changes', integer=True)
+            compares = number(ledger, 'comparisons', integer=True)
+            lost = number(ledger, 'events_dropped', integer=True)
+            parts = ledger.get('reasons', {})
+            keys = {'cpu_interval', 'host_notice_interval', 'unobserved', 'uncovered', 'first_observer_baseline',
+                    'different_observer_baseline', 'raced_or_invalidated', 'missing_observation', 'unsupported_hash_path'}
+            if set(parts) != keys or sum(number(parts, k, integer=True) for k in keys) != n:
+                raise ValueError('Cache-change explanation counters do not partition all changes')
+            if n > compares or len(ledger.get('events', [])) + lost != n:
+                raise ValueError('Cache-change totals disagree with stored/lost event counts')
+            if cache_changed_total is not None:
+                ledger_check['matched_to_telemetry'] = n == cache_changed_total
+                if n != cache_changed_total:
+                    reasons.append('Cache-change ledger disagrees with session TextureHashChanged telemetry')
+            else:
+                warnings.append('Session TextureHashChanged total unavailable; ledger reconciliation not verified')
+            if lost: warnings.append('Cache-change event timeline truncated; reason counters retain all changes')
+            ledger_check.update(changes=n, comparisons=compares, reasons=parts, events_dropped=lost)
+        except (ValueError, TypeError, KeyError) as e:
+            reasons.append(str(e))
+    elif cache_changed_total is not None and cache_changed_total > content_changes:
+        warnings.append('Session TextureCache changes exceed comparable observer changes. Different time windows/baselines are not reconciled by v3; a zero observer count is not zero cache changes.')
     pairs = []
     if not reasons and len(checked) == 4:
         for a, b in ((0, 1), (3, 2)):
@@ -97,10 +143,12 @@ def analyze(data):
                 phases=checked, pairs=pairs, changed_without_observed_cpu=unknown,
                 footprint_count=watch.get('resources'), backing_pages=watch.get('backing_pages'),
                 events=watch.get('events', []), footprints=watch.get('footprints', []),
+                comparable_content_changes=content_changes, cache_ledger_check=ledger_check,
+                actual_cache_events=ledger.get('events', []) if isinstance(ledger, dict) else [],
                 interpretation=[
                     'This measures observation overhead, NOT a hashless speedup. Both variants retain full Hash.',
                     'A already includes the mirror table, boundary checks and footprint lookups. It is NOT the old uninstrumented baseline.',
-                    'CPU-seen is sticky within a B epoch; it does not identify the writer of each individual content change.',
+                    ('CPU/host notices refer to exact ranges since the previous comparable Hash, not a proven exclusive writer; metadata stability does not prove memory stability.' if persistent else 'CPU-seen is sticky within a B epoch; it does not identify the writer of each individual content change.'),
                     'Covered means software-alias/host-page dependencies were armed; it is NOT complete CPU/HLE/GPU coverage.',
                     'Arming is observational and has no all-JIT safepoint. Zero unexplained changes is NOT a correctness proof.',
                     'Timing excludes settle/boundary intervals; observation counters include the entire phase.',
@@ -114,7 +162,13 @@ def main():
     args = p.parse_args()
     path = args.session/'memory-validation.json' if args.session.is_dir() else args.session
     try:
-        report = analyze(json.loads(path.read_text(encoding='utf-8')))
+        total = None
+        summary_path = path.parent/'summary.json'
+        if summary_path.exists():
+            summary = json.loads(summary_path.read_text(encoding='utf-8'))
+            matches = [m for m in summary.get('metrics', []) if m.get('metric') == 'texture_hash_changed']
+            if len(matches) == 1: total = number(matches[0], 'calls', integer=True)
+        report = analyze(json.loads(path.read_text(encoding='utf-8')), total)
         result = json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False)
     except (OSError, ValueError, TypeError) as e:
         p.exit(2, str(e)+'\n')

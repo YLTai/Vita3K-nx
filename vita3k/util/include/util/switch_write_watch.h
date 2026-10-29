@@ -1,4 +1,4 @@
-// Live first-write observation, NEVER a texture-validity authority.
+// Live selected-page/range observation, NEVER a texture-validity authority.
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
@@ -25,6 +25,10 @@ struct Counts {
     uint64_t callback_stores = 0, callback_reads = 0, exclusive_success = 0;
     uint64_t invalid_accesses = 0, first_write_pages = 0, armed_pages = 0, armed_aliases = 0;
     uint64_t mapping_updates = 0, resources_rejected = 0;
+    uint64_t watched_stores = 0, exact_resource_hits = 0, page_only_stores = 0;
+    uint64_t host_notices = 0, host_resource_hits = 0;
+    uint64_t changed_host_seen = 0, changed_raced = 0, discarded_tokens = 0;
+    uint64_t guard_budget_exhausted = 0;
 };
 struct Event {
     enum Kind : uint32_t { FirstWrite, ChangedUnobserved, MappingChange, InvalidAccess };
@@ -44,12 +48,36 @@ struct KeyHash {
             ^ (std::hash<uint64_t>{}(k.size) << 2) ^ (k.palette_size << 3);
     }
 };
+enum class CacheReason : uint32_t {
+    CpuInterval, HostInterval, Unobserved, Uncovered, FirstBaseline,
+    DifferentBaseline, Raced, MissingObservation, Unsupported, Count
+};
+inline const char *cache_reason_name(CacheReason r) {
+    constexpr std::array names{"cpu_interval", "host_notice_interval", "unobserved",
+        "uncovered", "first_observer_baseline", "different_observer_baseline", "raced_or_invalidated",
+        "missing_observation", "unsupported_hash_path"};
+    return size_t(r) < names.size() ? names[size_t(r)] : "invalid";
+}
+struct CacheEvent {
+    uint32_t phase = no_index, slot = 0, address = 0, resource = no_index;
+    uint64_t size = 0, tick = 0, epoch = 0, previous_hash = 0, current_hash = 0, observer_previous_hash = 0;
+    CacheReason reason = CacheReason::MissingObservation;
+};
+struct CacheLedger {
+    uint64_t comparisons = 0, changes = 0, dropped = 0, stored = 0;
+    std::array<uint64_t, size_t(CacheReason::Count)> reasons{};
+    // Separate quotas keep menu/loading changes from exhausting B evidence.
+    std::array<uint32_t, 2> stored_by_region{};
+    std::array<CacheEvent, 128> events{};
+};
 struct Snapshot {
     bool bound = false, failed = false, observing = false, capacity_limited = false;
     uint64_t epoch = 0, event_count = 0, events_dropped = 0;
     uint64_t resources = 0, backing_pages = 0, late_resources = 0;
     std::array<Counts, 8> phases{};
     std::array<Event, 128> events{};
+    bool persistent = false;
+    CacheLedger cache;
 };
 
 // Mutating mappings, callbacks, and metadata share this mutex. Native JIT
@@ -68,7 +96,9 @@ class Table {
         Key key;
         uint32_t address = 0;
         uint64_t hash = 0;
-        bool baseline = false, covered = false, cpu_seen = false;
+        bool baseline = false, covered = false;
+        uint64_t mapping_version = 0, cpu_version = 0, host_version = 0;
+        uint64_t baseline_cpu = 0, baseline_host = 0;
         std::vector<uint32_t> groups;
     };
     mutable std::recursive_mutex mutex_;
@@ -81,7 +111,11 @@ class Table {
     Snapshot stats_;
     uint32_t phase_ = no_index;
     std::array<uint32_t, 4> event_kinds_{};
-    bool collecting_ = false;
+    bool collecting_ = false, persistent_ = false;
+    // Session ledger deliberately survives capture restarts and phase baseline resets.
+    CacheLedger ledger_;
+    uint64_t interval_serial_ = 0;
+    static constexpr uint64_t max_watched_stores = 100000;
     size_t edges_ = 0;
     uint64_t (*clock_)() = nullptr;
     static constexpr size_t max_resources = 1024, max_groups = 16384, max_edges = 131072;
@@ -134,21 +168,56 @@ class Table {
             done += n;
         }
     }
+    static bool overlap(uintptr_t a, uint64_t n, uintptr_t b, uint64_t m) {
+        if (!n || !m || !a || !b) return false;
+        // Subtraction form avoids end-address overflow.
+        return a <= b ? uint64_t(b - a) < n : uint64_t(a - b) < m;
+    }
+    static bool hits(const Resource &r, uintptr_t host, uint64_t size) {
+        return overlap(host, size, r.key.pixels, r.key.size)
+            || overlap(host, size, r.key.palette, r.key.palette_size);
+    }
     void written(uint32_t address, size_t size) {
         if (!stats_.observing) return;
-        for (uint64_t p = address / page_size; p <= (uint64_t(address) + size - 1) / page_size; ++p) {
-            const auto found = by_host_.find(host_page(load(raw_, static_cast<uint32_t>(p)), static_cast<uint32_t>(p)));
-            if (found == by_host_.end()) continue;
-            auto &g = groups_[found->second];
-            if (g.epoch != stats_.epoch || !g.armed) continue;
-            g.cpu_seen = true;
-            for (uint32_t r : g.resources) resources_[r].cpu_seen = true;
-            ++count().first_write_pages;
-            event({Event::FirstWrite, no_index, address, static_cast<uint32_t>(size)});
-            // Publish only after the actual successful store. All software
-            // aliases of this host backing reopen together.
-            for (uint32_t alias : g.aliases) store(writes_.get(), alias, load(raw_, alias));
-            g.armed = false;
+        bool watched = false, exact = false;
+        for (size_t done = 0; done < size;) {
+            const uint32_t at = static_cast<uint32_t>(uint64_t(address) + done);
+            const auto p = at / page_size;
+            const size_t n = std::min(size - done, size_t(page_size - at % page_size));
+            const uintptr_t base = host_page(load(raw_, p), p);
+            const auto found = by_host_.find(base);
+            if (found != by_host_.end()) {
+                auto &g = groups_[found->second];
+                if (g.epoch == stats_.epoch && g.armed) {
+                    watched = true;
+                    if (!g.cpu_seen) {
+                        g.cpu_seen = true;
+                        ++count().first_write_pages;
+                        event({Event::FirstWrite, no_index, address, static_cast<uint32_t>(size)});
+                    }
+                    for (uint32_t id : g.resources) {
+                        auto &r = resources_[id];
+                        if (hits(r, base + at % page_size, n)) {
+                            ++r.cpu_version; ++count().exact_resource_hits; exact = true;
+                        }
+                    }
+                    if (!persistent_) {
+                        for (uint32_t alias : g.aliases) store(writes_.get(), alias, load(raw_, alias));
+                        g.armed = false;
+                    }
+                }
+            }
+            done += n;
+        }
+        if (watched) {
+            ++count().watched_stores;
+            if (!exact) ++count().page_only_stores;
+            if (persistent_ && count().watched_stores >= max_watched_stores) {
+                // Bounded fallback never strands game memory or authorizes reuse.
+                ++count().guard_budget_exhausted;
+                for (auto &r : resources_) r.covered = false;
+                open_all();
+            }
         }
     }
     bool add_span(Resource &r, uintptr_t begin, uint64_t size) {
@@ -189,7 +258,7 @@ public:
         auto lock = hold();
         raw_ = nullptr; writes_.reset(); by_host_.clear(); by_key_.clear();
         groups_.clear(); resources_.clear(); stats_ = {}; phase_ = no_index; event_kinds_ = {};
-        collecting_ = false; edges_ = 0;
+        collecting_ = false; persistent_ = false; edges_ = 0; ledger_ = {}; ++interval_serial_;
     }
     void detach(Page *raw) {
         auto lock = hold();
@@ -202,9 +271,11 @@ public:
         const Page old = load(raw, page);
         store(raw, page, entry);
         if (raw != raw_ || !writes_) return;
-        store(writes_.get(), page, entry);
         if (phase_ < 8) ++count().mapping_updates;
-        if (old == entry || stats_.failed) return;
+        // Republishing an unchanged normal PTE must NOT reopen an armed write PTE.
+        if (old == entry) return;
+        store(writes_.get(), page, entry);
+        if (stats_.failed) return;
         try {
             if (const auto it = by_host_.find(host_page(old, page)); it != by_host_.end()) {
                 auto &g = groups_[it->second];
@@ -212,27 +283,31 @@ public:
                 for (uint32_t r : g.resources) {
                     resources_[r].baseline = false;
                     resources_[r].covered = false;
+                    ++resources_[r].mapping_version;
                 }
                 if (stats_.observing) event({Event::MappingChange, no_index, page * page_size, page_size});
             }
             if (const auto it = by_host_.find(host_page(entry, page)); entry && it != by_host_.end()) {
                 auto &g = groups_[it->second];
                 if (std::find(g.aliases.begin(), g.aliases.end(), page) == g.aliases.end()) g.aliases.push_back(page);
-                for (uint32_t r : g.resources) { resources_[r].baseline = false; resources_[r].covered = false; }
+                for (uint32_t r : g.resources) { resources_[r].baseline = false; resources_[r].covered = false; ++resources_[r].mapping_version; }
                 if (g.armed && g.epoch == stats_.epoch) store(writes_.get(), page, nullptr);
             }
         } catch (...) { fail(); }
     }
     // A collects footprints; B resolves aliases once, then arms pages. New
     // footprints first seen during B remain explicitly uncovered until a later B.
-    void phase(uint32_t phase, bool observe, bool restart = false) noexcept {
+    void phase(uint32_t phase, bool observe, bool restart = false, bool persistent = false) noexcept {
         auto lock = hold();
         open_all(); phase_ = phase;
+        persistent_ = persistent;
+        ++interval_serial_; // Invalidates tokens across EVERY phase, including A->A/restart.
         if (restart) {
             by_host_.clear(); by_key_.clear(); groups_.clear(); resources_.clear(); edges_ = 0;
             const bool bound = stats_.bound, failed = stats_.failed;
             stats_ = {}; event_kinds_ = {}; stats_.bound = bound; stats_.failed = failed;
         }
+        stats_.persistent = persistent;
         collecting_ = phase < 8 && raw_ && !stats_.failed;
         if (!collecting_ || !observe) return;
         try {
@@ -251,7 +326,7 @@ public:
                 for (uint32_t p : g.aliases) store(writes_.get(), p, nullptr);
             }
             for (auto &r : resources_) {
-                r.baseline = false; r.cpu_seen = false;
+                r.baseline = false;
                 r.covered = std::all_of(r.groups.begin(), r.groups.end(), [&](uint32_t g) { return groups_[g].epoch == stats_.epoch; });
             }
             stats_.observing = true;
@@ -279,7 +354,6 @@ public:
                 r.groups.erase(std::unique(r.groups.begin(), r.groups.end()), r.groups.end());
                 if (edges_ + r.groups.size() > max_edges) return reject();
                 r.covered = stats_.observing && std::all_of(r.groups.begin(), r.groups.end(), [&](uint32_t g) { return groups_[g].epoch == stats_.epoch; });
-                r.cpu_seen = stats_.observing && std::any_of(r.groups.begin(), r.groups.end(), [&](uint32_t g) { return groups_[g].epoch == stats_.epoch && groups_[g].cpu_seen; });
                 if (stats_.observing && !r.covered) ++stats_.late_resources;
                 uint32_t id = static_cast<uint32_t>(resources_.size());
                 edges_ += r.groups.size();
@@ -287,27 +361,97 @@ public:
                 for (uint32_t g : resources_.back().groups) groups_[g].resources.push_back(id);
                 it = by_key_.emplace(key, id).first;
             }
-            return {stats_.epoch, it->second};
+            const auto &r = resources_[it->second];
+            return {interval_serial_, it->second, r.mapping_version, r.cpu_version, r.host_version};
         } catch (...) { fail(); return {}; }
     }
-    void after(Token token, uint64_t hash) noexcept {
+    Audit after(Token token, uint64_t hash) noexcept {
         auto lock = hold();
-        if (!collecting_ || token.resource >= resources_.size() || token.epoch != stats_.epoch) return;
+        Audit audit; audit.token = token; audit.phase = phase_; audit.current_hash = hash;
+        if (!collecting_ || token.resource >= resources_.size() || token.epoch != interval_serial_)
+            return audit;
         auto &r = resources_[token.resource];
+        audit.valid = true; audit.had_baseline = r.baseline; audit.previous_hash = r.hash;
+        if (r.mapping_version != token.mapping_version) {
+            ++count().discarded_tokens; audit.reason = HashReason::Raced;
+            return audit; // Never promote a Hash of retired backing into a new baseline.
+        }
         ++count().hash_checks; count().hash_bytes += r.key.size + r.key.palette_size;
         if (stats_.observing && r.covered) ++count().covered_checks;
-        if (r.baseline && r.hash != hash) {
+        audit.stable = r.cpu_version == token.cpu_version && r.host_version == token.host_version;
+        audit.changed = r.baseline && r.hash != hash;
+        audit.reason = r.baseline ? HashReason::Unchanged : HashReason::Baseline;
+        if (audit.changed) {
             ++count().changed;
-            if (!stats_.observing || !r.covered) ++count().changed_uncovered;
-            else if (r.cpu_seen) ++count().changed_cpu_seen;
+            if (!audit.stable) { ++count().changed_raced; audit.reason = HashReason::Raced; }
+            else if (!stats_.observing || !r.covered) { ++count().changed_uncovered; audit.reason = HashReason::Uncovered; }
+            else if (r.cpu_version != r.baseline_cpu) { ++count().changed_cpu_seen; audit.reason = HashReason::CpuWrite; }
+            else if (r.host_version != r.baseline_host) { ++count().changed_host_seen; audit.reason = HashReason::HostNotice; }
             else {
-                ++count().changed_unobserved;
+                ++count().changed_unobserved; audit.reason = HashReason::Unobserved;
                 event({Event::ChangedUnobserved, no_index, r.address,
                     static_cast<uint32_t>(std::min<uint64_t>(r.key.size, UINT32_MAX)), token.resource,
                     0, 0, r.hash, hash});
             }
         }
-        r.hash = hash; r.baseline = true;
+        r.hash = hash; r.baseline = audit.stable;
+        r.baseline_cpu = r.cpu_version; r.baseline_host = r.host_version;
+        return audit;
+    }
+    void host_written(const void *host, uint64_t size, HostWriter writer) noexcept {
+        auto lock = hold();
+        (void)writer; // Exported API identifies the hooked writer classes; not an ownership proof.
+        if (!collecting_ || !stats_.observing || !host || !size) return;
+        const uintptr_t start = reinterpret_cast<uintptr_t>(host);
+        if (size > std::numeric_limits<uintptr_t>::max() - start) return;
+        ++count().host_notices;
+        const uintptr_t first = start & ~(uintptr_t(page_size) - 1);
+        const uintptr_t last = (start + size - 1) & ~(uintptr_t(page_size) - 1);
+        const auto visit = [&](Group &g) {
+            for (uint32_t id : g.resources) {
+                auto &r = resources_[id];
+                if (hits(r, start, size)) { ++r.host_version; ++count().host_resource_hits; }
+            }
+        };
+        // Small unrelated HLE writes pay page lookups, not a full registry walk.
+        // Huge outputs are bounded by the registered groups, not user length.
+        if ((last - first) / page_size + 1 <= groups_.size()) {
+            for (uintptr_t page = first;; page += page_size) {
+                if (const auto it = by_host_.find(page); it != by_host_.end()) visit(groups_[it->second]);
+                if (page == last) break;
+            }
+        } else {
+            for (auto &g : groups_) if (g.host >= first && g.host <= last) visit(g);
+        }
+    }
+    void cache_decision(const Audit &audit, uint32_t slot, uint32_t address, uint64_t size,
+        uint64_t previous, uint64_t current, bool ordinary) noexcept {
+        auto lock = hold();
+        ++ledger_.comparisons;
+        if (previous == current) return;
+        ++ledger_.changes;
+        CacheReason reason = CacheReason::MissingObservation;
+        if (!ordinary) reason = CacheReason::Unsupported;
+        else if (!audit.valid || audit.phase != phase_ || audit.current_hash != current)
+            reason = CacheReason::MissingObservation;
+        else if (!audit.stable) reason = CacheReason::Raced;
+        else if (!audit.had_baseline) reason = CacheReason::FirstBaseline;
+        else if (audit.previous_hash != previous) reason = CacheReason::DifferentBaseline;
+        else switch (audit.reason) {
+        case HashReason::CpuWrite: reason = CacheReason::CpuInterval; break;
+        case HashReason::HostNotice: reason = CacheReason::HostInterval; break;
+        case HashReason::Unobserved: reason = CacheReason::Unobserved; break;
+        case HashReason::Uncovered: reason = CacheReason::Uncovered; break;
+        default: reason = CacheReason::Raced; break;
+        }
+        ++ledger_.reasons[size_t(reason)];
+        const uint32_t region = collecting_ ? 1 : 0;
+        if (ledger_.stored >= ledger_.events.size() || ledger_.stored_by_region[region] >= 64) {
+            ++ledger_.dropped; return;
+        }
+        ++ledger_.stored_by_region[region];
+        ledger_.events[ledger_.stored++] = {phase_, slot, address, audit.token.resource,
+            size, clock_ ? clock_() : 0, stats_.epoch, previous, current, audit.previous_hash, reason};
     }
     Access read(Page *raw, uint32_t address, void *dst, size_t size) {
         auto lock = hold();
@@ -353,7 +497,7 @@ public:
     }
     Snapshot snapshot() const {
         std::lock_guard lock(mutex_);
-        auto result = stats_; result.resources = resources_.size(); result.backing_pages = groups_.size();
+        auto result = stats_; result.cache = ledger_; result.resources = resources_.size(); result.backing_pages = groups_.size();
         return result;
     }
 };
