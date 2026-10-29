@@ -35,6 +35,11 @@ target_compile_definitions(util PRIVATE $<$<CONFIG:Debug,RelWithDebInfo>:TRACY_E
 if(SWITCH)
     if(SWITCH_TRACELAB)
         target_sources(util PRIVATE src/switch_heap_fault_probe.cpp src/switch_heap_fault_entry.cpp)
+        # This TU defines only file-scope assembler symbols. GCC LTO cannot
+        # put them in the static-archive symbol index; retain one native object.
+        # Do not disable LTO for the probe controller or any emulator hot path.
+        set_property(SOURCE src/switch_heap_fault_entry.cpp APPEND PROPERTY
+            COMPILE_OPTIONS "-fno-lto")
         target_link_options(util INTERFACE "-Wl,--wrap=__libnx_exception_entry")
         find_program(SWITCH_HOOK_PYTHON NAMES python3 REQUIRED)
         execute_process(COMMAND "${SWITCH_HOOK_PYTHON}" "${CMAKE_SOURCE_DIR}/scripts/apply-switch-write-watch-hooks.py" --check-applied

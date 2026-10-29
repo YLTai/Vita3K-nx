@@ -8,6 +8,7 @@ The complete emitted wrapper is separately cross-assembled, never executed here.
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -181,6 +182,145 @@ def assembly_gate(tmp):
     assert '<__libnx_exception_entry>' in text
 
 
+
+def symbol_link_gate(tmp, cxx, inc):
+    """Link the REAL probe as its own TU, with assembler symbols in another TU.
+
+    The older SOURCE fixture defines C symbols before including the production
+    .cpp. That can hide an unnamed-namespace object-linkage bug. Nothing here
+    executes a protected write; main returns through the disabled-probe branch.
+    The byte-only host assembler provider checks ABI linkage, not A64 behavior.
+    """
+    probe = ROOT / 'vita3k/util/src/switch_heap_fault_probe.cpp'
+    entry = ROOT / 'vita3k/util/src/switch_heap_fault_entry.cpp'
+    import re
+    symbols = re.findall(r'^\.global (v3k_heap_(?:store(?:8|16|32|64|128)|register_test)(?:_pc)?)$',
+                         entry.read_text(), re.M)
+    pc_symbols = sorted(x for x in symbols if x.endswith('_pc'))
+    source = probe.read_text()
+    declaration = re.search(r'extern \"C\" \{\n.*?\n\}', source, re.S)
+    unnamed = source.find('namespace {')
+    if declaration is None or unnamed < 0 or declaration.start() > unnamed:
+        raise RuntimeError('Assembly ABI declarations must precede the unnamed namespace')
+    if len(pc_symbols) != 6 or len(set(symbols)) != 12:
+        raise RuntimeError('Update the ABI fixture for the actual assembly exports')
+    abi = tmp / 'separate-abi'
+    abi.mkdir()
+    assembler = '.text\n' + ''.join('.global ' + name + '\n' + name + ':\n.byte 0\n'
+                                    for name in symbols)
+    (abi / 'entry.cpp').write_text('asm(R"ABI(' + assembler + ')ABI");\n')
+    (abi / 'caller.cpp').write_text(r"""
+#include <util/switch_heap_fault_probe.h>
+#include <util/switch_memory_validation.h>
+volatile bool run_probe = false;
+namespace switch_validation {
+bool heap_fault_probe_enabled() { return run_probe; }
+void record(const char*,const char*,const char*,const char*,uint64_t,uint64_t) noexcept {}
+}
+int main() { switch_validation::run_heap_fault_probe(); }
+""")
+    flags = [cxx, '-std=c++20', '-O3', '-D__SWITCH__', '-DVITA3K_SWITCH_TRACELAB=1',
+             '-I', str(inc), '-I', str(ROOT / 'vita3k/util/include')]
+    nm = shutil.which('nm')
+    ar = shutil.which('ar')
+    if not nm or not ar:
+        raise RuntimeError('Host nm/ar are required for the separate-TU linkage gate')
+    macros = subprocess.check_output([cxx, '-dM', '-E', '-x', 'c++', '-'], input='', text=True)
+    gnu = '__GNUC__' in macros and '__clang__' not in macros
+    modes = [('no_lto', [])] + ([('lto', ['-flto'])] if gnu else [])
+    for name, lto in modes:
+        obj = abi / (name + '-probe.o')
+        subprocess.run(flags + lto + ['-c', str(probe), '-o', str(obj)], check=True)
+        undefined = subprocess.check_output([nm, '--undefined-only', str(obj)], text=True)
+        for label in pc_symbols:
+            if not re.search(r'\bU\s+' + re.escape(label) + r'$', undefined, re.M):
+                raise RuntimeError('Probe must reference the global assembly label: ' + label)
+        # Match the production source-specific option, even when the rest of
+        # util is built with LTO. Otherwise GCC omits pure-asm archive symbols.
+        policy = (ROOT / 'vita3k/util/CMakeLists.txt').read_text()
+        if not re.search(r'set_property\(SOURCE src/switch_heap_fault_entry\.cpp APPEND PROPERTY\s+'
+                         r'COMPILE_OPTIONS "-fno-lto"\)', policy):
+            raise RuntimeError('Missing native-object policy for assembly-only TU')
+        native = abi / (name + '-entry.o')
+        subprocess.run([cxx, '-O3', *lto, '-fno-lto', '-c', str(abi / 'entry.cpp'),
+                        '-o', str(native)], check=True)
+        archive = abi / (name + '-util.a')
+        subprocess.run([ar, 'rcs', str(archive), str(obj), str(native)], check=True)
+        exe = abi / name
+        subprocess.run(flags + lto + [str(abi / 'caller.cpp'), str(archive), '-o', str(exe)], check=True)
+        subprocess.run([str(exe)], check=True, timeout=10)
+    if gnu:
+        # Negative control: reproduce precisely the CI #45 unnamed-namespace
+        # mistake with the same actual source and independent symbol provider.
+        source = probe.read_text()
+        block = re.search(r'extern "C" \{\n.*?\n\}', source, re.S)
+        if not block:
+            raise RuntimeError('Missing external assembly ABI declaration block')
+        wrong = source[:block.start()] + source[block.end():]
+        anchor = 'namespace switch_validation {\nnamespace {\n'
+        if wrong.count(anchor) != 1:
+            raise RuntimeError('Update scope-regression fixture after source layout change')
+        wrong = wrong.replace(anchor, anchor + block.group(0) + '\n', 1)
+        (abi / 'wrong-scope.cpp').write_text(wrong)
+        subprocess.run(flags + ['-c', str(abi / 'wrong-scope.cpp'), '-o', str(abi / 'wrong.o')], check=True)
+        bad = subprocess.run(flags + [str(abi / 'caller.cpp'), str(abi / 'wrong.o'),
+                             str(abi / 'no_lto-entry.o'), '-o', str(abi / 'wrong')],
+                             capture_output=True, text=True)
+        major = int(re.search(r'^#define __GNUC__ (\d+)$', macros, re.M).group(1))
+        if major >= 15 and (bad.returncode == 0 or 'v3k_heap_store8_pc' not in bad.stderr):
+            raise RuntimeError('GCC 15+ negative control did not reproduce CI #45 link failure')
+        if major < 15:
+            print('Scope regression: GCC ' + str(major) + ' is not the failing target GCC 15; '
+                  'the old-scope fixture is diagnostic only on this host')
+    print('Heap fault ABI: actual probe separately compiled and archive-linked; '
+          + '/'.join(name for name, _ in modes) + '; global PC labels verified; no native execution')
+
+
+
+def target_symbol_gate(tmp):
+    """Compile actual C++ and A64 files separately with the installed Switch SDK.
+
+    A relocatable link resolves the probe's six PC labels without needing the
+    entire emulator or invoking a native store. Run this before the costly build.
+    """
+    cross = shutil.which('aarch64-none-elf-g++')
+    if not cross:
+        print('Switch SDK ABI gate: not run (target compiler unavailable)')
+        return
+    devkitpro = Path(os.environ.get('DEVKITPRO', '/opt/devkitpro'))
+    include = devkitpro / 'libnx/include'
+    if not (include / 'switch.h').is_file():
+        raise RuntimeError('Target compiler exists but real libnx headers are missing')
+    import re
+    flags = [cross, '-std=c++20', '-O3', '-fno-lto', '-D_GNU_SOURCE',
+             '-D__SWITCH__', '-DVITA3K_SWITCH_TRACELAB=1',
+             '-march=armv8-a+crc+crypto', '-mtune=cortex-a57',
+             '-mtp=soft', '-ftls-model=local-exec', '-I', str(include),
+             '-I', str(ROOT / 'vita3k/util/include')]
+    objects = []
+    for name in ('switch_heap_fault_probe', 'switch_heap_fault_entry'):
+        obj = tmp / (name + '-target.o')
+        subprocess.run(flags + ['-c', str(ROOT / ('vita3k/util/src/' + name + '.cpp')),
+                                '-o', str(obj)], check=True)
+        objects.append(str(obj))
+    linked = tmp / 'heap-fault-target-abi.o'
+    subprocess.run([cross, '-nostdlib', '-r', *objects, '-o', str(linked)], check=True)
+    nm = shutil.which('aarch64-none-elf-nm')
+    if not nm:
+        raise RuntimeError('Need the Switch SDK nm for target ABI inspection')
+    text = subprocess.check_output([nm, str(linked)], text=True)
+    labels = re.findall(r'^\.global (v3k_heap_\w+_pc)$',
+                        (ROOT / 'vita3k/util/src/switch_heap_fault_entry.cpp').read_text(), re.M)
+    if len(labels) != 6:
+        raise RuntimeError('Unexpected target PC-label set')
+    for label in labels:
+        if not re.search(r'\bT\s+' + re.escape(label) + r'$', text, re.M):
+            raise RuntimeError('Target assembler label not defined: ' + label)
+    if any(' U ' in line and 'v3k_heap_' in line for line in text.splitlines()):
+        raise RuntimeError('Unresolved target native test ABI: ' + text)
+    print('Switch SDK ABI gate: real probe C++ + real A64 entry relocatable-link passed')
+
+
 def main():
     p=argparse.ArgumentParser();p.add_argument('--cxx',default='c++');p.add_argument('--sanitize',action='store_true');a=p.parse_args()
     with tempfile.TemporaryDirectory(prefix='vita3k-heap-fault-') as name:
@@ -210,6 +350,8 @@ def main():
         report['tests'].append(dict(suite='heap_import',name='while_imported',status='skip'))
         assert module.analyze(report)['GPU_import_reprotect']=='RO_not_supported'
         report['tests'][0]['status']='fail';assert not module.analyze(report)['CPU_recovery_controls_passed']
+        symbol_link_gate(t, a.cxx, inc)
+        target_symbol_gate(t)
         assembly_gate(t)
     print('Heap fault: actual admission/handler/cleanup with mprotect + synthetic frames, actual controller/HUD/export and real A64 assembly/wrap link passed; no Horizon/native execution claim')
 

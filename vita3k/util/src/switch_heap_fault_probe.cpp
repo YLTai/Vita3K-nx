@@ -17,6 +17,19 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+// These are global assembler symbols. In particular, PC-label objects must
+// not be declared inside an unnamed namespace: GCC 15 gives these objects
+// internal C++ linkage even within an extern "C" block. Keep the ABI at
+// file scope so the references match the unmangled labels in entry.cpp.
+extern "C" {
+void v3k_heap_store8(void *, uint64_t); void v3k_heap_store16(void *, uint64_t);
+void v3k_heap_store32(void *, uint64_t); void v3k_heap_store64(void *, uint64_t);
+void v3k_heap_store128(void *, uint64_t);
+extern char v3k_heap_store8_pc[], v3k_heap_store16_pc[], v3k_heap_store32_pc[], v3k_heap_store64_pc[], v3k_heap_store128_pc[];
+void v3k_heap_register_test(void *, void *);
+extern char v3k_heap_register_test_pc[];
+}
+
 namespace switch_validation {
 namespace {
 static_assert(sizeof(uintptr_t) == 8);
@@ -71,14 +84,6 @@ void result(const char *name, bool pass, const HeapFaultResult &r, uint64_t tick
     native_ok &= pass;
 }
 using Store = void (*)(void *, uint64_t);
-extern "C" {
-void v3k_heap_store8(void *, uint64_t); void v3k_heap_store16(void *, uint64_t);
-void v3k_heap_store32(void *, uint64_t); void v3k_heap_store64(void *, uint64_t);
-void v3k_heap_store128(void *, uint64_t);
-extern char v3k_heap_store8_pc[], v3k_heap_store16_pc[], v3k_heap_store32_pc[], v3k_heap_store64_pc[], v3k_heap_store128_pc[];
-void v3k_heap_register_test(void *, void *);
-extern char v3k_heap_register_test_pc[];
-}
 } // namespace
 
 // Called while still in the kernel's user-exception context. No allocations,
