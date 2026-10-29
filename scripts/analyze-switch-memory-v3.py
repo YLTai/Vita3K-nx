@@ -33,7 +33,7 @@ def analyze(data):
     reasons, warnings = [], []
     if data.get('strict_hash') is not True or data.get('hash_skipping') is not False:
         reasons.append('Full-Hash reference not confirmed')
-    if watch.get('hash_skip_authority') is not False or watch.get('scope') != 'JIT_first_write_only_observational':
+    if watch.get('hash_skip_authority') is not False or watch.get('scope') not in ('JIT_first_write_only_observational', 'JIT_first_write_and_selected_HLE_observational'):
         reasons.append('Unrecognized write-observation contract')
     if counts['fail'] or counts['unknown'] or data.get('tests_dropped', 0):
         reasons.append('Failed/unknown/lost startup records')
@@ -66,7 +66,7 @@ def analyze(data):
                       'exclusive_success', 'invalid_accesses', 'first_write_pages', 'armed_pages',
                       'armed_aliases', 'mapping_updates', 'resources_rejected'):
                 number(c, k, integer=True)
-            if c['covered_checks'] > c['hash_checks'] or c['changed'] != c['changed_cpu_seen'] + c['changed_unobserved'] + c['changed_uncovered']:
+            if c['covered_checks'] > c['hash_checks'] or c['changed'] != c['changed_cpu_seen'] + c.get('changed_hle_only', 0) + c['changed_unobserved'] + c['changed_uncovered']:
                 reasons.append(f'Phase {i}: inconsistent observation counts')
             if c['invalid_accesses']:
                 reasons.append(f'Phase {i}: invalid callback access observed')
@@ -83,6 +83,47 @@ def analyze(data):
     unknown = sum(p.get('changed_unobserved', 0) for p in observed)
     if unknown:
         warnings.append('Hash changes without observed JIT writes were recorded. This does NOT attribute them to HLE/GPU: registration races and other untraced paths remain possible.')
+    observer_changes = sum(p.get('changed', 0) for p in observed)
+    cache_changes = sum(p.get('cache_changes', 0) for p in observed)
+    natural_changes = max(observer_changes, cache_changes)
+    challenge_rows = [t for t in tests if t.get('suite') == 'observer_challenge']
+    challenge_failures = [t.get('name') for t in challenge_rows if t.get('status') != 'pass']
+    challenge_names = {t.get('name') for t in challenge_rows}
+    required_challenges = {'native_in_range', 'native_same_value', 'page_false_share_then_payload',
+        'native_alias', 'native_palette_only', 'negative_raw_host', 'negative_hle_page_neighbor',
+        'idempotent_publish_keeps_watch', 'notice_during_hash', 'mapping_during_hash',
+        'phase_boundary_token', 'callback_CAS_success_failure', 'native_cross_page', 'scratch_guard_pages'}
+    required_challenges.update(f'selected_hle_notice_{i}' for i in range(6))
+    required_challenges.update(('cache_baseline_reconciliation', 'cache_history_reconciliation',
+                                'cache_missing_receipt', 'cache_mutated_receipt'))
+    challenge_complete = required_challenges <= challenge_names and not challenge_failures
+    if data.get('validation_revision', 0) >= 4:
+        if not challenge_complete or len(challenge_names) != len(challenge_rows):
+            reasons.append('Missing/failed/duplicate production-observer challenge records')
+        for c in observed:
+            try:
+                for k in ('changed_hle_only', 'changed_cpu_and_hle', 'cpu_range_hits', 'cpu_page_only_hits',
+                          'hle_calls', 'hle_bytes', 'hle_range_hits', 'hle_page_only_hits',
+                          'hash_raced', 'stale_tokens', 'new_baselines', 'clean_candidate_checks', 'clean_candidate_bytes',
+                          'cache_changes', 'cache_baseline_changes', 'cache_shared_changes',
+                          'cache_confirmed_changes', 'cache_unmatched_changes', 'cache_raced_changes'):
+                    number(c, k, integer=True)
+                if c['cache_changes'] != sum(c[k] for k in ('cache_baseline_changes', 'cache_shared_changes',
+                        'cache_confirmed_changes', 'cache_unmatched_changes', 'cache_raced_changes')):
+                    raise ValueError('cache change reconciliation counts do not sum')
+                if c['clean_candidate_checks'] > c['covered_checks']:
+                    raise ValueError('clean candidates exceed covered checks')
+                if c['changed_cpu_and_hle'] > c['changed_cpu_seen']:
+                    raise ValueError('mixed evidence exceeds CPU-seen changes')
+                hooks = c.get('hle_hooks')
+                if not isinstance(hooks, list) or len(hooks) != 6:
+                    raise ValueError('missing HLE hook counters')
+                for v in hooks: number({'v': v}, 'v', integer=True)
+                if sum(hooks) != c['hle_calls']:
+                    raise ValueError('HLE hook counts do not sum to calls')
+            except (ValueError, TypeError, KeyError) as e: reasons.append(str(e))
+    if natural_changes == 0:
+        warnings.append('No content changes recorded by these observer counters. Check TraceLab texture_hash_changed separately for old captures: different baselines/keys can hide changes here. Do not repeat solely for this result.')
     pairs = []
     if not reasons and len(checked) == 4:
         for a, b in ((0, 1), (3, 2)):
@@ -97,10 +138,20 @@ def analyze(data):
                 phases=checked, pairs=pairs, changed_without_observed_cpu=unknown,
                 footprint_count=watch.get('resources'), backing_pages=watch.get('backing_pages'),
                 events=watch.get('events', []), footprints=watch.get('footprints', []),
+                natural_content_changes=natural_changes, observer_content_changes=observer_changes,
+                texture_cache_changes=cache_changes, live_change_coverage_exercised=observer_changes > 0,
+                cache_receipts_available=watch.get('schema_version', 0) >= 2,
+                observer_challenges=dict(records=len(challenge_rows), complete=challenge_complete,
+                                         failures=challenge_failures,
+                                         missing=sorted(required_challenges - challenge_names)),
                 interpretation=[
                     'This measures observation overhead, NOT a hashless speedup. Both variants retain full Hash.',
                     'A already includes the mirror table, boundary checks and footprint lookups. It is NOT the old uninstrumented baseline.',
-                    'CPU-seen is sticky within a B epoch; it does not identify the writer of each individual content change.',
+                    'CPU/HLE-seen are sticky evidence within a B epoch, not causal attribution for each change.',
+                    'Exact-range hits are diagnostic only: opening a shared page taints all dependent resources.',
+                    'Only six selected libc/clib completion hooks are installed; IO, decoders, GPU and arbitrary host stores remain untracked.',
+                    'Known mutation during hashing discards that observation. An unreported writer or stale native PTE can still escape.',
+                    'Synthetic negative controls are expected detections on scratch memory; they never count as natural game changes.',
                     'Covered means software-alias/host-page dependencies were armed; it is NOT complete CPU/HLE/GPU coverage.',
                     'Arming is observational and has no all-JIT safepoint. Zero unexplained changes is NOT a correctness proof.',
                     'Timing excludes settle/boundary intervals; observation counters include the entire phase.',

@@ -80,6 +80,15 @@ int main(int argc, char **argv) {
     s = sv::status_snapshot();
     assert(s.stage == sv::Stage::Settling && s.run_id == 1 && s.phase == 1);
     assert(!s.restart_pending && s.remaining_ms == 48000 && s.stage_remaining_ms == 1000);
+    {
+        sv::StatusSnapshot quiet;
+        quiet.stage = sv::Stage::Complete; quiet.outcome = sv::CaptureOutcome::Ready;
+        quiet.write_shadow = true;
+        auto text = sv::make_hud_text(quiet, tick);
+        assert(text.tone == sv::HudText::Tone::Warning);
+        assert(std::strstr(text.title.data(), "NO LIVE CHANGES"));
+        assert(std::strstr(text.action.data(), "EXIT GAME NORMALLY"));
+    }
     // Advancing the UI clock alone must NEVER complete the run.
     const auto stale = sv::make_hud_text(s, tick + 1000000);
     assert(std::strstr(stale.title.data(), "WAITING FOR SOURCE FRAMES"));
@@ -182,7 +191,7 @@ int main(int argc, char **argv) {
                               ('no_uploads', 'inconclusive'), ('failed', 'invalid'), ('sparse', 'invalid'), ('stall', 'invalid')]:
             report = json.loads((tmp / name / 'memory-validation.json').read_text())
             assert report['capture_outcome'] == outcome, (name, report)
-            assert report['validation_revision'] == 3
+            assert report['validation_revision'] == 4
             assert report['overlay_completion_is_not_graphics_validation']
         assert not (tmp / 'off/memory-validation.json').exists()
         # This must be attached independently of the user-controlled FPS widget.

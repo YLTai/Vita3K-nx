@@ -25,12 +25,23 @@ struct Counts {
     uint64_t callback_stores = 0, callback_reads = 0, exclusive_success = 0;
     uint64_t invalid_accesses = 0, first_write_pages = 0, armed_pages = 0, armed_aliases = 0;
     uint64_t mapping_updates = 0, resources_rejected = 0;
+    uint64_t changed_hle_only = 0, changed_cpu_and_hle = 0;
+    uint64_t cpu_range_hits = 0, cpu_page_only_hits = 0;
+    uint64_t hle_calls = 0, hle_bytes = 0, hle_range_hits = 0, hle_page_only_hits = 0;
+    uint64_t hash_raced = 0, stale_tokens = 0, new_baselines = 0;
+    uint64_t clean_candidate_checks = 0, clean_candidate_bytes = 0;
+    uint64_t cache_changes = 0, cache_baseline_changes = 0, cache_shared_changes = 0;
+    uint64_t cache_confirmed_changes = 0, cache_unmatched_changes = 0, cache_raced_changes = 0;
+    std::array<uint64_t, static_cast<size_t>(HleHook::Count)> hle_hooks{};
 };
 struct Event {
-    enum Kind : uint32_t { FirstWrite, ChangedUnobserved, MappingChange, InvalidAccess };
+    enum Kind : uint32_t { FirstWrite, ChangedUnobserved, MappingChange, InvalidAccess, HleWrite, CacheChange };
     Kind kind = FirstWrite;
     uint32_t phase = no_index, address = 0, size = 0, resource = no_index;
     uint64_t tick = 0, epoch = 0, before_hash = 0, after_hash = 0;
+    uint32_t exact_hits = 0, page_only_hits = 0;
+    HashObservation reason = HashObservation::Ignored;
+    uintptr_t host = 0;
 };
 struct Key {
     uintptr_t pixels = 0, palette = 0;
@@ -68,7 +79,8 @@ class Table {
         Key key;
         uint32_t address = 0;
         uint64_t hash = 0;
-        bool baseline = false, covered = false, cpu_seen = false;
+        bool baseline = false, covered = false, cpu_seen = false, hle_seen = false;
+        uint64_t mutation = 0;
         std::vector<uint32_t> groups;
     };
     mutable std::recursive_mutex mutex_;
@@ -80,7 +92,8 @@ class Table {
     std::vector<Resource> resources_;
     Snapshot stats_;
     uint32_t phase_ = no_index;
-    std::array<uint32_t, 4> event_kinds_{};
+    std::array<uint32_t, 6> event_kinds_{};
+    uint64_t phase_serial_ = 0;
     bool collecting_ = false;
     size_t edges_ = 0;
     uint64_t (*clock_)() = nullptr;
@@ -95,7 +108,7 @@ class Table {
     void event(Event e) {
         // Reserve room for unexplained changes instead of letting an early
         // burst of first-write/mapping events consume the entire event buffer.
-        if (e.kind != Event::ChangedUnobserved && event_kinds_[e.kind] >= 32) {
+        if (e.kind != Event::ChangedUnobserved && e.kind != Event::CacheChange && (event_kinds_[e.kind] >= 24 || stats_.event_count >= 96)) {
             ++stats_.events_dropped; return;
         }
         ++event_kinds_[e.kind];
@@ -134,19 +147,40 @@ class Table {
             done += n;
         }
     }
+    static bool overlaps(uintptr_t a, uint64_t n, uintptr_t b, uint64_t m) {
+        // Subtraction avoids end-address overflow; ranges are nonempty.
+        return n && m && (a <= b ? uint64_t(b - a) < n : uint64_t(a - b) < m);
+    }
+    static bool exact_hit(const Key &key, uintptr_t host, size_t size) {
+        return overlaps(key.pixels, key.size, host, size)
+            || overlaps(key.palette, key.palette_size, host, size);
+    }
     void written(uint32_t address, size_t size) {
         if (!stats_.observing) return;
-        for (uint64_t p = address / page_size; p <= (uint64_t(address) + size - 1) / page_size; ++p) {
-            const auto found = by_host_.find(host_page(load(raw_, static_cast<uint32_t>(p)), static_cast<uint32_t>(p)));
+        for (size_t done = 0; done < size;) {
+            const uint32_t at = static_cast<uint32_t>(uint64_t(address) + done);
+            const uint32_t p = at / page_size;
+            const size_t n = std::min(size - done, size_t(page_size - at % page_size));
+            const uintptr_t host = host_page(load(raw_, p), p) + at % page_size;
+            const auto found = by_host_.find(host & ~(uintptr_t(page_size) - 1));
+            done += n;
             if (found == by_host_.end()) continue;
             auto &g = groups_[found->second];
             if (g.epoch != stats_.epoch || !g.armed) continue;
             g.cpu_seen = true;
-            for (uint32_t r : g.resources) resources_[r].cpu_seen = true;
+            Event e{Event::FirstWrite, no_index, at, static_cast<uint32_t>(n)};
+            e.host = host;
+            for (uint32_t id : g.resources) {
+                auto &r = resources_[id];
+                // Even an outside-footprint first write opens the entire page:
+                // later direct writes can hit the texture. Never use the exact
+                // overlap test to keep that resource "clean".
+                r.cpu_seen = true; ++r.mutation;
+                if (exact_hit(r.key, host, n)) { ++e.exact_hits; ++count().cpu_range_hits; }
+                else { ++e.page_only_hits; ++count().cpu_page_only_hits; }
+            }
             ++count().first_write_pages;
-            event({Event::FirstWrite, no_index, address, static_cast<uint32_t>(size)});
-            // Publish only after the actual successful store. All software
-            // aliases of this host backing reopen together.
+            event(e);
             for (uint32_t alias : g.aliases) store(writes_.get(), alias, load(raw_, alias));
             g.armed = false;
         }
@@ -189,7 +223,7 @@ public:
         auto lock = hold();
         raw_ = nullptr; writes_.reset(); by_host_.clear(); by_key_.clear();
         groups_.clear(); resources_.clear(); stats_ = {}; phase_ = no_index; event_kinds_ = {};
-        collecting_ = false; edges_ = 0;
+        collecting_ = false; edges_ = 0; phase_serial_ = 0;
     }
     void detach(Page *raw) {
         auto lock = hold();
@@ -202,23 +236,25 @@ public:
         const Page old = load(raw, page);
         store(raw, page, entry);
         if (raw != raw_ || !writes_) return;
+        // Re-publishing an unchanged PTE must not silently disarm a watched page.
+        if (old == entry) return;
         store(writes_.get(), page, entry);
         if (phase_ < 8) ++count().mapping_updates;
-        if (old == entry || stats_.failed) return;
+        if (stats_.failed) return;
         try {
             if (const auto it = by_host_.find(host_page(old, page)); it != by_host_.end()) {
                 auto &g = groups_[it->second];
                 std::erase(g.aliases, page);
                 for (uint32_t r : g.resources) {
                     resources_[r].baseline = false;
-                    resources_[r].covered = false;
+                    resources_[r].covered = false; ++resources_[r].mutation;
                 }
                 if (stats_.observing) event({Event::MappingChange, no_index, page * page_size, page_size});
             }
             if (const auto it = by_host_.find(host_page(entry, page)); entry && it != by_host_.end()) {
                 auto &g = groups_[it->second];
                 if (std::find(g.aliases.begin(), g.aliases.end(), page) == g.aliases.end()) g.aliases.push_back(page);
-                for (uint32_t r : g.resources) { resources_[r].baseline = false; resources_[r].covered = false; }
+                for (uint32_t r : g.resources) { resources_[r].baseline = false; resources_[r].covered = false; ++resources_[r].mutation; }
                 if (g.armed && g.epoch == stats_.epoch) store(writes_.get(), page, nullptr);
             }
         } catch (...) { fail(); }
@@ -227,7 +263,7 @@ public:
     // footprints first seen during B remain explicitly uncovered until a later B.
     void phase(uint32_t phase, bool observe, bool restart = false) noexcept {
         auto lock = hold();
-        open_all(); phase_ = phase;
+        open_all(); phase_ = phase; ++phase_serial_;
         if (restart) {
             by_host_.clear(); by_key_.clear(); groups_.clear(); resources_.clear(); edges_ = 0;
             const bool bound = stats_.bound, failed = stats_.failed;
@@ -251,7 +287,7 @@ public:
                 for (uint32_t p : g.aliases) store(writes_.get(), p, nullptr);
             }
             for (auto &r : resources_) {
-                r.baseline = false; r.cpu_seen = false;
+                r.baseline = false; r.cpu_seen = false; r.hle_seen = false;
                 r.covered = std::all_of(r.groups.begin(), r.groups.end(), [&](uint32_t g) { return groups_[g].epoch == stats_.epoch; });
             }
             stats_.observing = true;
@@ -278,7 +314,7 @@ public:
                 std::sort(r.groups.begin(), r.groups.end());
                 r.groups.erase(std::unique(r.groups.begin(), r.groups.end()), r.groups.end());
                 if (edges_ + r.groups.size() > max_edges) return reject();
-                r.covered = stats_.observing && std::all_of(r.groups.begin(), r.groups.end(), [&](uint32_t g) { return groups_[g].epoch == stats_.epoch; });
+                r.covered = false; // A newly discovered footprint has no complete interval history.
                 r.cpu_seen = stats_.observing && std::any_of(r.groups.begin(), r.groups.end(), [&](uint32_t g) { return groups_[g].epoch == stats_.epoch && groups_[g].cpu_seen; });
                 if (stats_.observing && !r.covered) ++stats_.late_resources;
                 uint32_t id = static_cast<uint32_t>(resources_.size());
@@ -287,27 +323,112 @@ public:
                 for (uint32_t g : resources_.back().groups) groups_[g].resources.push_back(id);
                 it = by_key_.emplace(key, id).first;
             }
-            return {stats_.epoch, it->second};
+            return {stats_.epoch, it->second, phase_serial_, resources_[it->second].mutation};
         } catch (...) { fail(); return {}; }
     }
-    void after(Token token, uint64_t hash) noexcept {
+    HashObservation after(Token token, uint64_t hash) noexcept {
         auto lock = hold();
-        if (!collecting_ || token.resource >= resources_.size() || token.epoch != stats_.epoch) return;
+        if (!collecting_ || token.resource >= resources_.size()) return HashObservation::Ignored;
+        if (token.epoch != stats_.epoch || token.phase_serial != phase_serial_) {
+            ++count().stale_tokens; return HashObservation::Stale;
+        }
         auto &r = resources_[token.resource];
         ++count().hash_checks; count().hash_bytes += r.key.size + r.key.palette_size;
+        if (token.mutation != r.mutation) {
+            ++count().hash_raced; r.baseline = false; return HashObservation::Raced;
+        }
+        HashObservation observed = r.baseline ? HashObservation::Unchanged : HashObservation::Baseline;
+        if (!r.baseline) ++count().new_baselines;
+        if (stats_.observing && r.covered && !r.cpu_seen && !r.hle_seen) {
+            ++count().clean_candidate_checks;
+            count().clean_candidate_bytes += r.key.size + r.key.palette_size;
+        }
         if (stats_.observing && r.covered) ++count().covered_checks;
         if (r.baseline && r.hash != hash) {
             ++count().changed;
-            if (!stats_.observing || !r.covered) ++count().changed_uncovered;
-            else if (r.cpu_seen) ++count().changed_cpu_seen;
+            if (!stats_.observing || !r.covered) { ++count().changed_uncovered; observed = HashObservation::UncoveredChange; }
+            else if (r.cpu_seen) {
+                ++count().changed_cpu_seen; observed = HashObservation::CpuChange;
+                if (r.hle_seen) ++count().changed_cpu_and_hle;
+            } else if (r.hle_seen) { ++count().changed_hle_only; observed = HashObservation::HleChange; }
             else {
-                ++count().changed_unobserved;
+                ++count().changed_unobserved; observed = HashObservation::UnobservedChange;
                 event({Event::ChangedUnobserved, no_index, r.address,
                     static_cast<uint32_t>(std::min<uint64_t>(r.key.size, UINT32_MAX)), token.resource,
                     0, 0, r.hash, hash});
             }
         }
         r.hash = hash; r.baseline = true;
+        return observed;
+    }
+    // Reconcile per-cache-entry invalidations with the distinct backing-key
+    // observer. A cache's old hash may predate this observer's baseline, or a
+    // different view may already have observed the same bytes. Count every
+    // cache invalidation instead of mistaking observer.changed==0 for no change.
+    void cache_changed(Token token, HashObservation reason, bool receipt_matches,
+        uint32_t address, uint64_t size, uint64_t previous, uint64_t current) noexcept {
+        auto lock = hold();
+        if (!collecting_ || previous == current) return;
+        ++count().cache_changes;
+        if (!receipt_matches || token.resource >= resources_.size()
+            || token.epoch != stats_.epoch || token.phase_serial != phase_serial_) {
+            reason = HashObservation::Ignored;
+        } else if (token.mutation != resources_[token.resource].mutation) {
+            reason = HashObservation::Raced;
+        }
+        switch (reason) {
+        case HashObservation::Baseline: ++count().cache_baseline_changes; break;
+        case HashObservation::Unchanged: ++count().cache_shared_changes; break;
+        case HashObservation::CpuChange: case HashObservation::HleChange:
+        case HashObservation::UnobservedChange: case HashObservation::UncoveredChange:
+            ++count().cache_confirmed_changes; break;
+        case HashObservation::Raced: ++count().cache_raced_changes; break;
+        default: ++count().cache_unmatched_changes; break;
+        }
+        Event e{Event::CacheChange, no_index, address,
+            static_cast<uint32_t>(std::min<uint64_t>(size, UINT32_MAX)),
+            token.resource, 0, 0, previous, current};
+        e.reason = reason; event(e);
+    }
+    // Completion-only notice: no memory read/write, no PTE reopening, and no
+    // lifetime/snapshot guarantee. Raw writes can race Hash before this call.
+    void hle_completed(Page *raw, const void *destination, uint64_t size, HleHook hook) noexcept {
+        auto lock = hold();
+        const uintptr_t begin = reinterpret_cast<uintptr_t>(destination);
+        if (!collecting_ || raw != raw_ || !begin || !size
+            || size > std::numeric_limits<uintptr_t>::max() - begin
+            || static_cast<size_t>(hook) >= static_cast<size_t>(HleHook::Count)) return;
+        ++count().hle_calls; count().hle_bytes += size;
+        ++count().hle_hooks[static_cast<size_t>(hook)];
+        if (!stats_.observing) return;
+        Event e{Event::HleWrite}; e.host = begin;
+        e.size = static_cast<uint32_t>(std::min<uint64_t>(size, UINT32_MAX));
+        // Iterating registered groups bounds work even for a very large output.
+        // Small writes use hash lookups, not a scan of every watched page.
+        const uintptr_t first = begin & ~(uintptr_t(page_size) - 1);
+        const uintptr_t last = (begin + size - 1) & ~(uintptr_t(page_size) - 1);
+        const auto visit = [&](Group &g) {
+            if (g.epoch != stats_.epoch || !overlaps(g.host, page_size, begin, size)) return;
+            const uintptr_t at = std::max(begin, g.host);
+            const size_t n = static_cast<size_t>(std::min<uint64_t>(page_size - (at - g.host), size - (at - begin)));
+            for (uint32_t id : g.resources) {
+                auto &r = resources_[id];
+                if (exact_hit(r.key, at, n)) {
+                    r.hle_seen = true; ++r.mutation;
+                    ++e.exact_hits; ++count().hle_range_hits;
+                } else { ++e.page_only_hits; ++count().hle_page_only_hits; }
+            }
+        };
+        if ((last - first) / page_size + 1 > groups_.size()) {
+            for (auto &g : groups_) visit(g);
+        } else {
+            for (uintptr_t p = first;; p += page_size) {
+                const auto it = by_host_.find(p);
+                if (it != by_host_.end()) visit(groups_[it->second]);
+                if (p == last) break;
+            }
+        }
+        if (e.exact_hits || e.page_only_hits) event(e);
     }
     Access read(Page *raw, uint32_t address, void *dst, size_t size) {
         auto lock = hold();

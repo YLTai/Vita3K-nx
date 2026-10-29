@@ -62,6 +62,14 @@ struct Phase {
 
 Options options;
 watch::Table live_watch;
+struct HashReceipt {
+    watch::Token token;
+    watch::HashObservation observation = watch::HashObservation::Ignored;
+    uint32_t address = 0;
+    uint64_t size = 0, hash = 0;
+    bool complete = false;
+};
+thread_local HashReceipt last_hash_receipt; // render-thread sequence, never shared with writers
 uint32_t phase_count() { return options.write_shadow ? 4 : 8; }
 PhasePosition position_at(uint64_t elapsed, uint64_t settle, uint64_t measure) {
     auto result = phase_position(elapsed, settle, measure);
@@ -191,6 +199,8 @@ void publish_status(uint64_t tick) {
     out.watch_failed = observation.failed;
     for (const auto &p : observation.phases) {
         out.first_write_pages += p.first_write_pages;
+        out.natural_changes += std::max(p.changed, p.cache_changes);
+        out.hle_range_hits += p.hle_range_hits;
         out.unobserved_changes += p.changed_unobserved;
         out.watch_failed |= p.invalid_accesses != 0;
     }
@@ -500,18 +510,39 @@ watch::Access live_exclusive(uint8_t **normal, uint32_t address, uint64_t value,
 watch::Token live_hash_begin(uint8_t **normal, uint32_t address, const void *pixels,
     uint64_t size, const void *palette, uint64_t palette_size) {
     if (!enabled() || !options.write_shadow) return {};
-    return live_watch.before(normal, address, pixels, size, palette, palette_size);
+    last_hash_receipt = {};
+    last_hash_receipt.address = address; last_hash_receipt.size = size;
+    last_hash_receipt.token = live_watch.before(normal, address, pixels, size, palette, palette_size);
+    return last_hash_receipt.token;
+}
+void live_hle_write_completed(uint8_t **normal, const void *destination,
+    uint64_t size, watch::HleHook hook) noexcept {
+    if (enabled() && options.write_shadow)
+        live_watch.hle_completed(normal, destination, size, hook);
 }
 void live_hash_end(watch::Token token, uint64_t hash) {
-    if (token.resource != watch::no_index) live_watch.after(token, hash);
+    last_hash_receipt.token = token; last_hash_receipt.hash = hash;
+    last_hash_receipt.observation = token.resource == watch::no_index
+        ? watch::HashObservation::Ignored : live_watch.after(token, hash);
+    last_hash_receipt.complete = true;
+}
+void live_hash_reset() noexcept { last_hash_receipt = {}; }
+void live_texture_cache_changed(uint32_t address, uint64_t size,
+    uint64_t previous_hash, uint64_t new_hash) noexcept {
+    if (!enabled() || !options.write_shadow) return;
+    const auto receipt = last_hash_receipt;
+    last_hash_receipt = {};
+    live_watch.cache_changed(receipt.token, receipt.observation,
+        receipt.complete && receipt.address == address && receipt.size == size && receipt.hash == new_hash,
+        address, size, previous_hash, new_hash);
 }
 
 static void write_shadow_report(FILE *file) {
     const auto snapshot = live_watch.snapshot();
     using U = unsigned long long;
     std::fprintf(file, ",\n  \"write_shadow\": {\n"
-        "    \"schema_version\":1,\n    \"bound\":%s,\n    \"failed\":%s,\n"
-        "    \"hash_skip_authority\":false,\n    \"scope\":\"JIT_first_write_only_observational\",\n"
+        "    \"schema_version\":2,\n    \"bound\":%s,\n    \"failed\":%s,\n"
+        "    \"hash_skip_authority\":false,\n    \"scope\":\"JIT_first_write_and_selected_HLE_observational\",\n"
         "    \"arm_safepoint\":false,\n    \"HLE_GPU_coverage\":false,\n"
         "    \"resources\":%llu,\n    \"backing_pages\":%llu,\n    \"late_resources\":%llu,\n"
         "    \"events_dropped\":%llu,\n    \"phases\":[",
@@ -523,21 +554,37 @@ static void write_shadow_report(FILE *file) {
             "\"changed\":%llu,\"changed_cpu_seen\":%llu,\"changed_unobserved\":%llu,\"changed_uncovered\":%llu,"
             "\"callback_stores\":%llu,\"callback_reads\":%llu,\"exclusive_success\":%llu,\"invalid_accesses\":%llu,"
             "\"first_write_pages\":%llu,\"armed_pages\":%llu,\"armed_aliases\":%llu,"
-            "\"mapping_updates\":%llu,\"resources_rejected\":%llu}",
+            "\"mapping_updates\":%llu,\"resources_rejected\":%llu",
             i ? "," : "", i, U(c.hash_checks), U(c.hash_bytes), U(c.covered_checks), U(c.changed),
             U(c.changed_cpu_seen), U(c.changed_unobserved), U(c.changed_uncovered),
             U(c.callback_stores), U(c.callback_reads), U(c.exclusive_success), U(c.invalid_accesses),
             U(c.first_write_pages), U(c.armed_pages), U(c.armed_aliases), U(c.mapping_updates), U(c.resources_rejected));
+        std::fprintf(file, ",\"changed_hle_only\":%llu,\"changed_cpu_and_hle\":%llu,"
+            "\"cpu_range_hits\":%llu,\"cpu_page_only_hits\":%llu,\"hle_calls\":%llu,\"hle_bytes\":%llu,"
+            "\"hle_range_hits\":%llu,\"hle_page_only_hits\":%llu,\"hash_raced\":%llu,\"stale_tokens\":%llu,"
+            "\"new_baselines\":%llu,\"clean_candidate_checks\":%llu,\"clean_candidate_bytes\":%llu,\"hle_hooks\":[",
+            U(c.changed_hle_only), U(c.changed_cpu_and_hle), U(c.cpu_range_hits), U(c.cpu_page_only_hits),
+            U(c.hle_calls), U(c.hle_bytes), U(c.hle_range_hits), U(c.hle_page_only_hits), U(c.hash_raced),
+            U(c.stale_tokens), U(c.new_baselines), U(c.clean_candidate_checks), U(c.clean_candidate_bytes));
+        for (size_t h = 0; h < c.hle_hooks.size(); ++h)
+            std::fprintf(file, "%s%llu", h ? "," : "", U(c.hle_hooks[h]));
+        std::fprintf(file, "],\"cache_changes\":%llu,\"cache_baseline_changes\":%llu,"
+            "\"cache_shared_changes\":%llu,\"cache_confirmed_changes\":%llu,"
+            "\"cache_unmatched_changes\":%llu,\"cache_raced_changes\":%llu}",
+            U(c.cache_changes), U(c.cache_baseline_changes), U(c.cache_shared_changes),
+            U(c.cache_confirmed_changes), U(c.cache_unmatched_changes), U(c.cache_raced_changes));
     }
     std::fputs("\n    ],\n    \"events\":[", file);
     for (uint64_t i = 0; i < snapshot.event_count; ++i) {
         const auto &e = snapshot.events[i];
         const char *kind = e.kind == watch::Event::FirstWrite ? "first_cpu_write"
             : e.kind == watch::Event::ChangedUnobserved ? "hash_changed_without_observed_CPU_write"
-            : e.kind == watch::Event::MappingChange ? "mapping_change" : "invalid_callback_access";
+            : e.kind == watch::Event::MappingChange ? "mapping_change"
+            : e.kind == watch::Event::HleWrite ? "selected_hle_write_completed"
+            : e.kind == watch::Event::CacheChange ? "texture_cache_changed" : "invalid_callback_access";
         std::fprintf(file, "%s\n      {\"kind\":\"%s\",\"phase\":%u,\"address\":%u,\"size\":%u,\"resource\":%u,"
-            "\"tick\":%llu,\"epoch\":%llu,\"before_hash_hex\":\"%016llx\",\"after_hash_hex\":\"%016llx\"}",
-            i ? "," : "", kind, e.phase, e.address, e.size, e.resource, U(e.tick), U(e.epoch), U(e.before_hash), U(e.after_hash));
+            "\"tick\":%llu,\"epoch\":%llu,\"before_hash_hex\":\"%016llx\",\"after_hash_hex\":\"%016llx\",\"exact_hits\":%u,\"page_only_hits\":%u,\"host_hex\":\"%016llx\",\"reason\":%u}",
+            i ? "," : "", kind, e.phase, e.address, e.size, e.resource, U(e.tick), U(e.epoch), U(e.before_hash), U(e.after_hash), e.exact_hits, e.page_only_hits, U(e.host), static_cast<unsigned>(e.reason));
     }
     std::fputs("\n    ],\n    \"footprints\":[", file);
     const auto footprints = live_watch.footprints();
@@ -612,7 +659,7 @@ void write_report(const char *directory) {
             static_cast<unsigned long long>(p.excluded_intervals), 1000.0 * p.excluded_ticks / hz);
     }
     const auto summary = status_snapshot();
-    std::fprintf(file, "\n    ]\n  },\n  \"validation_revision\":3,\n"
+    std::fprintf(file, "\n    ]\n  },\n  \"validation_revision\":4,\n"
         "  \"capture_outcome\":\"%s\",\n  \"overlay_refresh_hz\":4,\n"
         "  \"overlay_completion_is_not_graphics_validation\":true", outcome_name(summary.outcome));
     if (options.write_shadow) write_shadow_report(file);

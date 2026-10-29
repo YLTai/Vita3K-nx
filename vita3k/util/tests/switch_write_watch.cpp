@@ -2,6 +2,7 @@
 // Host execution does not validate Dynarmic native code or GPU visibility.
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include <util/switch_write_watch.h>
+#include <util/switch_write_watch_challenges.h>
 #include <atomic>
 #include <cassert>
 #include <cstdlib>
@@ -135,4 +136,20 @@ int main() {
         auto s = f.table.snapshot();
         assert(s.event_count == 128 && s.events_dropped > 0 && s.phases[1].changed_unobserved > 128);
     }
+    {
+        Fixture f;
+        unsigned passed = 0;
+        run_challenges(f.table, f.ptes.get(), f.bytes.get(), f.bytes.get() + 2 * page_size,
+            0x20000, 0x40000,
+            [&](uint32_t address, uint64_t value, size_t size) {
+                // Host adapter is a callback, NOT native JIT execution.
+                return f.table.write(f.ptes.get(), address, &value, size) == Access::Complete;
+            },
+            [&](const char *name, bool ok, const char *) {
+                if (!ok) std::fprintf(stderr, "challenge failed: %s\n", name);
+                assert(ok); ++passed;
+            });
+        assert(passed == 23);
+    }
+
 }

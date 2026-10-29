@@ -124,6 +124,88 @@
         {
           "old": "    if (data.address()) {\n        data_hash = hash_data(data.get(mem), texture_size);\n    }\n\n    switch (base_format) {\n    case SCE_GXM_TEXTURE_BASE_FORMAT_P4:\n        return data_hash ^ hash_palette_data(texture, 16, mem);\n    case SCE_GXM_TEXTURE_BASE_FORMAT_P8:\n        return data_hash ^ hash_palette_data(texture, 256, mem);\n    default:\n        return data_hash;\n    }\n",
           "new": "    const uint32_t palette_count = base_format == SCE_GXM_TEXTURE_BASE_FORMAT_P4 ? 16\n        : base_format == SCE_GXM_TEXTURE_BASE_FORMAT_P8 ? 256 : 0;\n    const auto observation = switch_validation::live_hash_begin(mem.page_table.get(), data.address(),\n        data.address() ? data.get(mem) : nullptr, texture_size,\n        palette_count ? get_texture_palette(texture, mem) : nullptr, palette_count * sizeof(uint32_t));\n    if (data.address()) {\n        data_hash = hash_data(data.get(mem), texture_size);\n    }\n    if (palette_count)\n        data_hash ^= hash_palette_data(texture, palette_count, mem);\n    // Always return the original FULL content Hash. Observation is not used\n    // to decide cache reuse, uploads, GPU barriers, or resource ownership.\n    switch_validation::live_hash_end(observation, data_hash);\n    return data_hash;\n"
+        },
+        {
+          "old": "uint64_t hash_texture_data(const SceGxmTexture &texture, uint32_t texture_size, const MemState &mem) {\n    tracelab::Scope",
+          "new": "uint64_t hash_texture_data(const SceGxmTexture &texture, uint32_t texture_size, const MemState &mem) {\n    switch_validation::live_hash_reset(); // Also clear stale receipts on invalid-range early returns.\n    tracelab::Scope"
+        },
+        {
+          "old": "                    upload = previous_hash != info->hash;\n                    tracelab::count",
+          "new": "                    upload = previous_hash != info->hash;\n                    if (upload && !import_textures && !export_textures)\n                        switch_validation::live_texture_cache_changed(gxm_texture.data_addr << 2,\n                            info->texture_size, previous_hash ^ 1, info->hash ^ 1);\n                    tracelab::count"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/modules/SceLibc/SceLibc.cpp",
+      "base_blob": "4147d5f1faead96f46e1688c5861f92213d9e866",
+      "replacements": [
+        {
+          "old": "#include <util/tracy.h>\n",
+          "new": "#include <util/tracy.h>\n#include <util/switch_write_watch_api.h>\n"
+        },
+        {
+          "old": "    TRACY_FUNC(memcpy, destination, source, num);\n    memcpy(destination, source, num);",
+          "new": "    TRACY_FUNC(memcpy, destination, source, num);\n    memcpy(destination, source, num);\n    switch_validation::live_hle_write_completed(emuenv.mem.page_table.get(), destination, num,\n        switch_validation::watch::HleHook::LibcMemcpy);"
+        },
+        {
+          "old": "    TRACY_FUNC(memmove, destination, source, num);\n    memmove(destination, source, num);",
+          "new": "    TRACY_FUNC(memmove, destination, source, num);\n    memmove(destination, source, num);\n    switch_validation::live_hle_write_completed(emuenv.mem.page_table.get(), destination, num,\n        switch_validation::watch::HleHook::LibcMemmove);"
+        },
+        {
+          "old": "    TRACY_FUNC(memset, str, c, n);\n    memset(str.get(emuenv.mem), c, n);",
+          "new": "    TRACY_FUNC(memset, str, c, n);\n    auto *const destination = str.get(emuenv.mem);\n    memset(destination, c, n);\n    switch_validation::live_hle_write_completed(emuenv.mem.page_table.get(), destination, n,\n        switch_validation::watch::HleHook::LibcMemset);"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/modules/SceLibKernel/SceLibKernel.cpp",
+      "base_blob": "cf06ee74395bdd42b6638e5302ddc50145361f73",
+      "replacements": [
+        {
+          "old": "#include <util/tracy.h>\n",
+          "new": "#include <util/tracy.h>\n#include <util/switch_write_watch_api.h>\n"
+        },
+        {
+          "old": "    TRACY_FUNC(sceClibMemcpy, dst, src, len);\n    memcpy(dst.get(emuenv.mem), src, len);",
+          "new": "    TRACY_FUNC(sceClibMemcpy, dst, src, len);\n    auto *const destination = dst.get(emuenv.mem);\n    memcpy(destination, src, len);\n    switch_validation::live_hle_write_completed(emuenv.mem.page_table.get(), destination, len,\n        switch_validation::watch::HleHook::ClibMemcpy);"
+        },
+        {
+          "old": "    TRACY_FUNC(sceClibMemmove, dst, src, len);\n    memmove(dst.get(emuenv.mem), src, len);",
+          "new": "    TRACY_FUNC(sceClibMemmove, dst, src, len);\n    auto *const destination = dst.get(emuenv.mem);\n    memmove(destination, src, len);\n    switch_validation::live_hle_write_completed(emuenv.mem.page_table.get(), destination, len,\n        switch_validation::watch::HleHook::ClibMemmove);"
+        },
+        {
+          "old": "    TRACY_FUNC(sceClibMemset, dst, ch, len);\n    memset(dst.get(emuenv.mem), ch, len);",
+          "new": "    TRACY_FUNC(sceClibMemset, dst, ch, len);\n    auto *const destination = dst.get(emuenv.mem);\n    memset(destination, ch, len);\n    switch_validation::live_hle_write_completed(emuenv.mem.page_table.get(), destination, len,\n        switch_validation::watch::HleHook::ClibMemset);"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/cpu/src/switch_memory_validation.cpp",
+      "base_blob": "57427d65eab486b386d9c83299e016f7e4aa34da",
+      "replacements": [
+        {
+          "old": "#include <util/switch_memory_validation.h>\n",
+          "new": "#include <util/switch_memory_validation.h>\n#include <util/switch_write_watch_challenges.h>\n"
+        },
+        {
+          "old": "    Dynarmic::A32::Jit *active_jit = nullptr;\n",
+          "new": "    Dynarmic::A32::Jit *active_jit = nullptr;\n    switch_validation::watch::Table *observer = nullptr;\n"
+        },
+        {
+          "old": "    T read(uint32_t address) {\n        ++reads;",
+          "new": "    T read(uint32_t address) {\n        ++reads;\n        if (observer) {\n            T value{};\n            if (observer->read(read_table->data(), address, &value, sizeof(T))\n                != switch_validation::watch::Access::Complete) ++invalid_reads;\n            return value;\n        }"
+        },
+        {
+          "old": "    void write(uint32_t address, T value) {\n        ++writes;",
+          "new": "    void write(uint32_t address, T value) {\n        ++writes;\n        if (observer) {\n            if (observer->write(read_table->data(), address, &value, sizeof(T))\n                != switch_validation::watch::Access::Complete) ++invalid_writes;\n            return;\n        }"
+        },
+        {
+          "old": "void run_config_rejections(MemoryFixture &memory) {",
+          "new": "void run_production_observer_challenges(MemoryFixture &memory) {\n    using namespace switch_validation::watch;\n    Table observer;\n    auto *write_table = observer.bind(memory.read_table->data());\n    if (!write_table) throw std::bad_alloc();\n    // The guard outlives jit: cleanup clears fixture pointers on every exit.\n    struct Detach {\n        MemoryFixture &memory;\n        ~Detach() { memory.observer = nullptr; memory.active_jit = nullptr; }\n    } detach{memory};\n    memory.observer = &observer;\n    auto config = config_for(memory, TableMode::FirstWrite, true);\n    config.write_page_table = reinterpret_cast<PageTable *>(write_table);\n    Dynarmic::A32::Jit jit(config);\n    memory.reset_bytes();\n    run_challenges(observer, memory.read_table->data(), memory.backing(0), memory.backing(1),\n        kDataBase, kAliasBase,\n        [&](uint32_t address, uint64_t value, size_t size) {\n            memory.reset_events();\n            memory.prepare(jit, size == 8 ? memory.store64 : memory.store32, address);\n            jit.Regs()[1] = static_cast<uint32_t>(value);\n            jit.Regs()[2] = static_cast<uint32_t>(value);\n            jit.Regs()[3] = static_cast<uint32_t>(value >> 32);\n            jit.Run();\n            return memory.clean_stop() && memory.invalid_writes == 0;\n        },\n        [](const char *name, bool pass, const char *detail) {\n            switch_validation::record(\"observer_challenge\", name, pass ? \"pass\" : \"fail\", detail);\n        });\n    switch_validation::record(\"observer_challenge\", \"scratch_guard_pages\",\n        memory.guards_intact() ? \"pass\" : \"fail\", \"isolated bytes only; game memory never mutated\");\n}\n\nvoid run_config_rejections(MemoryFixture &memory) {"
+        },
+        {
+          "old": "            run_correctness(memory);\n",
+          "new": "            run_correctness(memory);\n            run_production_observer_challenges(memory);\n"
         }
       ]
     }

@@ -22,6 +22,7 @@ struct StatusSnapshot {
     bool deduplicate = false;
     bool write_shadow = false, watch_failed = false;
     uint64_t watched_pages = 0, first_write_pages = 0, unobserved_changes = 0;
+    uint64_t natural_changes = 0, hle_range_hits = 0;
     bool restart_pending = false;
     uint32_t run_id = 0;
     uint32_t phase = 0; // 1-based while active; phase_count after completion.
@@ -70,7 +71,7 @@ inline HudText make_hud_text(const StatusSnapshot &s, uint64_t now_tick) {
     std::snprintf(text.samples.data(), text.samples.size(), "Samples: %llu | B uploads: %llu | Hash: FULL",
         static_cast<unsigned long long>(s.samples), static_cast<unsigned long long>(s.dedup_calls));
     if (s.write_shadow)
-        std::snprintf(text.samples.data(), text.samples.size(), "Pages: %llu | First writes: %llu | Unobserved: %llu | FULL Hash",
+        std::snprintf(text.samples.data(), text.samples.size(), "Pages %llu | First %llu | Unknown %llu | FULL Hash",
             static_cast<unsigned long long>(s.watched_pages), static_cast<unsigned long long>(s.first_write_pages),
             static_cast<unsigned long long>(s.unobserved_changes));
     std::snprintf(text.action.data(), text.action.size(), "L+R+Y: start/restart | Keep the scene stable");
@@ -124,6 +125,11 @@ inline HudText make_hud_text(const StatusSnapshot &s, uint64_t now_tick) {
         if (s.write_shadow && s.unobserved_changes && s.outcome != CaptureOutcome::Invalid) {
             text.tone = HudText::Tone::Warning;
             std::snprintf(text.timing.data(), text.timing.size(), "Unobserved changes captured; no need to repeat this run");
+        }
+        if (s.write_shadow && !s.natural_changes && s.outcome == CaptureOutcome::Ready) {
+            text.tone = HudText::Tone::Warning;
+            std::snprintf(text.title.data(), text.title.size(), "MEMORY VALIDATION | DONE - NO LIVE CHANGES");
+            std::snprintf(text.timing.data(), text.timing.size(), "Timing captured; live coverage unexercised. Share, do not repeat.");
         }
         std::snprintf(text.action.data(), text.action.size(), "EXIT GAME NORMALLY TO SAVE | Do not force-close");
         break;
