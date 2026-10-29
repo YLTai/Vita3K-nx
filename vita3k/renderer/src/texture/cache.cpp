@@ -18,6 +18,9 @@
 #include <renderer/functions.h>
 
 #include <renderer/profile.h>
+#include <limits>
+#include <util/switch_memory_validation.h>
+#include <util/switch_tracelab.h>
 #include <renderer/texture_cache.h>
 
 #include <gxm/functions.h>
@@ -50,6 +53,7 @@ static uint64_t hash_palette_data(const SceGxmTexture &texture, size_t count, co
 }
 
 uint64_t hash_texture_data(const SceGxmTexture &texture, uint32_t texture_size, const MemState &mem) {
+    tracelab::Scope hash_profile(tracelab::Metric::TextureHash, tracelab::Domain::Render, texture_size);
     const SceGxmTextureFormat format = gxm::get_format(texture);
     const SceGxmTextureBaseFormat base_format = gxm::get_base_format(format);
     const Ptr<const void> data(texture.data_addr << 2);
@@ -170,6 +174,8 @@ static void hash_unaligned_tiled(const uint8_t *data, uint32_t width, uint32_t h
 }
 
 uint64_t hash_texture_nostride(const SceGxmTexture &texture, const MemState &mem) {
+    tracelab::Scope hash_profile(tracelab::Metric::TextureHash, tracelab::Domain::Render,
+        gxm::texture_size_first_mip(texture));
     const SceGxmTextureFormat format = gxm::get_format(texture);
     const SceGxmTextureBaseFormat base_format = gxm::get_base_format(format);
     const Ptr<const uint8_t> data(texture.data_addr << 2);
@@ -326,6 +332,8 @@ bool TextureCache::init(const bool hashless_texture_cache, const fs::path &textu
 }
 
 void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &mem) {
+    tracelab::Scope upload_profile(tracelab::Metric::TextureUpload, tracelab::Domain::Render,
+        gxm::texture_size(gxm_texture));
     R_PROFILE(__func__);
 
     bool is_vulkan = (backend == renderer::Backend::Vulkan);
@@ -654,7 +662,26 @@ static constexpr TextureGxmDataRepr strided_texture_mask = {
     0xF3FFFFFF
 };
 
+#ifdef __SWITCH__
+void TextureCache::note_switch_scene_epoch(uint64_t context_scene, const void *context) {
+    // Important: this retains the original, context-local memo_scene values
+    // used by TextureCache and BufferTrapping. We are measuring the context
+    // epoch problems, not changing caching/coherence policy without evidence.
+    tracelab::count(tracelab::Metric::TextureSceneBoundary);
+    if (memo_scene_context && memo_scene_context != context) {
+        tracelab::count(tracelab::Metric::TextureSceneContextSwitch);
+        if (memo_scene && context_scene == memo_scene)
+            tracelab::count(tracelab::Metric::TextureSceneEpochCollision);
+    }
+    if (memo_scene && context_scene < memo_scene)
+        tracelab::count(tracelab::Metric::TextureSceneEpochRewind);
+    memo_scene_context = context;
+    memo_scene = context_scene;
+}
+#endif
+
 void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemState &mem) {
+    tracelab::Scope texture_profile(tracelab::Metric::TextureCache, tracelab::Domain::Render);
     R_PROFILE(__func__);
 
     size_t index = 0;
@@ -683,6 +710,21 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
         // Texture not found in cache.
         // get the least recently used texture, which info_list_head points to
         info = texture_queue.get_lru();
+#ifdef __SWITCH__
+        // If a slot is evicted before its skipped content is audited, that
+        // history cannot be validated. Stop the unsafe experiment globally.
+        if (info->hash_throttle.skipped_since_verification) {
+            tracelab::count(tracelab::Metric::TextureHashUnsafeUnverified);
+            if (tracelab::unsafe_texture_hash_recheck_interval()) {
+                // In the aggressive experiment, record the audit loss but
+                // continue with other cache slots; this evicted slot resets.
+                tracelab::count(tracelab::Metric::TextureHashAggressiveUnverified);
+                tracelab::unsafe_texture_hash_recheck_unverified();
+            } else {
+                tracelab::unsafe_texture_hash_audit_incomplete();
+            }
+        }
+#endif
         index = info->index;
         if (info->texture_size > 0) {
             // Cache is full.
@@ -697,9 +739,28 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
         info->texture_size = gxm::texture_size(gxm_texture);
         if (info->texture_size > 0 && !is_valid_addr_range(mem, gxm_texture.data_addr << 2, (gxm_texture.data_addr << 2) + info->texture_size))
             info->texture_size = gxm::texture_size_first_mip(gxm_texture);
+#ifdef __SWITCH__
+        // Ever-observed texture input pages, not an authoritative writable/
+        // active page set. Mark only on LRU cache misses (never per draw);
+        // the JIT checks this monotonic guest-page bitmap in probe mode 2.
+        // Palettes, HLE pointer writes, GPU writes and aliased memory are
+        // outside this read-only experiment.
+        tracelab::guest_write_probe_mark_texture(
+            uint64_t{gxm_texture.data_addr} << 2, info->texture_size);
+        // A miss cannot benefit from an already-warmed cache slot. Retain
+        // the count and byte range to test LRU churn in heavy scenes.
+        if (tracelab::texture_hash_probe_interval())
+            tracelab::count(tracelab::Metric::TextureHashProbeNewEntry,
+                info->texture_size);
+#endif
         // use the texture_repr representation, it contains everything we need and we can use it to erase the key
         // from texture_lookup later
         info->texture = std::bit_cast<SceGxmTexture>(texture_repr);
+#ifdef __SWITCH__
+        // The cache slot is an LRU object: discard experimental state when a
+        // different texture descriptor replaces its former contents.
+        info->hash_throttle = {};
+#endif
 
         // To prevent protecting too commonly accessed data that belongs to the page where the texture also resides
         // (for example, uniform buffer value and texture data got mixed, so page faults are triggered too many, it's not always good).
@@ -721,6 +782,11 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
             else
                 // the xor 1 is to make sure it won't be the same as hash_texture_nostride
                 info->hash = hash_texture_data(gxm_texture, info->texture_size, mem) ^ 1;
+#ifdef __SWITCH__
+            // A new cache entry has been fully verified, but must pass several
+            // independent scene verifications before it can be throttled.
+            texture::note_hash_verification(info->hash_throttle, memo_scene, false);
+#endif
         }
     } else {
         // Texture is cached.
@@ -730,20 +796,236 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
         if (info->use_hash) {
             bool verified_this_scene = false;
 #ifdef __SWITCH__
-            verified_this_scene = memo_scene != 0 && info->last_hashed_scene == memo_scene
+            // Both validation phases need the same complete-hash reference.
+            // A context-local scene number is not a write/coherence version.
+            const bool strict_hash = switch_validation::strict_hash();
+            verified_this_scene = !strict_hash
+                && memo_scene != 0 && info->last_hashed_scene == memo_scene
                 && !import_textures && !export_textures;
             info->last_hashed_scene = memo_scene;
 #endif
             if (verified_this_scene) {
+                tracelab::count(tracelab::Metric::TextureHashSceneReused);
                 upload = false;
             } else {
-                const uint64_t previous_hash = info->hash;
-                if (import_textures || export_textures)
-                    info->hash = hash_texture_nostride(gxm_texture, mem);
-                else
-                    info->hash = hash_texture_data(gxm_texture, info->texture_size, mem) ^ 1;
+                bool experimental_skip = false;
+#ifdef __SWITCH__
+                // Override even stale opt-in settings from an earlier trial;
+                // disabling only reuse-count skipping would leave other skips.
+                const uint32_t unsafe_interval = strict_hash
+                    ? 0 : tracelab::unsafe_texture_hash_skip_interval();
+                const uint32_t aggressive_interval = strict_hash
+                    ? 0 : tracelab::unsafe_texture_hash_recheck_interval();
+                const uint32_t probe_interval = tracelab::texture_hash_probe_interval();
+                // Validate source mapping at most once when a probe or the
+                // unsafe A/B mode is otherwise eligible. The original full
+                // hash path and texture upload are unchanged.
+                bool mapping_checked = false;
+                bool mapping_valid = false;
+                const auto valid_hash_range = [&]() {
+                    if (!mapping_checked) {
+                        mapping_checked = true;
+                        const uint64_t begin = uint64_t{gxm_texture.data_addr} << 2;
+                        const uint64_t end = begin + info->texture_size;
+                        mapping_valid = begin && info->texture_size
+                            && end <= std::numeric_limits<Address>::max()
+                            && is_valid_addr_range(mem, static_cast<Address>(begin),
+                                static_cast<Address>(end));
+                    }
+                    return mapping_valid;
+                };
 
-                upload = previous_hash != info->hash;
+                // Pure observation of hypothetical "interval=N" gating,
+                // including A runs with unsafe_interval=0. A reason counter
+                // is emitted even when the actual cache still computes the
+                // full hash, allowing comparable A/B diagnostics.
+                if (probe_interval) {
+                    const uint64_t bytes = info->texture_size;
+                    if (import_textures || export_textures || info->is_imported) {
+                        tracelab::count(tracelab::Metric::TextureHashProbeImportExport, bytes);
+                    } else if (!info->texture_size || !gxm_texture.data_addr) {
+                        tracelab::count(tracelab::Metric::TextureHashProbeNoRange, bytes);
+                    } else {
+                        using D = texture::HashThrottleDecision;
+                        const auto reason = texture::classify_hash_throttle(
+                            info->hash_throttle, memo_scene, probe_interval);
+                        tracelab::Metric metric;
+                        switch (reason) {
+                        case D::Eligible:
+                            metric = valid_hash_range()
+                                ? tracelab::Metric::TextureHashProbeEligible
+                                : tracelab::Metric::TextureHashProbeInvalidMapping;
+                            break;
+                        case D::PreviouslyChanged:
+                            metric = tracelab::Metric::TextureHashProbeChanged;
+                            break;
+                        case D::Warmup:
+                            metric = tracelab::Metric::TextureHashProbeWarmup;
+                            break;
+                        case D::NoEpoch:
+                            metric = tracelab::Metric::TextureHashProbeNoEpoch;
+                            break;
+                        case D::NoBaseline:
+                            metric = tracelab::Metric::TextureHashProbeNoBaseline;
+                            break;
+                        case D::NonMonotonic:
+                            metric = tracelab::Metric::TextureHashProbeNonMonotonic;
+                            break;
+                        case D::AuditDue:
+                            metric = tracelab::Metric::TextureHashProbeAuditDue;
+                            break;
+                        case D::Disabled:
+                        default:
+                            // The probe config has already been checked above.
+                            metric = tracelab::Metric::TextureHashProbeNoEpoch;
+                            break;
+                        }
+                        tracelab::count(metric, bytes);
+
+                        // Independent gap histogram: distinguishes frequent
+                        // rechecks of a texture from single uses many scene
+                        // epochs apart. It does not affect the hash outcome.
+                        if (info->hash_throttle.last_verified_scene != 0
+                            && memo_scene > info->hash_throttle.last_verified_scene) {
+                            const uint64_t delta =
+                                memo_scene - info->hash_throttle.last_verified_scene;
+                            const tracelab::Metric bucket = delta == 1
+                                ? tracelab::Metric::TextureHashEpochDelta1
+                                : delta < 8
+                                    ? tracelab::Metric::TextureHashEpochDelta2To7
+                                    : delta < 16
+                                        ? tracelab::Metric::TextureHashEpochDelta8To15
+                                        : delta < 32
+                                            ? tracelab::Metric::TextureHashEpochDelta16To31
+                                            : tracelab::Metric::TextureHashEpochDelta32Plus;
+                            tracelab::count(bucket, bytes);
+                        }
+                    }
+                }
+
+                // A texture can be written by guest code, HLE, or the GPU at a
+                // scene boundary. This opt-in throttle remains deliberately
+                // UNSAFE; the full hash is performed on audit epochs.
+                const bool ordinary_texture = !import_textures && !export_textures
+                    && !info->is_imported && info->texture_size;
+                if (aggressive_interval && ordinary_texture
+                    && texture::should_skip_by_reuse_count(
+                        info->hash_throttle, memo_scene, aggressive_interval)
+                    && valid_hash_range()) {
+                    // Experimental mode "guard": a texture whose guest pages
+                    // have EVER been written by the JIT after texture
+                    // registration is NEVER eligible for hash skipping.
+                    // Other textures still use the normal N-use audit policy.
+                    // This is NOT complete guest/HLE/GPU coherence tracking.
+                    // A P4/P8 texture also depends on separate palette
+                    // memory, which the guest-page bitmap does not watch.
+                    // Keep these in full-hash mode when the guard is active.
+                    const bool guard_palette = tracelab::guest_write_probe_mode() == 3
+                        && gxm::is_paletted_format(gxm::get_base_format(
+                            gxm::get_format(gxm_texture)));
+                    const bool jit_guard_blocked = guard_palette
+                        || tracelab::guest_write_guard_range_tainted(
+                            uint64_t{gxm_texture.data_addr} << 2, info->texture_size);
+                    if (jit_guard_blocked) {
+                        tracelab::count(tracelab::Metric::TextureHashGuardBlocked,
+                            info->texture_size);
+                    } else {
+                        experimental_skip = true;
+                        texture::note_aggressive_hash_skip(info->hash_throttle);
+                        tracelab::count(tracelab::Metric::TextureHashAggressiveSkipped,
+                            info->texture_size);
+                        tracelab::count(tracelab::Metric::TextureHashUnsafeSkipped,
+                            info->texture_size);
+                    }
+                } else if (unsafe_interval && ordinary_texture
+                    && texture::should_throttle_hash(info->hash_throttle,
+                        memo_scene, unsafe_interval)
+                    && valid_hash_range()) {
+                    experimental_skip = true;
+                    texture::note_throttled_hash(info->hash_throttle);
+                    tracelab::count(tracelab::Metric::TextureHashUnsafeSkipped,
+                        info->texture_size);
+                }
+#endif
+                if (experimental_skip) {
+                    // This cannot be proven safe on Horizon without complete
+                    // CPU/HLE/GPU write tracking. The default option is OFF.
+                    upload = false;
+                } else {
+                    const uint64_t previous_hash = info->hash;
+                    if (import_textures || export_textures)
+                        info->hash = hash_texture_nostride(gxm_texture, mem);
+                    else
+                        info->hash = hash_texture_data(gxm_texture, info->texture_size, mem) ^ 1;
+
+                    upload = previous_hash != info->hash;
+                    tracelab::count(upload ? tracelab::Metric::TextureHashChanged
+                        : tracelab::Metric::TextureHashUnchanged);
+#ifdef __SWITCH__
+                    const bool audit_had_skips =
+                        info->hash_throttle.skipped_since_verification;
+                    if (import_textures || export_textures) {
+                        if (audit_had_skips) {
+                            tracelab::count(tracelab::Metric::TextureHashUnsafeUnverified);
+                            if (aggressive_interval) {
+                                tracelab::count(tracelab::Metric::TextureHashAggressiveUnverified);
+                                tracelab::unsafe_texture_hash_recheck_unverified();
+                            } else {
+                                tracelab::unsafe_texture_hash_audit_incomplete();
+                            }
+                        }
+                        info->hash_throttle = {};
+                    } else {
+                        // Inaccessible guest memory must not train a
+                        // "stable" state even when the hash value is equal.
+                        const uint64_t guest_begin = uint64_t{gxm_texture.data_addr} << 2;
+                        const uint64_t guest_end = guest_begin + info->texture_size;
+                        const bool mapped = !(unsafe_interval || aggressive_interval)
+                            || (guest_begin && info->texture_size
+                                && guest_end <= std::numeric_limits<Address>::max()
+                                && is_valid_addr_range(mem, static_cast<Address>(guest_begin),
+                                    static_cast<Address>(guest_end)));
+                        if (!mapped) {
+                            // Invalidated mappings cannot be safely audited.
+                            if (audit_had_skips) {
+                                tracelab::count(tracelab::Metric::TextureHashUnsafeUnverified);
+                                if (aggressive_interval) {
+                                    tracelab::count(tracelab::Metric::TextureHashAggressiveUnverified);
+                                    tracelab::unsafe_texture_hash_recheck_unverified();
+                                } else {
+                                    tracelab::unsafe_texture_hash_audit_incomplete();
+                                }
+                            }
+                            info->hash_throttle = {};
+                            if (aggressive_interval)
+                                info->hash_throttle.ever_changed = true;
+                        } else {
+                            if (audit_had_skips) {
+                                tracelab::count(tracelab::Metric::TextureHashUnsafeAudit);
+                                if (aggressive_interval)
+                                    tracelab::count(tracelab::Metric::TextureHashAggressiveAudits);
+                            }
+                            if (texture::note_hash_verification(
+                                info->hash_throttle, memo_scene, upload)) {
+                                // Actual hash differs after previous skips.
+                                // Older draws may already have shown stale data.
+                                tracelab::count(tracelab::Metric::TextureHashUnsafeAuditMismatch);
+                                if (aggressive_interval) {
+                                    // Quarantine THIS changed texture for the
+                                    // rest of its cache residency. The
+                                    // experiment continues for stable textures.
+                                    tracelab::count(tracelab::Metric::TextureHashAggressiveQuarantines);
+                                    tracelab::unsafe_texture_hash_recheck_mismatch();
+                                } else {
+                                    tracelab::unsafe_texture_hash_audit_mismatch();
+                                }
+                                tracelab::event(tracelab::Event::TextureHashUnsafeMismatch,
+                                    gxm_texture.data_addr << 2, info->texture_size);
+                            }
+                        }
+                    }
+#endif
+                }
             }
         } else {
             range_protect_begin = align(gxm_texture.data_addr << 2, mem.host_page_size);

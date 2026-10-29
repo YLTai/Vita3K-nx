@@ -32,6 +32,10 @@
 
 #ifdef __SWITCH__
 #include <renderer/vulkan/lsfg.h>
+#if defined(VITA3K_SWITCH_TRACELAB)
+#include <overlay/memory_validation_overlay.h>
+#include <util/switch_memory_validation.h>
+#endif
 #endif
 
 #include <gxm/functions.h>
@@ -50,6 +54,19 @@ void State::set_fsr_sharpness(float sharpness) {
 void State::update_overlays() {
     if (!overlay_manager)
         return;
+
+#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)
+    // Diagnostic status must remain visible with the FPS overlay disabled.
+    // It owns no input thread and never injects extra presents into a sample.
+    if (switch_validation::enabled()) {
+        auto validation = overlay_manager->get<overlay::memory_validation_overlay>();
+        if (!validation)
+            validation = overlay_manager->create<overlay::memory_validation_overlay>();
+        validation->update_status();
+    } else if (overlay_manager->get<overlay::memory_validation_overlay>()) {
+        overlay_manager->remove<overlay::memory_validation_overlay>();
+    }
+#endif
 
     if (show_compile_shaders) {
         const auto now = std::chrono::steady_clock::now();

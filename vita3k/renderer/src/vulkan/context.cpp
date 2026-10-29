@@ -210,7 +210,7 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     context.scene_timestamp++;
     context.state.texture_cache.current_scene_timestamp = context.scene_timestamp;
 #ifdef __SWITCH__
-    context.state.texture_cache.memo_scene = context.scene_timestamp;
+    context.state.texture_cache.note_switch_scene_epoch(context.scene_timestamp, &context);
 #endif
 
     SceGxmColorSurface *color_surface_fin = &context.record.color_surface;
@@ -729,7 +729,7 @@ void VKContext::check_for_macroblock_change(bool is_draw) {
                 start_recording();
                 scene_timestamp++;
 #ifdef __SWITCH__
-                state.texture_cache.memo_scene = scene_timestamp;
+                state.texture_cache.note_switch_scene_epoch(scene_timestamp, this);
 #endif
             }
         }
