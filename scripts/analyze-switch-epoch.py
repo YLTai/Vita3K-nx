@@ -263,15 +263,17 @@ def analyze_candidate_work(e, w, issues):
         outputs = contracts.get('output_leases')
         extra = 0
         if outputs is not None:
-            if (type(outputs.get('version')) is not int or outputs.get('version') != 1
+            if (type(outputs.get('version')) is not int or outputs.get('version') not in (1, 2)
                     or outputs.get('authority') is not False):
                 raise ValueError('Invalid concrete-output contract/authority')
             starts = integer(outputs, 'begins'); ends = integer(outputs, 'ends')
             active = integer(outputs, 'active')
             if starts != ends + active or active:
                 raise ValueError('Concrete output still active or unbalanced at export')
+            # v1: generic/ATRAC9/AAC/MP3; v2 appends concrete GXM uniform copies.
+            expected_sources = 4 if outputs['version'] == 1 else 5
             source_counts = outputs.get('sources')
-            if (not isinstance(source_counts, list) or len(source_counts) != 4
+            if (not isinstance(source_counts, list) or len(source_counts) != expected_sources
                     or any(type(v) is not int or v < 0 for v in source_counts)
                     or sum(source_counts) != starts):
                 raise ValueError('Concrete-output source accounting does not reconcile')

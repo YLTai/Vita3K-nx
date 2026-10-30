@@ -29,7 +29,7 @@ inline WriteExtent mp3_loop_extent(int samples, int channels, int width) {
         return {0, false};
     return {row + tail, true};
 }
-enum class OutputSource : unsigned { Generic = 0, Atrac9 = 1, Aac = 2, Mp3 = 3 };
+enum class OutputSource : unsigned { Generic = 0, Atrac9 = 1, Aac = 2, Mp3 = 3, GxmUniform = 4 };
 class HostOutputLease {
     Domain *domain_ = nullptr;
     unsigned slot_ = HleRanges::no_slot;

@@ -1,0 +1,72 @@
+{
+  "base_commit": "e0d78725f3d214322fed72fa4eab11f40d655152",
+  "purpose": "Track actual synchronous GXM uniform copies and reviewed read-only libc leaves. Keep full reference Hash; no shader/GPU/async coverage or layout change.",
+  "files": [
+    {
+      "path": "vita3k/modules/SceGxm/SceGxm.cpp",
+      "base_blob": "6ffd59055b844412e0e17c11b2ae1ce6f099a920",
+      "replacements": [
+        {
+          "old": "#include <util/gxm_range_contract.h>",
+          "new": "#include <util/gxm_range_contract.h>\n#include <util/host_output_scope.h>"
+        },
+        {
+          "old": "    TRACY_FUNC(sceGxmSetUniformDataF, uniformBuffer, parameter, componentOffset, componentCount, sourceData);",
+          "new": "    TRACY_FUNC(sceGxmSetUniformDataF, uniformBuffer, parameter, componentOffset, componentCount, sourceData);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    // This exact synchronous body writes Guest memory only at the two memcpy\n    // sites below. Conversion storage is private; unknown outer roots stay so.\n    switch_validation::epoch::declare_outputs({\"sceGxmSetUniformDataF\"}, {});\n#endif"
+        },
+        {
+          "old": "        memcpy(static_cast<uint8_t *>(uniformBuffer) + offset, source, size);",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        switch_validation::epoch::HostOutputLease uniform_output(\n            static_cast<uint8_t *>(uniformBuffer) + offset, {size, true},\n            switch_validation::epoch::OutputSource::GxmUniform);\n#endif\n        memcpy(static_cast<uint8_t *>(uniformBuffer) + offset, source, size);"
+        },
+        {
+          "old": "            memcpy(dest, source, component_to_copy_remain_per_elem * comp_size);",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n            // Observe the actual chunk, including the existing loop's final\n            // chunk overshoot and alignment gaps; do not assume componentCount.\n            switch_validation::epoch::HostOutputLease uniform_output(dest,\n                switch_validation::epoch::packed_pcm_extent(component_to_copy_remain_per_elem, 1, comp_size),\n                switch_validation::epoch::OutputSource::GxmUniform);\n#endif\n            memcpy(dest, source, component_to_copy_remain_per_elem * comp_size);"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/modules/SceLibKernel/SceLibKernel.cpp",
+      "base_blob": "cf06ee74395bdd42b6638e5302ddc50145361f73",
+      "replacements": [
+        {
+          "old": "#include <util/switch_write_watch_api.h>",
+          "new": "#include <util/switch_write_watch_api.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/jit_epoch_gate.h>\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceClibMemcmp, s1, s2, len);",
+          "new": "    TRACY_FUNC(sceClibMemcmp, s1, s2, len);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    // Reviewed leaf only: return value/registers, no Guest-memory output.\n    switch_validation::epoch::declare_outputs({\"sceClibMemcmp\"}, {});\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceClibStrcmp, s1, s2);",
+          "new": "    TRACY_FUNC(sceClibStrcmp, s1, s2);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    // Reviewed leaf only: return value/registers, no Guest-memory output.\n    switch_validation::epoch::declare_outputs({\"sceClibStrcmp\"}, {});\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceClibStrncmp, s1, s2, len);",
+          "new": "    TRACY_FUNC(sceClibStrncmp, s1, s2, len);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    // Reviewed leaf only: return value/registers, no Guest-memory output.\n    switch_validation::epoch::declare_outputs({\"sceClibStrncmp\"}, {});\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceClibStrncasecmp, s1, s2, len);",
+          "new": "    TRACY_FUNC(sceClibStrncasecmp, s1, s2, len);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    // Reviewed leaf only: return value/registers, no Guest-memory output.\n    switch_validation::epoch::declare_outputs({\"sceClibStrncasecmp\"}, {});\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceClibStrnlen, s1, maxlen);",
+          "new": "    TRACY_FUNC(sceClibStrnlen, s1, maxlen);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    // Reviewed leaf only: return value/registers, no Guest-memory output.\n    switch_validation::epoch::declare_outputs({\"sceClibStrnlen\"}, {});\n#endif"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/run-switch-performance-tests.sh",
+      "base_blob": "5810c5ce63221fa1e9539e5196b773c96c71345c",
+      "replacements": [
+        {
+          "old": "python3 \"$ROOT/scripts/tests/test_switch_host_outputs.py\" --cxx \"${CXX:-c++}\" --require-source",
+          "new": "python3 \"$ROOT/scripts/tests/test_switch_host_outputs.py\" --cxx \"${CXX:-c++}\" --require-source\npython3 \"$ROOT/scripts/tests/test_switch_uniform_outputs.py\" --cxx \"${CXX:-c++}\" --require-source"
+        }
+      ]
+    }
+  ],
+  "reviewed_dependencies": {
+    "vita3k/gxm/src/gxp.cpp": "1f6526af0cfc669889a715e2119cf523251d2d7b",
+    "vita3k/util/src/float_to_half.cpp": "065a79e0e867f0c897757f3093a59b7031d36207"
+  }
+}

@@ -36,7 +36,7 @@ public:
     struct OutputStats {
         uint64_t begins = 0, ends = 0, active = 0, capacity_bytes = 0;
         uint64_t overlap_touches = 0;
-        std::array<uint64_t, 4> sources{}; // generic, ATRAC9, AAC, MP3
+        std::array<uint64_t, 5> sources{}; // generic, ATRAC9, AAC, MP3, GXM uniform
     };
     struct Row {
         uint32_t nid = 0;
@@ -284,11 +284,11 @@ public:
         std::fprintf(f, "],\"metadata_cache\":{\"version\":1,\"nid_hits\":%llu,\"nid_probes\":%llu,"
             "\"no_overlap_hits\":%llu,\"range_scans\":%llu,\"interests_revision\":%llu,\"content_reuse_authority\":false}",
             U(row_hits_),U(row_probes_),U(range_hits_),U(range_scans_),U(interests_revision_));
-        std::fprintf(f,",\"output_leases\":{\"version\":1,\"begins\":%llu,\"ends\":%llu,"
+        std::fprintf(f,",\"output_leases\":{\"version\":2,\"begins\":%llu,\"ends\":%llu,"
             "\"active\":%llu,\"capacity_bytes\":%llu,\"overlap_touches\":%llu,"
-            "\"sources\":[%llu,%llu,%llu,%llu],\"authority\":false}",
+            "\"sources\":[%llu,%llu,%llu,%llu,%llu],\"authority\":false}",
             U(outputs_.begins),U(outputs_.ends),U(outputs_.active),U(outputs_.capacity_bytes),
-            U(outputs_.overlap_touches),U(outputs_.sources[0]),U(outputs_.sources[1]),U(outputs_.sources[2]),U(outputs_.sources[3]));
+            U(outputs_.overlap_touches),U(outputs_.sources[0]),U(outputs_.sources[1]),U(outputs_.sources[2]),U(outputs_.sources[3]),U(outputs_.sources[4]));
         std::fprintf(f,",\"native_waits\":{\"version\":1,\"parks\":%llu,\"resumes\":%llu,"
             "\"active\":%llu,\"async_outputs_covered\":false}}",U(parks_),U(resumes_),U(parked_));
     }
