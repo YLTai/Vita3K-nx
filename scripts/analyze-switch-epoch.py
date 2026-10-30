@@ -51,6 +51,7 @@ def analyze(data, changed_total=None):
     phase_attribution = analyze_phase_attribution(e, issues)
     if isinstance(phase_attribution, dict) and not phase_attribution.get('capture_serial'):
         issues.append('Completed capture lacks phase-attribution start evidence')
+    resolution = analyze_declaration_resolution(data, issues, warnings)
     comparison = None
     policy = data.get('sample_policy')
     adaptive = policy is not None
@@ -150,7 +151,7 @@ def analyze(data, changed_total=None):
     return dict(plan='epoch-write-1',controls_ok=controls_ok,comparison_eligible=not issues and not performance_issues,
         evidence_eligible=not issues,performance_exclusions=performance_issues,sample_policy=policy,
         exclusions=issues+performance_issues,warnings=warnings,phases=rows,totals=totals,comparison=comparison,
-        scoped_hle=scoped,phase_attribution=phase_attribution,safe_to_skip_hash=False,next_action='Exit normally and share one complete capture; do not repeat for green',
+        scoped_hle=scoped,phase_attribution=phase_attribution,declaration_resolution=resolution,safe_to_skip_hash=False,next_action='Exit normally and share one complete capture; do not repeat for green',
         limits=['This is a real-game software-write-table audit, not the private CPU/GPU mirror suite.',
                 'A and B share read/write tables, cross-page detection and execution/HLE boundary costs; B adds persistent selected-page interception.',
                 'Only pre-publication JIT runs are drained; no renderer pause or global stop is performed.',
@@ -417,3 +418,90 @@ def analyze_phase_attribution(e, issues):
     except (KeyError, TypeError, ValueError) as exc:
         issues.append(str(exc))
     return report
+
+
+def analyze_declaration_resolution(data, issues, warnings):
+    """Parallel full-Hash oracle; no legacy evidence is upgraded or synthesized."""
+    report = data.get('declaration_resolution')
+    expected = data.get('declaration_resolution_expected')
+    if report is None and expected is None:
+        return None
+    fields = ('checked', 'checked_bytes', 'strict', 'strict_bytes', 'resolved', 'resolved_bytes',
+              'additional', 'additional_bytes', 'additional_start_idle', 'additional_start_idle_bytes',
+              'additional_during_hash', 'additional_during_hash_bytes', 'submission', 'submission_bytes', 'gpu_history', 'gpu_history_bytes',
+              'invalid', 'output_busy', 'pending', 'version', 'history', 'mismatches', 'additional_mismatches')
+    totals = dict.fromkeys(fields, 0)
+    try:
+        if (expected is not True or not isinstance(report, dict)
+                or type(report.get('version')) is not int or report['version'] != 1
+                or report.get('authority') is not False or report.get('full_hash_each_check') is not True
+                or report.get('GPU_completion_covered') is not False or report.get('async_HLE_covered') is not False
+                or report.get('failed') is not False
+                or report.get('rule') != 'four_endpoints_final_unknown_idle'
+                or report.get('event_phase_model') != 'including_settling'):
+            raise ValueError('Invalid resolved-declaration audit contract')
+        phases = report['phases']; e = data['epoch_audit']
+        if not isinstance(phases, list) or len(phases) != 4:
+            raise ValueError('Resolved audit requires four phases')
+        for i, row in enumerate(phases):
+            if type(row.get('index')) is not int or row['index'] != i:
+                raise ValueError('Resolved audit phase identity mismatch')
+            n = {k: integer(row, k) for k in fields}
+            if n['checked'] != sum(n[k] for k in ('resolved', 'invalid', 'output_busy', 'pending', 'version', 'history')):
+                raise ValueError('Resolved audit exclusion partition mismatch')
+            if (n['resolved'] != n['strict'] + n['additional']
+                    or n['resolved_bytes'] != n['strict_bytes'] + n['additional_bytes']
+                    or n['additional'] != n['additional_start_idle'] + n['additional_during_hash']
+                    or n['additional_bytes'] != n['additional_start_idle_bytes'] + n['additional_during_hash_bytes']
+                    or n['resolved'] != n['submission'] + n['gpu_history']
+                    or n['resolved_bytes'] != n['submission_bytes'] + n['gpu_history_bytes']):
+                raise ValueError('Resolved audit candidate partition mismatch')
+            if not n['checked_bytes'] >= n['resolved_bytes'] >= n['submission_bytes']:
+                raise ValueError('Resolved audit byte subsets disagree')
+            for prefix in ('checked', 'strict', 'resolved', 'additional', 'additional_start_idle', 'additional_during_hash', 'submission', 'gpu_history'):
+                if n[prefix + '_bytes'] < n[prefix] or bool(n[prefix]) != bool(n[prefix + '_bytes']):
+                    raise ValueError('Resolved audit calls and bytes disagree')
+            if (n['checked'] != integer(e['phases'][i], 'cpu_candidates')
+                    or n['strict'] != integer(e['range_phases'][i], 'hle_candidates')
+                    or n['checked_bytes'] != integer(e['candidate_work']['phases'][i], 'cpu_bytes')
+                    or n['strict_bytes'] != integer(e['candidate_work']['phases'][i], 'hle_bytes')):
+                raise ValueError('Parallel resolved/strict audit input mismatch')
+            if (n['mismatches'] > n['resolved'] or n['additional_mismatches'] > n['additional']
+                    or n['mismatches'] != integer(e['range_phases'][i], 'hle_candidate_changes') + n['additional_mismatches']):
+                raise ValueError('Resolved audit mismatch subsets disagree')
+            if i in (0, 3) and any(n.values()):
+                raise ValueError('Baseline phase has resolved treatment observations')
+            for k, value in n.items(): totals[k] += value
+        events = report['events']
+        if (not isinstance(events, list) or len(events) > 32
+                or len(events) + integer(report, 'events_dropped') != totals['mismatches']):
+            raise ValueError('Resolved audit mismatch detail ledger mismatch')
+        stored_extra = 0
+        for event in events:
+            phase = integer(event, 'phase')
+            if (phase not in (1, 2) or not integer(event, 'publication')
+                    or integer(event, 'resource') >= integer(data['write_shadow'], 'resources')
+                    or not integer(event, 'bytes') or type(event.get('additional')) is not bool):
+                raise ValueError('Invalid resolved mismatch identity')
+            integer(event, 'address'); integer(event, 'tick')
+            pending = event['pending']
+            if (not isinstance(pending, list) or len(pending) != 4
+                    or any(type(v) is not int or v < 0 for v in pending) or pending[-1]):
+                raise ValueError('Resolved mismatch has unresolved final endpoint')
+            if event['additional'] and not any(pending[:-1]):
+                raise ValueError('Additional candidate lacks an earlier pending endpoint')
+            stored_extra += int(event['additional'])
+            for k in ('previous_hash_hex', 'current_hash_hex'):
+                if not isinstance(event[k], str) or len(event[k]) != 16:
+                    raise ValueError('Invalid resolved mismatch hash')
+                int(event[k], 16)
+            if event['previous_hash_hex'] == event['current_hash_hex']:
+                raise ValueError('Resolved mismatch has equal hashes')
+        if stored_extra > totals['additional_mismatches'] or len(events) - stored_extra > totals['mismatches'] - totals['additional_mismatches']:
+            raise ValueError('Resolved mismatch retained subsets disagree')
+    except (KeyError, TypeError, IndexError, ValueError) as exc:
+        issues.append(str(exc))
+    if totals['mismatches']:
+        warnings.append('Full reference Hash contradicted resolved declarations; inspect saved evidence, do not enable reuse')
+    return dict(totals=totals, report=report, safe_to_skip_hash=False,
+                limits='Retrospective declaration evidence only; GPU completion and asynchronous writers are not certified')

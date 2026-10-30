@@ -1,0 +1,66 @@
+{
+  "base_commit": "7e2ba3fd8048dd44565c69ff77317d734893d982",
+  "purpose": "Compare strict endpoints and resolved declarations against every full Hash in the same capture. No reuse authorization.",
+  "files": [
+    {
+      "path": "vita3k/util/include/util/switch_write_watch.h",
+      "base_blob": "d02545c2ec170ad0583850de74cf2fcd741114b4",
+      "replacements": [
+        {
+          "old": "#include <util/switch_write_watch_api.h>",
+          "new": "#include <util/switch_write_watch_api.h>\n#include <util/declaration_resolution.h>"
+        },
+        {
+          "old": "struct Snapshot {",
+          "new": "struct Snapshot {\n    epoch::ResolutionAudit declaration_resolution;"
+        },
+        {
+          "old": "    struct Resource {",
+          "new": "    struct Resource {\n        epoch::RangeStamp resolution_begin;"
+        },
+        {
+          "old": "        ++count().hash_checks; count().hash_bytes += r.key.size + r.key.palette_size;",
+          "new": "        const epoch::ResolutionScope resolution_scope(r, count(), stats_.declaration_resolution,\n            token, audit, phase_, clock_);\n        ++count().hash_checks; count().hash_bytes += r.key.size + r.key.palette_size;"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/switch_validation_status.h",
+      "base_blob": "d8f950aa3a9d4d563284584063a0fc373ac7953a",
+      "replacements": [
+        {
+          "old": "struct StatusSnapshot {",
+          "new": "struct StatusSnapshot {\n    bool declaration_resolution = false;\n    uint64_t resolved_candidates = 0, resolved_additional = 0, resolved_mismatches = 0;"
+        },
+        {
+          "old": "            (unsigned long long)s.hle_ranges, (unsigned long long)s.hle_changes);",
+          "new": "            (unsigned long long)s.hle_ranges, (unsigned long long)s.hle_changes);\n        if (s.declaration_resolution)\n            std::snprintf(text.samples.data(), text.samples.size(), \"Strict:%llu | Resolved:%llu +%llu | Diff:%llu | FULL Hash\",\n                (unsigned long long)s.hle_candidates, (unsigned long long)s.resolved_candidates,\n                (unsigned long long)s.resolved_additional, (unsigned long long)s.resolved_mismatches);"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/src/switch_memory_validation.cpp",
+      "base_blob": "e805efbd80f3880ab8561fc46289dedc5dcff565",
+      "replacements": [
+        {
+          "old": "    out.cache_changes = observation.cache.changes;",
+          "new": "    out.cache_changes = observation.cache.changes;\n    out.declaration_resolution = options.epoch_audit;\n    if (out.declaration_resolution) {\n        for (const auto &p : observation.declaration_resolution.phases) {\n            out.resolved_candidates += p.resolved; out.resolved_additional += p.additional;\n            out.resolved_mismatches += p.mismatches;\n        }\n        out.watch_failed |= observation.declaration_resolution.failed || out.resolved_mismatches != 0;\n        out.epoch_changes += out.resolved_mismatches;\n    }"
+        },
+        {
+          "old": "    std::fputs(\"\\n}\\n\", file);\n    const bool write_error = std::ferror(file) != 0;",
+          "new": "    if (options.epoch_audit) {\n        std::fputs(\",\\n  \\\"declaration_resolution_expected\\\":true,\\n  \\\"declaration_resolution\\\":\", file);\n        live_watch.snapshot().declaration_resolution.write_json(file);\n    }\n    std::fputs(\"\\n}\\n\", file);\n    const bool write_error = std::ferror(file) != 0;"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/run-switch-performance-tests.sh",
+      "base_blob": "5810c5ce63221fa1e9539e5196b773c96c71345c",
+      "replacements": [
+        {
+          "old": "python3 \"$ROOT/scripts/tests/test_switch_declaration_transactions.py\" --cxx \"${CXX:-c++}\" --require-source",
+          "new": "python3 \"$ROOT/scripts/tests/test_switch_declaration_transactions.py\" --cxx \"${CXX:-c++}\" --require-source\npython3 \"$ROOT/scripts/tests/test_switch_declaration_resolution.py\" --cxx \"${CXX:-c++}\" --require-source"
+        }
+      ]
+    }
+  ]
+}

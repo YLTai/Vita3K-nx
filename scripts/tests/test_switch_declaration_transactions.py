@@ -20,16 +20,18 @@ def source_gate(required):
             before, _, after = chain.replay(engine, item['path'], True)
             for op in item['replacements']:
                 assert op['new'] in after.decode(), item['path']
-            # Removing our additions must recover the complete prior expansion.
-            reverted = after.decode()
-            for op in reversed(item['replacements']):
-                assert reverted.count(op['new']) == 1
-                reverted = reverted.replace(op['new'], op['old'], 1)
+            # Reverse this stage, not the FINAL expansion (later stages may
+            # legitimately extend the same file). replay above still verifies
+            # the complete final file against every pinned operation.
             prior = before
             for rp in engine.RECIPES:
                 if rp.name == 'switch-declaration-transactions.json': break
                 for spec in json.loads(rp.read_text())['files']:
                     if spec['path'] == item['path']: prior = engine.transform(prior, spec['replacements'])
+            reverted = engine.transform(prior, item['replacements']).decode()
+            for op in reversed(item['replacements']):
+                assert reverted.count(op['new']) == 1
+                reverted = reverted.replace(op['new'], op['old'], 1)
             assert reverted.encode() == prior
         for path, pin in recipe['reviewed_dependencies'].items():
             original, _, _ = chain.replay(engine, path, True)
