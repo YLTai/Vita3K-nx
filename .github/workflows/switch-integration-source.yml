@@ -1,0 +1,34 @@
+name: Switch integration source bundle
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [exp/switch-capture-clean-20261029]
+    paths: [.github/workflows/switch-integration-source.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bundle pinned sources for reproducible integration checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p integration-source
+          git bundle create integration-source/repository.bundle --all
+          git rev-parse HEAD > integration-source/HEAD.txt
+          git submodule status > integration-source/submodules.txt
+          sha256sum integration-source/repository.bundle > integration-source/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: switch-integration-source-${{ github.sha }}
+          path: integration-source/
+          retention-days: 3
