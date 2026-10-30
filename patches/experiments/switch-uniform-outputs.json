@@ -7,8 +7,8 @@
       "base_blob": "6ffd59055b844412e0e17c11b2ae1ce6f099a920",
       "replacements": [
         {
-          "old": "#include <util/gxm_range_contract.h>",
-          "new": "#include <util/gxm_range_contract.h>\n#include <util/host_output_scope.h>"
+          "old": "#include <util/gxm_range_contract.h>\n#endif",
+          "new": "#include <util/gxm_range_contract.h>\n#endif\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/host_output_scope.h>\n#endif"
         },
         {
           "old": "    TRACY_FUNC(sceGxmSetUniformDataF, uniformBuffer, parameter, componentOffset, componentCount, sourceData);",

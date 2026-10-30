@@ -45,6 +45,19 @@ def sources(required):
     recipe = json.loads(RECIPE.read_text())
     engine = load(ROOT / 'scripts/apply-switch-write-watch-hooks.py', 'uniform_engine')
     chain = load(ROOT / 'scripts/tests/test_switch_controller_recipe_chain.py', 'uniform_chain')
+    # CI #64: inserting inside an older exact include block broke its source
+    # gate. Preserve that complete block, and keep the new header guarded too.
+    prior = json.loads((ROOT / 'patches/experiments/switch-gxm-contracts.json').read_text())
+    prior_block = prior['files'][0]['replacements'][0]['new']
+    header_op = recipe['files'][0]['replacements'][0]
+    expanded_header = engine.transform(prior_block.encode(), [header_op]).decode()
+    assert prior_block in expanded_header
+    assert expanded_header.count('#include <util/host_output_scope.h>') == 1
+    assert expanded_header.endswith('#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n'
+                                    '#include <util/host_output_scope.h>\n#endif')
+    broken_header = prior_block.replace('#include <util/gxm_range_contract.h>',
+        '#include <util/gxm_range_contract.h>\n#include <util/host_output_scope.h>', 1)
+    assert prior_block not in broken_header  # the exact CI #64 regression
     originals, expanded = {}, {}
     if required:
         for item in recipe['files']:
