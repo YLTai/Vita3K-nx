@@ -133,8 +133,8 @@ def analyze(data, changed_total=None):
         issues.append(str(ex))
     if totals['epoch_candidate_changes']:
         warnings.append('Full Hash disproved stable-epoch candidates; inspect GPU completion, async HLE and missing write sources')
-    if not totals['epoch_candidates']:
-        warnings.append('No coarse-epoch candidates: broad HLE/GPU exclusions may dominate; do not repeat the same scene for green')
+    if not totals['epoch_candidates'] and not (scoped and scoped['totals']['hle_candidates']):
+        warnings.append('No coarse or scoped candidates: inspect blockers; do not repeat unchanged code for green')
     if not issues and not performance_issues and len(rows)==4:
         def group(indices):
             n=sum(rows[i]['measured_intervals'] for i in indices); ms=sum(rows[i]['duration_ms'] for i in indices)
@@ -232,8 +232,55 @@ def analyze_ranges(e, w, issues, warnings):
         if not contracts['scoped_calls']:warnings.append('No reviewed output contract actually ran')
     except (KeyError,TypeError,ValueError) as exc:
         issues.append(str(exc))
+    work = analyze_candidate_work(e, w, issues)
     blockers = sorted(contracts.get('imports',[]),key=lambda r:r.get('unknown_candidate_checks',0),reverse=True)
-    return dict(totals=total,contracts=contracts,unknown_blockers=blockers,
+    return dict(totals=total,contracts=contracts,unknown_blockers=blockers,candidate_work=work,
                 safe_to_skip_hash=False,attribution_sampling_only=64,
                 attribution_scope='Full session including restarts; sightings can overlap and are not disjoint shares',
                 limits='Known synchronous output ranges only; no GPU completion or asynchronous HLE/IPC authority')
+
+
+def analyze_candidate_work(e, w, issues):
+    """Versioned logical bytes, NOT saved bandwidth/time or skip authority."""
+    work = e.get('candidate_work')
+    cache = e.get('range_contracts', {}).get('metadata_cache')
+    if work is None and cache is None:
+        return None  # older evidence has no invented byte estimates
+    totals = {k: 0 for k in ('hash_bytes','cpu_bytes','hle_bytes','submission_bytes')}
+    try:
+        if (not isinstance(work, dict) or type(work.get('version')) is not int or work.get('version') != 1
+                or work.get('units') != 'logical_input_bytes_including_palette'):
+            raise ValueError('Missing or invalid candidate-work byte contract')
+        if (not isinstance(cache, dict) or type(cache.get('version')) is not int or cache.get('version') != 1
+                or cache.get('content_reuse_authority') is not False):
+            raise ValueError('Invalid metadata-cache contract/authority')
+        contracts = e['range_contracts']
+        hits = integer(cache, 'nid_hits'); probes = integer(cache, 'nid_probes')
+        calls = integer(contracts, 'calls')
+        if hits > calls or probes < calls - hits or not integer(cache, 'interests_revision'):
+            raise ValueError('NID cache accounting does not reconcile')
+        touches = integer(cache, 'no_overlap_hits') + integer(cache, 'range_scans')
+        if integer(e, 'active_host_at_export') or touches != 2 * integer(contracts, 'scoped_calls'):
+            raise ValueError('Output intersection cache begin/end accounting does not reconcile')
+        phases = work.get('phases')
+        if not isinstance(phases, list) or len(phases) != 4:
+            raise ValueError('Candidate byte ledger requires four phases')
+        for i, row in enumerate(phases):
+            if row.get('index') != i: raise ValueError('Candidate byte phase identity mismatch')
+            values = [integer(row,k) for k in totals]
+            if not values[0] >= values[1] >= values[2] >= values[3]:
+                raise ValueError('Candidate byte subsets do not reconcile')
+            if values[0] != integer(w['phases'][i], 'hash_bytes'):
+                raise ValueError('Full Hash byte ledger mismatch')
+            counts = (integer(e['phases'][i], 'cpu_candidates'), integer(e['range_phases'][i], 'hle_candidates'),
+                      integer(e['range_phases'][i], 'submission_candidates'))
+            for count, value in zip(counts, values[1:]):
+                if value < count or bool(count) != bool(value):
+                    raise ValueError('Candidate calls/bytes disagree')
+            if i in (1,2):
+                for k in totals: totals[k] += row[k]
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        issues.append(str(exc))
+    return dict(treatment_totals=totals, metadata_cache=cache,
+                includes_settling=True, safe_to_skip_hash=False,
+                limits='Repeated logical input including palette; not unique bytes, DRAM traffic or measured savings')

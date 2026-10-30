@@ -1,0 +1,114 @@
+{
+  "base_commit": "da085fef2a90f45994d37141ba55f822f72d89db",
+  "purpose": "Scope synchronous immediate GXM context/VDM outputs, accelerate metadata without changing eligibility, and count candidate input bytes. Full Hash retained.",
+  "files": [
+    {
+      "path": "vita3k/modules/SceGxm/SceGxm.cpp",
+      "base_blob": "6ffd59055b844412e0e17c11b2ae1ce6f099a920",
+      "replacements": [
+        {
+          "old": "#include <util/switch_tracelab.h>",
+          "new": "#include <util/switch_tracelab.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/gxm_range_contract.h>\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceGxmSetFragmentDefaultUniformBuffer, context, bufferData);",
+          "new": "    TRACY_FUNC(sceGxmSetFragmentDefaultUniformBuffer, context, bufferData);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_gxm_context(context, emuenv.mem,\n        {\"sceGxmSetFragmentDefaultUniformBuffer\"}, false, SCE_GXM_CONTEXT_TYPE_IMMEDIATE, sizeof(renderer::Command));\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceGxmSetFragmentTexture, context, textureIndex, texture);",
+          "new": "    TRACY_FUNC(sceGxmSetFragmentTexture, context, textureIndex, texture);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_gxm_context(context, emuenv.mem,\n        {\"sceGxmSetFragmentTexture\"}, false, SCE_GXM_CONTEXT_TYPE_IMMEDIATE, sizeof(renderer::Command));\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceGxmSetFragmentUniformBuffer, context, bufferIndex, bufferData);",
+          "new": "    TRACY_FUNC(sceGxmSetFragmentUniformBuffer, context, bufferIndex, bufferData);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_gxm_context(context, emuenv.mem,\n        {\"sceGxmSetFragmentUniformBuffer\"}, false, SCE_GXM_CONTEXT_TYPE_IMMEDIATE, sizeof(renderer::Command));\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceGxmSetVertexDefaultUniformBuffer, context, bufferData);",
+          "new": "    TRACY_FUNC(sceGxmSetVertexDefaultUniformBuffer, context, bufferData);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_gxm_context(context, emuenv.mem,\n        {\"sceGxmSetVertexDefaultUniformBuffer\"}, false, SCE_GXM_CONTEXT_TYPE_IMMEDIATE, sizeof(renderer::Command));\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceGxmSetVertexStream, context, streamIndex, streamData);",
+          "new": "    TRACY_FUNC(sceGxmSetVertexStream, context, streamIndex, streamData);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_gxm_context(context, emuenv.mem,\n        {\"sceGxmSetVertexStream\"}, false, SCE_GXM_CONTEXT_TYPE_IMMEDIATE, sizeof(renderer::Command));\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceGxmSetVertexTexture, context, textureIndex, texture);",
+          "new": "    TRACY_FUNC(sceGxmSetVertexTexture, context, textureIndex, texture);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_gxm_context(context, emuenv.mem,\n        {\"sceGxmSetVertexTexture\", \"_sceGxmSetVertexTexture\"}, false, SCE_GXM_CONTEXT_TYPE_IMMEDIATE, sizeof(renderer::Command));\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceGxmSetVertexUniformBuffer, context, bufferIndex, bufferData);",
+          "new": "    TRACY_FUNC(sceGxmSetVertexUniformBuffer, context, bufferIndex, bufferData);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_gxm_context(context, emuenv.mem,\n        {\"sceGxmSetVertexUniformBuffer\"}, false, SCE_GXM_CONTEXT_TYPE_IMMEDIATE, sizeof(renderer::Command));\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceGxmSetFragmentProgram, context, fragmentProgram);",
+          "new": "    TRACY_FUNC(sceGxmSetFragmentProgram, context, fragmentProgram);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_gxm_context(context, emuenv.mem,\n        {\"sceGxmSetFragmentProgram\"}, true, SCE_GXM_CONTEXT_TYPE_IMMEDIATE, sizeof(renderer::Command));\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceGxmSetVertexProgram, context, vertexProgram);",
+          "new": "    TRACY_FUNC(sceGxmSetVertexProgram, context, vertexProgram);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_gxm_context(context, emuenv.mem,\n        {\"sceGxmSetVertexProgram\"}, true, SCE_GXM_CONTEXT_TYPE_IMMEDIATE, sizeof(renderer::Command));\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceGxmSetFrontVisibilityTestEnable, context, enable);",
+          "new": "    TRACY_FUNC(sceGxmSetFrontVisibilityTestEnable, context, enable);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_gxm_context(context, emuenv.mem,\n        {\"sceGxmSetFrontVisibilityTestEnable\"}, true, SCE_GXM_CONTEXT_TYPE_IMMEDIATE, sizeof(renderer::Command));\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceGxmSetViewport, context, xOffset, xScale, yOffset, yScale, zOffset, zScale);",
+          "new": "    TRACY_FUNC(sceGxmSetViewport, context, xOffset, xScale, yOffset, yScale, zOffset, zScale);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_gxm_context(context, emuenv.mem,\n        {\"sceGxmSetViewport\"}, true, SCE_GXM_CONTEXT_TYPE_IMMEDIATE, sizeof(renderer::Command));\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceGxmSetViewportEnable, context, enable);",
+          "new": "    TRACY_FUNC(sceGxmSetViewportEnable, context, enable);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_gxm_context(context, emuenv.mem,\n        {\"sceGxmSetViewportEnable\"}, true, SCE_GXM_CONTEXT_TYPE_IMMEDIATE, sizeof(renderer::Command));\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceGxmDraw, context, primType, indexType, indexData, indexCount);",
+          "new": "    TRACY_FUNC(sceGxmDraw, context, primType, indexType, indexData, indexCount);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_gxm_context(context, emuenv.mem,\n        {\"sceGxmDraw\"}, true, SCE_GXM_CONTEXT_TYPE_IMMEDIATE, sizeof(renderer::Command));\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceGxmDrawInstanced, context, primType, indexType, indexData, indexCount, indexWrap);",
+          "new": "    TRACY_FUNC(sceGxmDrawInstanced, context, primType, indexType, indexData, indexCount, indexWrap);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_gxm_context(context, emuenv.mem,\n        {\"sceGxmDrawInstanced\"}, true, SCE_GXM_CONTEXT_TYPE_IMMEDIATE, sizeof(renderer::Command));\n#endif"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/switch_write_watch.h",
+      "base_blob": "d02545c2ec170ad0583850de74cf2fcd741114b4",
+      "replacements": [
+        {
+          "old": "    uint64_t submission_candidates = 0, submission_candidate_changes = 0, gpu_epoch_blocks = 0, unrelated_mapping_updates = 0;",
+          "new": "    uint64_t submission_candidates = 0, submission_candidate_changes = 0, gpu_epoch_blocks = 0, unrelated_mapping_updates = 0;\n    uint64_t cpu_candidate_bytes = 0, hle_candidate_bytes = 0, submission_candidate_bytes = 0;"
+        },
+        {
+          "old": "                ++count().cpu_candidates;",
+          "new": "                ++count().cpu_candidates;\n                count().cpu_candidate_bytes += r.key.size + r.key.palette_size;"
+        },
+        {
+          "old": "                    ++count().hle_candidates;",
+          "new": "                    ++count().hle_candidates;\n                    count().hle_candidate_bytes += r.key.size + r.key.palette_size;"
+        },
+        {
+          "old": "                        ++count().submission_candidates;",
+          "new": "                        ++count().submission_candidates;\n                        count().submission_candidate_bytes += r.key.size + r.key.palette_size;"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/src/switch_memory_validation.cpp",
+      "base_blob": "e805efbd80f3880ab8561fc46289dedc5dcff565",
+      "replacements": [
+        {
+          "old": "        std::fprintf(file, \"],\\\"range_mismatches_dropped\\\":%llu,\\\"range_mismatches\\\":[\", U(observed.hle_mismatches_dropped));",
+          "new": "        std::fputs(\"],\\\"candidate_work\\\":{\\\"version\\\":1,\\\"units\\\":\\\"logical_input_bytes_including_palette\\\",\\\"phases\\\":[\", file);\n        for (unsigned i = 0; i < 4; ++i) {\n            const auto &c = observed.phases[i];\n            std::fprintf(file, \"%s{\\\"index\\\":%u,\\\"hash_bytes\\\":%llu,\\\"cpu_bytes\\\":%llu,\\\"hle_bytes\\\":%llu,\\\"submission_bytes\\\":%llu}\",\n                i ? \",\" : \"\", i, U(c.hash_bytes), U(c.cpu_candidate_bytes), U(c.hle_candidate_bytes), U(c.submission_candidate_bytes));\n        }\n        std::fprintf(file, \"]},\\\"range_mismatches_dropped\\\":%llu,\\\"range_mismatches\\\":[\", U(observed.hle_mismatches_dropped));"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/run-switch-performance-tests.sh",
+      "base_blob": "5810c5ce63221fa1e9539e5196b773c96c71345c",
+      "replacements": [
+        {
+          "old": "python3 \"$ROOT/scripts/tests/test_switch_native_waits.py\" --require-source --cxx \"${CXX:-c++}\"",
+          "new": "python3 \"$ROOT/scripts/tests/test_switch_native_waits.py\" --require-source --cxx \"${CXX:-c++}\"\npython3 \"$ROOT/scripts/tests/test_switch_gxm_contracts.py\" --require-source --cxx \"${CXX:-c++}\""
+        }
+      ]
+    }
+  ]
+}

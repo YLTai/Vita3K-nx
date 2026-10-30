@@ -18,6 +18,7 @@ struct HostSpan {
     uint64_t size = 0;
     HostSpan() = default;
     HostSpan(const void *p, uint64_t n) : begin(reinterpret_cast<uintptr_t>(p)), size(p ? n : 0) {}
+    bool operator==(const HostSpan &) const = default;
     bool valid() const { return !size || (begin && size <= UINTPTR_MAX - begin); }
     bool overlaps(const HostSpan &s) const {
         return size && s.size && (begin <= s.begin ? s.begin - begin < size : begin - s.begin < s.size);
@@ -46,6 +47,16 @@ private:
     std::array<Import, max_imports> imports_{};
     std::array<Interest, max_resources> resources_{};
     std::array<Row, 256> rows_{};
+    // Attribution acceleration only. Every hit verifies the full NID; a direct
+    // cache collision falls back to the original bounded table.
+    std::array<unsigned, 1024> row_cache_{};
+    struct NoOverlap {
+        uint64_t revision = 0;
+        std::array<HostSpan, 3> spans{};
+    };
+    std::array<NoOverlap, 256> no_overlap_{};
+    uint64_t interests_revision_ = 1;
+    uint64_t row_hits_ = 0, row_probes_ = 0, range_hits_ = 0, range_scans_ = 0;
     std::unordered_map<uintptr_t, std::vector<unsigned>> pages_;
     uint64_t serial_ = 0, unknown_ = 0, gpu_ = 0, unknown_busy_ = 0;
     uint64_t calls_ = 0, exits_ = 0, scoped_ = 0, samples_ = 0, missing_names_ = 0;
@@ -61,16 +72,25 @@ private:
         return false;
     }
     void touch(Import &i, bool begin) {
+        // Cache ONLY a proved empty intersection, never content or validity.
+        // watch()/clear_interests() invalidate it even while a lease is live.
+        auto *cached = i.row < no_overlap_.size() ? &no_overlap_[i.row] : nullptr;
+        if (cached && cached->revision == interests_revision_ && cached->spans == i.spans) {
+            ++range_hits_; return;
+        }
+        ++range_scans_;
+        bool hit = false;
         const auto serial = advance(serial_);
         const auto visit = [&](unsigned id) {
             auto &r = resources_[id];
             if (!r.used || r.visited == serial || !overlaps(r, i)) return;
+            hit = true;
             r.visited = serial; r.version = serial;
             if (begin) ++r.busy;
             else if (r.busy) --r.busy;
             else failed_ = true;
         };
-        for (const auto &s : i.spans) if (s.size) {
+        for (const auto &s : i.spans) if (s.size && !pages_.empty()) {
             const auto first = s.begin >> 12, last = (s.begin + s.size - 1) >> 12;
             if (last - first > pages_.size()) {
                 for (unsigned id = 0; id < max_resources; ++id) visit(id);
@@ -79,22 +99,34 @@ private:
                 if (p == last) break;
             }
         }
+        if (cached && !hit && !failed_) *cached = {interests_revision_, i.spans};
     }
 public:
+    HleRanges() { row_cache_.fill(no_slot); }
     bool reset() {
         for (const auto &i : imports_) if (i.used) { failed_ = true; return false; }
         imports_ = {}; resources_ = {}; rows_ = {}; pages_.clear(); edges_ = 0;
+        row_cache_.fill(no_slot); no_overlap_ = {}; interests_revision_ = 1;
+        row_hits_ = row_probes_ = range_hits_ = range_scans_ = 0;
         serial_ = unknown_ = gpu_ = unknown_busy_ = calls_ = exits_ = scoped_ = samples_ = missing_names_ = 0;
         parks_ = resumes_ = parked_ = 0;
         failed_ = false; return true;
     }
-    void clear_interests() { resources_ = {}; pages_.clear(); edges_ = 0; advance(serial_); }
+    void clear_interests() { resources_ = {}; pages_.clear(); edges_ = 0; advance(serial_); advance(interests_revision_); }
     bool failed() const { return failed_; }
     unsigned enter(uint32_t nid) {
-        unsigned row = no_slot;
-        for (unsigned n = 0; n < rows_.size(); ++n) {
-            auto &r = rows_[(nid + n) % rows_.size()];
-            if (!r.calls || r.nid == nid) { row = unsigned(&r - rows_.data()); r.nid = nid; ++r.calls; break; }
+        const unsigned bucket = (uint32_t(nid * 2654435761u) >> 22);
+        unsigned row = row_cache_[bucket];
+        if (row < rows_.size() && rows_[row].calls && rows_[row].nid == nid) {
+            ++row_hits_; ++rows_[row].calls;
+        } else {
+            row = no_slot;
+            for (unsigned n = 0; n < rows_.size(); ++n) {
+                ++row_probes_;
+                auto &r = rows_[(nid + n) % rows_.size()];
+                if (!r.calls || r.nid == nid) { row = unsigned(&r - rows_.data()); r.nid = nid; ++r.calls; break; }
+            }
+            row_cache_[bucket] = row;
         }
         if (row == no_slot) ++missing_names_; // attribution capacity is not correctness capacity
         ++calls_;
@@ -167,6 +199,7 @@ public:
         try {
             auto &r = resources_[id];
             if (r.used) { failed_ = true; return; } // clear_interests precedes ID reuse
+            advance(interests_revision_);
             r.used = true; r.spans = {pixels, palette}; r.version = advance(serial_);
             for (const auto &i : imports_) if (i.used && i.scoped && overlaps(r, i)) ++r.busy;
             for (const auto &s : r.spans) if (s.size) {
@@ -210,7 +243,10 @@ public:
                 "\"unknown_candidate_checks\":%llu,\"overlap_candidate_checks\":%llu,\"parks\":%llu,\"resumes\":%llu,\"parked_candidate_checks\":%llu}",first?"":",",
                 r.nid,r.name?r.name:"unresolved",U(r.calls),U(r.scoped),U(r.unknown_samples),U(r.overlap_samples),U(r.parks),U(r.resumes),U(r.parked_samples)); first = false;
         }
-        std::fprintf(f,"] ,\"native_waits\":{\"version\":1,\"parks\":%llu,\"resumes\":%llu,"
+        std::fprintf(f, "],\"metadata_cache\":{\"version\":1,\"nid_hits\":%llu,\"nid_probes\":%llu,"
+            "\"no_overlap_hits\":%llu,\"range_scans\":%llu,\"interests_revision\":%llu,\"content_reuse_authority\":false}",
+            U(row_hits_),U(row_probes_),U(range_hits_),U(range_scans_),U(interests_revision_));
+        std::fprintf(f,",\"native_waits\":{\"version\":1,\"parks\":%llu,\"resumes\":%llu,"
             "\"active\":%llu,\"async_outputs_covered\":false}}",U(parks_),U(resumes_),U(parked_));
     }
 };
