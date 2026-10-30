@@ -87,8 +87,8 @@
       "base_blob": "5810c5ce63221fa1e9539e5196b773c96c71345c",
       "replacements": [
         {
-          "old": "python3 \"$ROOT/scripts/tests/test_switch_gxm_contracts.py\" --cxx \"${CXX:-c++}\" --require-source",
-          "new": "python3 \"$ROOT/scripts/tests/test_switch_gxm_contracts.py\" --cxx \"${CXX:-c++}\" --require-source\npython3 \"$ROOT/scripts/tests/test_switch_controller_recipe_chain.py\" --require-source\npython3 \"$ROOT/scripts/tests/test_switch_host_outputs.py\" --cxx \"${CXX:-c++}\" --require-source"
+          "old": "python3 \"$ROOT/scripts/tests/test_switch_gxm_contracts.py\" --require-source --cxx \"${CXX:-c++}\"",
+          "new": "python3 \"$ROOT/scripts/tests/test_switch_gxm_contracts.py\" --require-source --cxx \"${CXX:-c++}\"\npython3 \"$ROOT/scripts/tests/test_switch_controller_recipe_chain.py\" --require-source\npython3 \"$ROOT/scripts/tests/test_switch_host_outputs.py\" --cxx \"${CXX:-c++}\" --require-source"
         }
       ]
     }
