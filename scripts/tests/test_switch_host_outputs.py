@@ -78,7 +78,15 @@ def bodies(required):
             assert 'HostOutputLease output' in body
             result.append(body)
         if f['path'].endswith('SceAudiodecUser.cpp'):
-            declaration=f['replacements'][1]['new'].split('    uint8_t *es_data')[0]
+            # The production anchor now includes the unique helper prefix.
+            # Extract only the inserted conditional, not a nested function body.
+            replacement=f['replacements'][1]['new']
+            begin=replacement.index('#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)')
+            end=replacement.index('    uint8_t *es_data',begin)
+            declaration=replacement[begin:end]
+            assert declaration.count('#if')==declaration.count('#endif')==1
+            assert 'static int decode_audio_frames' not in declaration
+            if required: assert text.count(declaration)==1
     assert len(result)==3 and 'typeid' in declaration
     return '\n'.join(result), declaration
 
