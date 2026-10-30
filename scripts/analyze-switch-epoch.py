@@ -47,6 +47,7 @@ def analyze(data, changed_total=None):
     scoped = None
     if "range_contracts" in e:
         scoped = analyze_ranges(e, w, issues, warnings)
+    analyze_callback_polls(e, issues)
     comparison = None
     policy = data.get('sample_policy')
     adaptive = policy is not None
@@ -311,3 +312,41 @@ def analyze_candidate_work(e, w, issues):
                 output_leases=e.get('range_contracts', {}).get('output_leases'),
                 includes_settling=True, safe_to_skip_hash=False,
                 limits='Repeated logical input including palette; not unique bytes, DRAM traffic or measured savings')
+
+def analyze_callback_polls(e, issues):
+    """Optional versioned extension; legacy captures do not invent callback proof."""
+    report = e.get('range_contracts', {}).get('callback_polls')
+    if report is None:
+        return None
+    fields = ('polls','empty','nonempty','incomplete','reported_callbacks',
+              'uses','clean_uses','conservative_uses','abandoned')
+    try:
+        if (not isinstance(report, dict) or type(report.get('version')) is not int or report['version'] != 1
+                or report.get('authority') is not False or report.get('failed') is not False
+                or report.get('event_phase_model') != 'event_time_including_settling'):
+            raise ValueError('Unsupported/failed callback-poll contract')
+        if integer(report, 'active_phase') != 4:
+            raise ValueError('Callback phase was not closed before export')
+        integer(report, 'capture_serial')
+        total = report['total']; phases = report['phases']
+        if not isinstance(phases, list) or len(phases) != 4:
+            raise ValueError('Callback poll phases must have four rows')
+        for row in [total] + phases:
+            for k in fields: integer(row, k)
+            if row['polls'] != row['empty'] + row['nonempty'] + row['incomplete']:
+                raise ValueError('Callback poll partition mismatch')
+            if row['uses'] != row['clean_uses'] + row['conservative_uses']:
+                raise ValueError('Callback prefix use partition mismatch')
+            if row['reported_callbacks'] < row['nonempty']:
+                raise ValueError('Nonempty scan without a reported callback')
+        # A poll may finish in one phase and its proof be used in the next.
+        if total['clean_uses'] > total['empty']:
+            raise ValueError('More clean prefix uses than complete empty scans')
+        for k in fields:
+            if sum(row[k] for row in phases) > total[k]:
+                raise ValueError('Phase callback events exceed session total')
+        if total['abandoned']:
+            issues.append('Callback scan abandoned; inspect unwinding before using capture')
+    except (KeyError, TypeError, ValueError) as exc:
+        issues.append(str(exc))
+    return report

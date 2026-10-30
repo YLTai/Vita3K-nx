@@ -7,6 +7,7 @@
 #include <limits>
 #include <mutex>
 #include <util/hle_range_gate.h>
+#include <util/callback_prefix_gate.h>
 
 namespace switch_validation::epoch {
 struct Stamp {
@@ -28,12 +29,14 @@ class Domain {
     mutable uint64_t drained_through_ = 0;
     Stats stats_;
     HleRanges ranges_;
+    CallbackPollAudit callback_audit_;
 public:
     static constexpr unsigned invalid_slot = 64;
     bool reset() {
         std::lock_guard lock(mutex_);
         if (stats_.active || stats_.host_active) { stats_.failed = true; return false; }
         if (!ranges_.reset()) { stats_.failed = true; return false; }
+        callback_audit_.reset();
         readers_.fill(0); generation_ = 1; external_ = drained_through_ = 0; stats_ = {}; return true;
     }
     unsigned enter() {
@@ -59,14 +62,14 @@ public:
     }
     Stamp stamp(uint64_t ticket, unsigned resource = HleRanges::no_slot) const {
         std::lock_guard lock(mutex_);
-        bool drained = ticket && ticket <= generation_ && !stats_.failed && !ranges_.failed();
+        bool drained = ticket && ticket <= generation_ && !stats_.failed && !ranges_.failed() && !callback_audit_.failed();
         // Once a ticket is drained, no future entrant can predate it. Avoid
         // scanning 64 slots on every unchanged texture Hash after that point.
         if (drained && ticket > drained_through_) {
             for (uint64_t reader : readers_) if (reader && reader < ticket) drained = false;
             if (drained) drained_through_ = ticket;
         }
-        return {ticket, external_, stats_.host_active, drained, !stats_.failed && !ranges_.failed(), ranges_.stamp(resource)};
+        return {ticket, external_, stats_.host_active, drained, !stats_.failed && !ranges_.failed() && !callback_audit_.failed(), ranges_.stamp(resource)};
     }
     unsigned host_enter(uint32_t nid = 0) {
         std::lock_guard lock(mutex_);
@@ -83,7 +86,8 @@ public:
         std::lock_guard lock(mutex_);
         ++stats_.gpu_boundaries; advance_external(); ranges_.gpu_boundary();
     }
-    Stats snapshot() const { std::lock_guard lock(mutex_); auto s = stats_; s.failed |= ranges_.failed(); return s; }
+    Stats snapshot() const { std::lock_guard lock(mutex_); auto s = stats_; s.failed |= ranges_.failed() || callback_audit_.failed(); return s; }
+    CallbackPollAudit &callback_audit() { return callback_audit_; }
     void name_import(unsigned slot, const char *name) { std::lock_guard lock(mutex_); ranges_.name(slot, name); }
     bool declare_import(unsigned slot, const char *name, std::initializer_list<const char *> names,
         std::initializer_list<HostSpan> spans, bool prior_unknown) {
@@ -103,7 +107,7 @@ public:
         std::lock_guard lock(mutex_); ranges_.watch(id, {pixels, n}, {palette, m});
     }
     void explain_range(unsigned id) { std::lock_guard lock(mutex_); ranges_.explain(id); }
-    void write_ranges(FILE *file) const { std::lock_guard lock(mutex_); ranges_.write_json(file); }
+    void write_ranges(FILE *file) const { std::lock_guard lock(mutex_); ranges_.write_json(file, &callback_audit_); }
 private:
     void advance_external() {
         if (external_ == std::numeric_limits<uint64_t>::max()) stats_.failed = true;
@@ -130,6 +134,7 @@ class HostLease {
     unsigned slot_ = HleRanges::no_slot;
     HostLease *previous_ = nullptr;
     const char *name_ = nullptr;
+    bool callback_tainted_ = false;
     inline static thread_local HostLease *current_ = nullptr;
 public:
     explicit HostLease(Domain *d = enabled.load(std::memory_order_acquire) ? &domain : nullptr, uint32_t nid = 0)
@@ -145,8 +150,13 @@ public:
         // Thread-local metadata only: naming a frequent HLE must not add a mutex.
         if (current_ && current_->domain_ && !current_->name_) current_->name_ = name;
     }
+    static CallbackPrefixContext callback_context() {
+        return current_ && current_->domain_ ? CallbackPrefixContext{current_, &current_->domain_->callback_audit(), &current_->callback_tainted_} : CallbackPrefixContext{};
+    }
     static bool declare_current(std::initializer_list<const char *> names,
         std::initializer_list<HostSpan> spans, bool prior_unknown) {
+        if (prior_unknown && current_ && current_->domain_)
+            prior_unknown = CallbackPrefixScope::prior_unknown(callback_context(), current_->name_);
         return current_ && current_->domain_
             && current_->domain_->declare_import(current_->slot_, current_->name_, names, spans, prior_unknown);
     }

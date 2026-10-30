@@ -2,6 +2,7 @@
 // Unknown imports always remain conservative. This is NOT Hash-reuse authority.
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
+#include <util/callback_prefix_gate.h>
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -267,7 +268,7 @@ public:
             else if (overlaps(resources_[id], i)) ++rows_[i.row].overlap_samples;
         }
     }
-    void write_json(FILE *f) const {
+    void write_json(FILE *f, const CallbackPollAudit *callbacks = nullptr) const {
         using U = unsigned long long;
         std::fprintf(f,"{\"version\":1,\"failed\":%s,\"calls\":%llu,\"exits\":%llu,\"scoped_calls\":%llu,"
             "\"candidate_explanations\":%llu,\"unattributed_calls\":%llu,\"attribution_period\":64,\"authority\":false,\"imports\":[",
@@ -289,6 +290,7 @@ public:
             "\"sources\":[%llu,%llu,%llu,%llu,%llu],\"authority\":false}",
             U(outputs_.begins),U(outputs_.ends),U(outputs_.active),U(outputs_.capacity_bytes),
             U(outputs_.overlap_touches),U(outputs_.sources[0]),U(outputs_.sources[1]),U(outputs_.sources[2]),U(outputs_.sources[3]),U(outputs_.sources[4]));
+        if (callbacks) { std::fputs(",\"callback_polls\":", f); callbacks->write_json(f); }
         std::fprintf(f,",\"native_waits\":{\"version\":1,\"parks\":%llu,\"resumes\":%llu,"
             "\"active\":%llu,\"async_outputs_covered\":false}}",U(parks_),U(resumes_),U(parked_));
     }
