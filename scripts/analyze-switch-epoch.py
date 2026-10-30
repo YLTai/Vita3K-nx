@@ -48,6 +48,9 @@ def analyze(data, changed_total=None):
     if "range_contracts" in e:
         scoped = analyze_ranges(e, w, issues, warnings)
     analyze_callback_polls(e, issues)
+    phase_attribution = analyze_phase_attribution(e, issues)
+    if isinstance(phase_attribution, dict) and not phase_attribution.get('capture_serial'):
+        issues.append('Completed capture lacks phase-attribution start evidence')
     comparison = None
     policy = data.get('sample_policy')
     adaptive = policy is not None
@@ -113,7 +116,7 @@ def analyze(data, changed_total=None):
             rows.append(dict(index=i, variant=mode, measured_intervals=count, duration_ms=duration,
                              loops_per_second=rate, observations_including_settle=g))
         mismatches = e.get('mismatches')
-        if not isinstance(mismatches,list) or len(mismatches) > 32 or len(mismatches) + integer(e,'mismatches_dropped') != totals['epoch_candidate_changes']:
+        if not isinstance(mismatches,list) or len(mismatches) + integer(e,'mismatches_dropped') != totals['epoch_candidate_changes'] or len(mismatches)>32:
             raise ValueError('Mismatch detail ledger does not reconcile')
         for event in mismatches:
             i = integer(event,'phase')
@@ -147,7 +150,7 @@ def analyze(data, changed_total=None):
     return dict(plan='epoch-write-1',controls_ok=controls_ok,comparison_eligible=not issues and not performance_issues,
         evidence_eligible=not issues,performance_exclusions=performance_issues,sample_policy=policy,
         exclusions=issues+performance_issues,warnings=warnings,phases=rows,totals=totals,comparison=comparison,
-        scoped_hle=scoped,safe_to_skip_hash=False,next_action='Exit normally and share one complete capture; do not repeat for green',
+        scoped_hle=scoped,phase_attribution=phase_attribution,safe_to_skip_hash=False,next_action='Exit normally and share one complete capture; do not repeat for green',
         limits=['This is a real-game software-write-table audit, not the private CPU/GPU mirror suite.',
                 'A and B share read/write tables, cross-page detection and execution/HLE boundary costs; B adds persistent selected-page interception.',
                 'Only pre-publication JIT runs are drained; no renderer pause or global stop is performed.',
@@ -347,6 +350,70 @@ def analyze_callback_polls(e, issues):
                 raise ValueError('Phase callback events exceed session total')
         if total['abandoned']:
             issues.append('Callback scan abandoned; inspect unwinding before using capture')
+    except (KeyError, TypeError, ValueError) as exc:
+        issues.append(str(exc))
+    return report
+
+def analyze_phase_attribution(e, issues):
+    """Exact per-event root counts, not disjoint blocker probabilities or time."""
+    contracts = e.get('range_contracts', {})
+    report = contracts.get('phase_attribution')
+    if report is None:
+        return None
+    fields = ('enters', 'declarations', 'exits', 'unknown_finishes', 'unknown_prefixes',
+              'unknown_samples', 'overlap_samples')
+    lifetime_fields = ('calls', 'scoped', 'calls', 'unknown_finishes', 'unknown_prefixes',
+                       'unknown_candidate_checks', 'overlap_candidate_checks')
+    try:
+        if (not isinstance(report, dict) or type(report.get('version')) is not int or report['version'] != 1
+                or report.get('authority') is not False
+                or report.get('event_phase_model') != 'event_time_including_settling'
+                or report.get('callback_use_policy') != 'accepted_declaration_only'
+                or integer(report, 'active_phase') != 4):
+            raise ValueError('Invalid phase attribution contract')
+        serial = integer(report, 'capture_serial')
+        polls = contracts.get('callback_polls')
+        if polls is not None and serial != integer(polls, 'capture_serial'):
+            raise ValueError('Root and callback capture serials disagree')
+        phases = report['phases']
+        if not isinstance(phases, list) or len(phases) != 4:
+            raise ValueError('Root attribution requires four phases')
+        lifetime = {integer(row, 'nid'): row for row in contracts['imports']}
+        sums = {}
+        for i, phase in enumerate(phases):
+            if not isinstance(phase, dict) or type(phase.get('index')) is not int or phase['index'] != i:
+                raise ValueError('Root attribution phase identity mismatch')
+            total = {k: integer(phase['total'], k) for k in fields}
+            accounted = {k: integer(phase['unattributed'], k) for k in fields}
+            rows = phase['imports']
+            if not isinstance(rows, list) or len(rows) > 256:
+                raise ValueError('Invalid phase root table')
+            seen = set()
+            for row in rows:
+                nid = integer(row, 'nid')
+                if nid not in lifetime or nid in seen:
+                    raise ValueError('Unknown or duplicated phase root')
+                seen.add(nid)
+                counts = row['counts']
+                totals = sums.setdefault(nid, dict.fromkeys(fields, 0))
+                for k in fields:
+                    value = integer(counts, k); accounted[k] += value; totals[k] += value
+                if counts['unknown_finishes'] > counts['exits'] or counts['unknown_prefixes'] > counts['declarations']:
+                    raise ValueError('Invalid root finish/prefix subset')
+            if total != accounted:
+                raise ValueError('Phase attribution row sums do not reconcile')
+            if any(total.values()) and not serial:
+                raise ValueError('Attributed events without a capture serial')
+            if total['unknown_finishes'] > total['exits'] or total['unknown_prefixes'] > total['declarations']:
+                raise ValueError('Invalid phase finish/prefix subset')
+        for nid, totals in sums.items():
+            for k, source in zip(fields, lifetime_fields):
+                if totals[k] > integer(lifetime[nid], source):
+                    raise ValueError('Capture root events exceed lifetime counts')
+        # Enter/declare/exit can cross phases. Never impose per-phase balance.
+        for field, source in [('enters','calls'), ('declarations','scoped_calls'), ('exits','exits')]:
+            if sum(integer(p['total'], field) for p in phases) > integer(contracts, source):
+                raise ValueError('Capture root total exceeds session count')
     except (KeyError, TypeError, ValueError) as exc:
         issues.append(str(exc))
     return report

@@ -90,8 +90,19 @@ public:
     CallbackPollAudit &callback_audit() { return callback_audit_; }
     void name_import(unsigned slot, const char *name) { std::lock_guard lock(mutex_); ranges_.name(slot, name); }
     bool declare_import(unsigned slot, const char *name, std::initializer_list<const char *> names,
-        std::initializer_list<HostSpan> spans, bool prior_unknown) {
-        std::lock_guard lock(mutex_); ranges_.name(slot, name); return ranges_.declare(slot, names, spans, prior_unknown);
+        std::initializer_list<HostSpan> spans, bool prior_unknown, CallbackPrefixContext prefix = {}) {
+        std::lock_guard lock(mutex_);
+        ranges_.name(slot, name);
+        // Validate BEFORE consuming a one-shot callback proof. A nested helper
+        // for another root, a repeated declaration or invalid span is a no-op.
+        // The same lock covers admission, proof resolution and publication.
+        if (!ranges_.can_declare(slot, names, spans)) return false;
+        if (prior_unknown && prefix.owner)
+            prior_unknown = CallbackPrefixScope::prior_unknown(prefix, name);
+        return ranges_.declare(slot, names, spans, prior_unknown);
+    }
+    void range_phase(unsigned phase, bool restart) {
+        std::lock_guard lock(mutex_); ranges_.phase(phase, restart);
     }
     bool park_import(unsigned slot, const char *name) {
         std::lock_guard lock(mutex_); return ranges_.park(slot, name);
@@ -155,10 +166,8 @@ public:
     }
     static bool declare_current(std::initializer_list<const char *> names,
         std::initializer_list<HostSpan> spans, bool prior_unknown) {
-        if (prior_unknown && current_ && current_->domain_)
-            prior_unknown = CallbackPrefixScope::prior_unknown(callback_context(), current_->name_);
         return current_ && current_->domain_
-            && current_->domain_->declare_import(current_->slot_, current_->name_, names, spans, prior_unknown);
+            && current_->domain_->declare_import(current_->slot_, current_->name_, names, spans, prior_unknown, callback_context());
     }
     HostLease(const HostLease &) = delete;
     HostLease &operator=(const HostLease &) = delete;

@@ -24,7 +24,8 @@ RECIPES = (RECIPE, ROOT / 'patches/experiments/switch-heap-fault.json',
            ROOT / 'patches/experiments/switch-gxm-contracts.json',
            ROOT / 'patches/experiments/switch-host-outputs.json',
            ROOT / 'patches/experiments/switch-uniform-outputs.json',
-           ROOT / 'patches/experiments/switch-callback-batch.json')
+           ROOT / 'patches/experiments/switch-callback-batch.json',
+           ROOT / 'patches/experiments/switch-declaration-transactions.json')
 
 
 def blob_sha(data):

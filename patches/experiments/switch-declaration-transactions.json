@@ -1,0 +1,67 @@
+{
+  "base_commit": "17357259cc9073e0d5b8c64d38d5757ec1225f6d",
+  "purpose": "Commit declarations before consuming one-shot proofs; exact per-phase attribution and reviewed signal/reserve/cache-hit paths. Full Hash remains authoritative.",
+  "reviewed_dependencies": {
+    "vita3k/kernel/src/thread.cpp": "ab13d4416624de724bf3a5f4a1b944517cb4c31c",
+    "vita3k/modules/SceLibKernel/SceLibKernel.cpp": "cf06ee74395bdd42b6638e5302ddc50145361f73",
+    "vita3k/modules/SceKernelThreadMgr/SceThreadmgr.cpp": "e337930de3a91718735b988887bf8414c7d94281"
+  },
+  "files": [
+    {
+      "path": "vita3k/kernel/src/sync_primitives.cpp",
+      "base_blob": "9524e3e4c010f65e95794b54195f62f550fd57dc",
+      "replacements": [
+        {
+          "old": "int semaphore_signal(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID semaid, int signal) {",
+          "new": "int semaphore_signal(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID semaid, int signal) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    // Only this signalling thread is host-only. Waiter outputs stay tracked.\n    switch_validation::epoch::declare_outputs({\"sceKernelSignalSema\"}, {});\n#endif"
+        },
+        {
+          "old": "int condvar_signal(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID condid, Condvar::SignalTarget signal_target, SyncWeight weight) {",
+          "new": "int condvar_signal(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID condid, Condvar::SignalTarget signal_target, SyncWeight weight) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    // Only this signalling thread is host-only. Waiter outputs stay tracked.\n    switch_validation::epoch::declare_outputs({\"sceKernelSignalLwCond\",\"sceKernelSignalLwCondAll\",\"sceKernelSignalLwCondTo\"}, {});\n#endif"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/modules/SceGxm/SceGxm.cpp",
+      "base_blob": "6ffd59055b844412e0e17c11b2ae1ce6f099a920",
+      "replacements": [
+        {
+          "old": "    TRACY_FUNC(sceGxmReserveFragmentDefaultUniformBuffer, context, uniformBuffer);",
+          "new": "    TRACY_FUNC(sceGxmReserveFragmentDefaultUniformBuffer, context, uniformBuffer);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (context && uniformBuffer && context->state.type == SCE_GXM_CONTEXT_TYPE_IMMEDIATE)\n        switch_validation::epoch::declare_outputs({\"sceGxmReserveFragmentDefaultUniformBuffer\"},\n            {{context, sizeof(*context)}, {uniformBuffer, sizeof(*uniformBuffer)}});\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceGxmReserveVertexDefaultUniformBuffer, context, uniformBuffer);",
+          "new": "    TRACY_FUNC(sceGxmReserveVertexDefaultUniformBuffer, context, uniformBuffer);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (context && uniformBuffer && context->state.type == SCE_GXM_CONTEXT_TYPE_IMMEDIATE)\n        switch_validation::epoch::declare_outputs({\"sceGxmReserveVertexDefaultUniformBuffer\"},\n            {{context, sizeof(*context)}, {uniformBuffer, sizeof(*uniformBuffer)}});\n#endif"
+        },
+        {
+          "old": "    if (cached != shaderPatcher->fragment_program_cache.end()) {\n        ++cached->second.get(mem)->reference_count;\n        *fragmentProgram = cached->second;\n        return 0;\n    }",
+          "new": "    if (cached != shaderPatcher->fragment_program_cache.end()) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        // Only the cache-hit branch has no Guest allocator/renderer work.\n        const auto *observed_cached_program = cached->second.get(mem);\n        if (observed_cached_program)\n            switch_validation::epoch::declare_outputs({\"sceGxmShaderPatcherCreateFragmentProgram\"},\n                {{&observed_cached_program->reference_count, sizeof(observed_cached_program->reference_count)},\n                 {fragmentProgram, sizeof(*fragmentProgram)}});\n#endif\n        ++cached->second.get(mem)->reference_count;\n        *fragmentProgram = cached->second;\n        return 0;\n    }"
+        },
+        {
+          "old": "    if (cached != shaderPatcher->vertex_program_cache.end()) {\n        ++cached->second.get(mem)->reference_count;\n        *vertexProgram = cached->second;\n        return 0;\n    }",
+          "new": "    if (cached != shaderPatcher->vertex_program_cache.end()) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        // Only the cache-hit branch has no Guest allocator/renderer work.\n        const auto *observed_cached_program = cached->second.get(mem);\n        if (observed_cached_program)\n            switch_validation::epoch::declare_outputs({\"sceGxmShaderPatcherCreateVertexProgram\"},\n                {{&observed_cached_program->reference_count, sizeof(observed_cached_program->reference_count)},\n                 {vertexProgram, sizeof(*vertexProgram)}});\n#endif\n        ++cached->second.get(mem)->reference_count;\n        *vertexProgram = cached->second;\n        return 0;\n    }"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/switch_write_watch.h",
+      "base_blob": "d02545c2ec170ad0583850de74cf2fcd741114b4",
+      "replacements": [
+        {
+          "old": "        if (domain_) domain_->callback_audit().phase(phase, restart);",
+          "new": "        if (domain_) domain_->callback_audit().phase(phase, restart);\n        if (domain_) domain_->range_phase(phase, restart);"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/run-switch-performance-tests.sh",
+      "base_blob": "5810c5ce63221fa1e9539e5196b773c96c71345c",
+      "replacements": [
+        {
+          "old": "python3 \"$ROOT/scripts/tests/test_switch_callback_batch.py\" --cxx \"${CXX:-c++}\" --require-source",
+          "new": "python3 \"$ROOT/scripts/tests/test_switch_callback_batch.py\" --cxx \"${CXX:-c++}\" --require-source\npython3 \"$ROOT/scripts/tests/test_switch_declaration_transactions.py\" --cxx \"${CXX:-c++}\" --require-source"
+        }
+      ]
+    }
+  ]
+}

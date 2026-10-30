@@ -47,6 +47,33 @@ public:
         uint64_t unknown_finishes = 0, unknown_prefixes = 0;
     };
 private:
+    struct PhaseEvents {
+        uint64_t enters = 0, declarations = 0, exits = 0;
+        uint64_t unknown_finishes = 0, unknown_prefixes = 0;
+        uint64_t unknown_samples = 0, overlap_samples = 0;
+    };
+    struct PhaseRows {
+        PhaseEvents total, unattributed;
+        std::array<PhaseEvents, 256> rows{};
+    };
+    std::array<PhaseRows, 4> phase_rows_{};
+    unsigned active_phase_ = 4;
+    uint64_t capture_serial_ = 0;
+    void phase_event(unsigned row, uint64_t PhaseEvents::*field) {
+        if (active_phase_ >= phase_rows_.size()) return;
+        auto &p = phase_rows_[active_phase_];
+        advance(p.total.*field);
+        auto &entry = row < p.rows.size() ? p.rows[row] : p.unattributed;
+        advance(entry.*field);
+    }
+    static void write_phase_counts(FILE *f, const PhaseEvents &c) {
+        using U = unsigned long long;
+        std::fprintf(f, "{\"enters\":%llu,\"declarations\":%llu,\"exits\":%llu,"
+            "\"unknown_finishes\":%llu,\"unknown_prefixes\":%llu,"
+            "\"unknown_samples\":%llu,\"overlap_samples\":%llu}",
+            U(c.enters), U(c.declarations), U(c.exits), U(c.unknown_finishes),
+            U(c.unknown_prefixes), U(c.unknown_samples), U(c.overlap_samples));
+    }
     struct Import { bool used = false, scoped = false, parked = false, output = false; uint32_t row = no_slot;
         const char *name = nullptr; std::array<HostSpan, 3> spans{}; };
     struct Interest { bool used = false; std::array<HostSpan, 2> spans{};
@@ -119,10 +146,17 @@ public:
         row_hits_ = row_probes_ = range_hits_ = range_scans_ = 0;
         serial_ = unknown_ = gpu_ = unknown_busy_ = calls_ = exits_ = scoped_ = samples_ = missing_names_ = 0;
         parks_ = resumes_ = parked_ = 0; outputs_ = {};
+        phase_rows_ = {}; active_phase_ = 4; capture_serial_ = 0;
         failed_ = false; return true;
     }
     void clear_interests() { resources_ = {}; pages_.clear(); edges_ = 0; advance(serial_); advance(interests_revision_); }
     bool failed() const { return failed_; }
+    // Per-event attribution; scopes may begin before or end after this phase.
+    // A restart clears only capture rows, never live imports or writer history.
+    void phase(unsigned p, bool restart) {
+        if (restart) { phase_rows_ = {}; advance(capture_serial_); }
+        active_phase_ = p < phase_rows_.size() ? p : 4;
+    }
     unsigned enter(uint32_t nid) {
         const unsigned bucket = (uint32_t(nid * 2654435761u) >> 22);
         unsigned row = row_cache_[bucket];
@@ -138,7 +172,7 @@ public:
             row_cache_[bucket] = row;
         }
         if (row == no_slot) ++missing_names_; // attribution capacity is not correctness capacity
-        ++calls_;
+        ++calls_; phase_event(row, &PhaseEvents::enters);
         for (unsigned n = 0; n < imports_.size(); ++n) if (!imports_[n].used) {
             imports_[n] = {}; imports_[n].used = true; imports_[n].row = row; ++unknown_busy_; return n;
         }
@@ -152,24 +186,32 @@ public:
         i.name = name;
         if (i.row < rows_.size()) rows_[i.row].name = name;
     }
-    bool declare(unsigned slot, std::initializer_list<const char *> names,
-        std::initializer_list<HostSpan> spans, bool prior_unknown = false) {
+    bool can_declare(unsigned slot, std::initializer_list<const char *> names,
+        std::initializer_list<HostSpan> spans) const {
         if (failed_ || slot >= imports_.size()) return false;
-        auto &i = imports_[slot];
+        const auto &i = imports_[slot];
         if (!i.used || i.output || i.scoped || i.parked || !i.name || spans.size() > i.spans.size()) return false;
         bool allowed = false;
-        for (auto n : names) if (!std::strcmp(n, i.name)) allowed = true;
-        if (!allowed) return false; // helper reached through an unreviewed caller stays unknown
+        for (auto n : names) if (n && !std::strcmp(n, i.name)) allowed = true;
+        if (!allowed) return false;
         for (const auto &s : spans) if (!s.valid()) return false;
+        return true;
+    }
+    bool declare(unsigned slot, std::initializer_list<const char *> names,
+        std::initializer_list<HostSpan> spans, bool prior_unknown = false) {
+        if (!can_declare(slot, names, spans)) return false;
+        auto &i = imports_[slot];
         std::copy(spans.begin(), spans.end(), i.spans.begin());
         // Callback-capable wrappers may have executed arbitrary code BEFORE
         // the reviewed wait tail. Do not erase that unknown prefix's effects.
         if (prior_unknown) {
             advance(unknown_);
             if (i.row < rows_.size()) ++rows_[i.row].unknown_prefixes;
+            phase_event(i.row, &PhaseEvents::unknown_prefixes);
         }
         --unknown_busy_; i.scoped = true; ++scoped_;
         if (i.row < rows_.size()) ++rows_[i.row].scoped;
+        phase_event(i.row, &PhaseEvents::declarations);
         touch(i, true); return true;
     }
     // Only an audited native wait may use this. This is not a read-only HLE
@@ -206,8 +248,10 @@ public:
         else if (unknown_busy_) {
             --unknown_busy_; advance(unknown_);
             if (i.row < rows_.size()) ++rows_[i.row].unknown_finishes;
+            phase_event(i.row, &PhaseEvents::unknown_finishes);
         }
         else failed_ = true;
+        phase_event(i.row, &PhaseEvents::exits);
         i = {}; ++exits_;
     }
     unsigned begin_output(HostSpan span, unsigned source, bool bounds_valid = true) {
@@ -264,8 +308,8 @@ public:
         if ((samples_ & 63u) != 1u) return;
         for (const auto &i : imports_) if (i.used && i.row < rows_.size()) {
             if (i.parked) ++rows_[i.row].parked_samples;
-            else if (!i.scoped) ++rows_[i.row].unknown_samples;
-            else if (overlaps(resources_[id], i)) ++rows_[i.row].overlap_samples;
+            else if (!i.scoped) { ++rows_[i.row].unknown_samples; phase_event(i.row, &PhaseEvents::unknown_samples); }
+            else if (overlaps(resources_[id], i)) { ++rows_[i.row].overlap_samples; phase_event(i.row, &PhaseEvents::overlap_samples); }
         }
     }
     void write_json(FILE *f, const CallbackPollAudit *callbacks = nullptr) const {
@@ -290,6 +334,25 @@ public:
             "\"sources\":[%llu,%llu,%llu,%llu,%llu],\"authority\":false}",
             U(outputs_.begins),U(outputs_.ends),U(outputs_.active),U(outputs_.capacity_bytes),
             U(outputs_.overlap_touches),U(outputs_.sources[0]),U(outputs_.sources[1]),U(outputs_.sources[2]),U(outputs_.sources[3]),U(outputs_.sources[4]));
+        std::fprintf(f, ",\"phase_attribution\":{\"version\":1,\"authority\":false,"
+            "\"event_phase_model\":\"event_time_including_settling\","
+            "\"callback_use_policy\":\"accepted_declaration_only\","
+            "\"capture_serial\":%llu,\"active_phase\":%u,\"phases\":[", U(capture_serial_), active_phase_);
+        for (unsigned n = 0; n < phase_rows_.size(); ++n) {
+            if (n) std::fputc(',', f);
+            const auto &p = phase_rows_[n];
+            std::fprintf(f, "{\"index\":%u,\"total\":", n); write_phase_counts(f, p.total);
+            std::fputs(",\"unattributed\":", f); write_phase_counts(f, p.unattributed);
+            std::fputs(",\"imports\":[", f); bool first_row = true;
+            for (unsigned i = 0; i < rows_.size(); ++i) {
+                const auto &c = p.rows[i];
+                if (!(c.enters || c.declarations || c.exits || c.unknown_finishes || c.unknown_prefixes || c.unknown_samples || c.overlap_samples)) continue;
+                std::fprintf(f, "%s{\"nid\":%u,\"counts\":", first_row ? "" : ",", rows_[i].nid);
+                write_phase_counts(f, c); std::fputc('}', f); first_row = false;
+            }
+            std::fputs("]}", f);
+        }
+        std::fputs("]}", f);
         if (callbacks) { std::fputs(",\"callback_polls\":", f); callbacks->write_json(f); }
         std::fprintf(f,",\"native_waits\":{\"version\":1,\"parks\":%llu,\"resumes\":%llu,"
             "\"active\":%llu,\"async_outputs_covered\":false}}",U(parks_),U(resumes_),U(parked_));
