@@ -33,14 +33,20 @@ struct RangeStamp {
 class HleRanges {
 public:
     static constexpr unsigned no_slot = ~0u, max_imports = 128, max_resources = 1024;
+    struct OutputStats {
+        uint64_t begins = 0, ends = 0, active = 0, capacity_bytes = 0;
+        uint64_t overlap_touches = 0;
+        std::array<uint64_t, 4> sources{}; // generic, ATRAC9, AAC, MP3
+    };
     struct Row {
         uint32_t nid = 0;
         const char *name = nullptr; // make_bridge supplies immutable static names
         uint64_t calls = 0, scoped = 0, unknown_samples = 0, overlap_samples = 0;
         uint64_t parks = 0, resumes = 0, parked_samples = 0;
+        uint64_t unknown_finishes = 0, unknown_prefixes = 0;
     };
 private:
-    struct Import { bool used = false, scoped = false, parked = false; uint32_t row = no_slot;
+    struct Import { bool used = false, scoped = false, parked = false, output = false; uint32_t row = no_slot;
         const char *name = nullptr; std::array<HostSpan, 3> spans{}; };
     struct Interest { bool used = false; std::array<HostSpan, 2> spans{};
         uint64_t version = 0, busy = 0, visited = 0; };
@@ -63,6 +69,7 @@ private:
     size_t edges_ = 0;
     uint64_t parks_ = 0, resumes_ = 0, parked_ = 0;
     bool failed_ = false;
+    OutputStats outputs_;
     uint64_t advance(uint64_t &v) {
         if (v == UINT64_MAX) { failed_ = true; return v; }
         return ++v;
@@ -85,6 +92,7 @@ private:
             auto &r = resources_[id];
             if (!r.used || r.visited == serial || !overlaps(r, i)) return;
             hit = true;
+            if (i.output) ++outputs_.overlap_touches;
             r.visited = serial; r.version = serial;
             if (begin) ++r.busy;
             else if (r.busy) --r.busy;
@@ -109,7 +117,7 @@ public:
         row_cache_.fill(no_slot); no_overlap_ = {}; interests_revision_ = 1;
         row_hits_ = row_probes_ = range_hits_ = range_scans_ = 0;
         serial_ = unknown_ = gpu_ = unknown_busy_ = calls_ = exits_ = scoped_ = samples_ = missing_names_ = 0;
-        parks_ = resumes_ = parked_ = 0;
+        parks_ = resumes_ = parked_ = 0; outputs_ = {};
         failed_ = false; return true;
     }
     void clear_interests() { resources_ = {}; pages_.clear(); edges_ = 0; advance(serial_); advance(interests_revision_); }
@@ -147,7 +155,7 @@ public:
         std::initializer_list<HostSpan> spans, bool prior_unknown = false) {
         if (failed_ || slot >= imports_.size()) return false;
         auto &i = imports_[slot];
-        if (!i.used || i.scoped || i.parked || !i.name || spans.size() > i.spans.size()) return false;
+        if (!i.used || i.output || i.scoped || i.parked || !i.name || spans.size() > i.spans.size()) return false;
         bool allowed = false;
         for (auto n : names) if (!std::strcmp(n, i.name)) allowed = true;
         if (!allowed) return false; // helper reached through an unreviewed caller stays unknown
@@ -155,7 +163,10 @@ public:
         std::copy(spans.begin(), spans.end(), i.spans.begin());
         // Callback-capable wrappers may have executed arbitrary code BEFORE
         // the reviewed wait tail. Do not erase that unknown prefix's effects.
-        if (prior_unknown) advance(unknown_);
+        if (prior_unknown) {
+            advance(unknown_);
+            if (i.row < rows_.size()) ++rows_[i.row].unknown_prefixes;
+        }
         --unknown_busy_; i.scoped = true; ++scoped_;
         if (i.row < rows_.size()) ++rows_[i.row].scoped;
         touch(i, true); return true;
@@ -186,14 +197,41 @@ public:
     void leave(unsigned slot) {
         if (slot >= imports_.size() || !imports_[slot].used) { failed_ = true; return; }
         auto &i = imports_[slot];
+        if (i.output) { failed_ = true; return; }
         if (i.parked) { // A wait guard must unwind BEFORE its import.
             failed_ = true; --parked_; ++resumes_; advance(unknown_);
             if (i.row < rows_.size()) ++rows_[i.row].resumes;
         } else if (i.scoped) touch(i, false);
-        else if (unknown_busy_) { --unknown_busy_; advance(unknown_); }
+        else if (unknown_busy_) {
+            --unknown_busy_; advance(unknown_);
+            if (i.row < rows_.size()) ++rows_[i.row].unknown_finishes;
+        }
         else failed_ = true;
         i = {}; ++exits_;
     }
+    unsigned begin_output(HostSpan span, unsigned source, bool bounds_valid = true) {
+        if (failed_ || !bounds_valid || source >= outputs_.sources.size() || !span.valid()) {
+            failed_ = true; return no_slot;
+        }
+        if (!span.size) return no_slot;
+        if (span.size > UINT64_MAX - outputs_.capacity_bytes) { failed_ = true; return no_slot; }
+        for (unsigned n = 0; n < imports_.size(); ++n) if (!imports_[n].used) {
+            auto &i = imports_[n]; i = {}; i.used = i.scoped = i.output = true;
+            i.spans[0] = span;
+            ++outputs_.begins; ++outputs_.active; ++outputs_.sources[source];
+            outputs_.capacity_bytes += span.size;
+            touch(i, true); return n;
+        }
+        failed_ = true; return no_slot;
+    }
+    void end_output(unsigned slot) {
+        if (slot >= imports_.size() || !imports_[slot].used || !imports_[slot].output || !outputs_.active) {
+            failed_ = true; return;
+        }
+        touch(imports_[slot], false); imports_[slot] = {};
+        ++outputs_.ends; --outputs_.active;
+    }
+    OutputStats output_stats() const { return outputs_; }
     void watch(unsigned id, HostSpan pixels, HostSpan palette) noexcept {
         if (failed_ || id >= resources_.size() || !pixels.valid() || !palette.valid()) { failed_ = true; return; }
         try {
@@ -240,12 +278,17 @@ public:
         for (const auto &r : rows_) if (r.calls) {
             // Names originate in compiled export identifiers; never Guest input.
             std::fprintf(f,"%s{\"nid\":%u,\"name\":\"%s\",\"calls\":%llu,\"scoped\":%llu,"
-                "\"unknown_candidate_checks\":%llu,\"overlap_candidate_checks\":%llu,\"parks\":%llu,\"resumes\":%llu,\"parked_candidate_checks\":%llu}",first?"":",",
-                r.nid,r.name?r.name:"unresolved",U(r.calls),U(r.scoped),U(r.unknown_samples),U(r.overlap_samples),U(r.parks),U(r.resumes),U(r.parked_samples)); first = false;
+                "\"unknown_candidate_checks\":%llu,\"overlap_candidate_checks\":%llu,\"parks\":%llu,\"resumes\":%llu,\"parked_candidate_checks\":%llu,\"unknown_finishes\":%llu,\"unknown_prefixes\":%llu}",first?"":",",
+                r.nid,r.name?r.name:"unresolved",U(r.calls),U(r.scoped),U(r.unknown_samples),U(r.overlap_samples),U(r.parks),U(r.resumes),U(r.parked_samples),U(r.unknown_finishes),U(r.unknown_prefixes)); first = false;
         }
         std::fprintf(f, "],\"metadata_cache\":{\"version\":1,\"nid_hits\":%llu,\"nid_probes\":%llu,"
             "\"no_overlap_hits\":%llu,\"range_scans\":%llu,\"interests_revision\":%llu,\"content_reuse_authority\":false}",
             U(row_hits_),U(row_probes_),U(range_hits_),U(range_scans_),U(interests_revision_));
+        std::fprintf(f,",\"output_leases\":{\"version\":1,\"begins\":%llu,\"ends\":%llu,"
+            "\"active\":%llu,\"capacity_bytes\":%llu,\"overlap_touches\":%llu,"
+            "\"sources\":[%llu,%llu,%llu,%llu],\"authority\":false}",
+            U(outputs_.begins),U(outputs_.ends),U(outputs_.active),U(outputs_.capacity_bytes),
+            U(outputs_.overlap_touches),U(outputs_.sources[0]),U(outputs_.sources[1]),U(outputs_.sources[2]),U(outputs_.sources[3]));
         std::fprintf(f,",\"native_waits\":{\"version\":1,\"parks\":%llu,\"resumes\":%llu,"
             "\"active\":%llu,\"async_outputs_covered\":false}}",U(parks_),U(resumes_),U(parked_));
     }

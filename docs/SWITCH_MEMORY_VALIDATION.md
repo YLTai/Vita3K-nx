@@ -1,53 +1,45 @@
-# Switch 下一轮：GXM 同步输出范围与观察器元数据成本
+# Switch 下一轮：在实际 PCM 写入点登记输出，区分播放输入与解码输出
 
-从实测 `da085fef`（CI #57 成功；merge revision `97cea41baa472`）线性继续 PR #15。仍只用一个 NRO、一轮自适应 ABBA 和原生进度面板；不再增加权限或私有 GPU 探针。**完整普通纹理 Hash 仍是渲染更新依据，未启用新的游戏 Hash 跳过。**
+从实测 `42e0da24`（CI #58 合并 revision `3d812ac4e51b`）线性继续 PR #15。仍使用一个 NRO、一次自适应 ABBA、原生进度面板。**每次普通纹理完整 Hash 继续作为采集中的更新依据；没有启用新的游戏 Hash 跳过。**
 
-## 日志 1793346806：等待分段有效，不等于全部写源已覆盖
+## 本次采集 1793354043
 
-157.475 秒会话，2958 条连续渲染循环记录，无记录溢出；75 PASS / 7 SKIP / 0 FAIL。四段均自动取得50个有效间隔，测量分别为6.617、6.764、6.776、6.560秒，没有达到延长上限。合并 A=7.588732、B=7.385330 Loop/s，B吞吐低2.680%，约增加3.629ms/loop；这只是共享插桩下选定页观察的增量，不能当作总追踪成本或免Hash收益。本轮没有受监视纹理store。
+245.307 秒会话，5244 条连续帧记录，75 PASS / 7 SKIP / 0 FAIL，无报告溢出。四段有效间隔为50/50/50/51，均满足门槛、未触及上限。合并 A=8.371884、B=8.155080 Loop/s，吞吐差 -2.590%，每循环约增加3.176ms；A首尾漂移+1.416%。这些只是共享插桩下选定页观察的增量，不是免Hash收益。本轮受监视纹理store仍为零，不能据此推断持续写入成本。
 
-两段B的378047次已覆盖检查均通过JIT发布检查。377195次CPU版本候选中，56616次通过同步HLE范围与GPU提交历史检查（约15.01%）；139422次被未知在途调用排除，181157次被未知写入历史排除。未报告候选Hash反例。38152次原生等待park/resume平衡。
+两段B的344285次已覆盖检查全部通过JIT发布检查。343452次CPU稳定候选中，71412次通过HLE范围及GPU提交历史检查（20.792%）；79306次被未知在途调用排除，192734次被历史排除。无输出重叠、GPU历史排除或候选反例。候选逻辑字节6321654544，占B全部Hash逻辑字节28384078008的22.272%；包含palette、稳定等待和重复输入，不是实际DRAM带宽或已节省时间。
 
-剩余采样阻塞包含sceGxmDraw、fragment/vertex uniform与texture设置、sceAudiodecDecode。归因是全会话1/64采样的重叠目击，不是各段独立份额、耗时或写入证明。GPU提交历史稳定不等于GPU完成；异步HLE/IPC仍未覆盖。
+旧报告只对阻塞时刻作1/64归因采样。某个调用最终全部scoped却仍有unknown目击，可能只是进入后、声明前的窗口，不能直接认定hook缺失。新报告增加每个根调用的未知结束及未知前缀计数，避免继续仅凭活跃采样猜测历史来源。全会话79次缓存判变保留64条明细，15条明细丢弃；不可推断丢弃项的时刻。
 
-## 本版代码
+## 生产改动
 
-### 批量接入14个已审核GXM入口
+### 独立的具体输出租约
 
-七个仅更新context的uniform/texture/stream setter登记真实`SceGxmContext`范围。七个可能构造命令的program/viewport/visibility/draw入口，只对immediate context登记context及**完整Guest VDM命令环**。命令并不总在宿主池：实际allocator可在Guest VDM范围内placement-new并连接命令，所以不能只登记context。
+新增 `HostOutputLease`：在实际写操作前登记宿主地址和已知写入上界，完成或异常展开时解除。进入和结束均推进重叠纹理版本；同值写入也算事件。它不依赖根HLE的固定三段输出表，允许一个解码调用逐帧使用不同目标范围，并可表示不在HLE调用栈上的明确写入；**本版没有因此宣称异步任务已接入**。
 
-通过实际`command_allocator_size * sizeof(renderer::Command)`计算命令区，验证乘法、Guest起止地址、宿主指针及范围溢出；条件不成立就保持未知。可能调用Guest内存回调的deferred命令路径不收窄，`sceGxmDrawPrecomputed`等未审核外层也不能借助嵌套已审核helper改名放行。
+输出与HLE根调用共享有界活跃槽，容量/地址溢出/无效范围失败时标记整个观察无效，保持参考Hash，不忽略写入。已活跃输出期间新增pixel/palette兴趣立即busy。原生等待不能暂停独立输出。短锁仅包围元数据，不覆盖解码、等待、SVC或GPU操作。
 
-这只是**调用线程的同步前端输出**，不覆盖renderer异步处理、shader写入、render target、GPU完成或其他外部写源。不改变命令内容、队列顺序、shader边界、barrier/fence或上传方式。音频解码不能用写完之后才assert的`pcm_size_max`作为事前上界，因此保持未知，而不是为了候选数加入只读名单。
+### 使用实际后端写入范围，不猜测 pcm_size_max
 
-### 降低已有观察器的元数据查询成本
+* ATRAC9：在 `receive()` 的实际memcpy前，按codec的frameSamples、channels及16位宽度登记。
+* AAC：从实际resampler取得输出channel layout，结合swr_convert的out_count和固定S16格式登记容量上界。取得的layout按FFmpeg接口要求释放。查询失败使审计无效，不认证未知输出。容量字节不冒充实际转换字节。
+* MP3：按当前循环的真实下标 `(width+channels)*i + ch*channels + j` 推导最后可写字节，包括其中可能的空隙；检查原int运算的边界。**不在本次追踪实验中悄悄修正既有解码布局。**
 
-NID索引增加固定1024槽提示缓存，命中仍比较完整NID；冲突回退原256行有界表。归因容量、未知调用和失败处理不变。
+SceAudiodecDecode/DecodeNFrames仅在动态类型恰好是上述三个已接入decoder时，将根调用收窄到实际ctrl结构输出；PCM由具体租约覆盖。未知派生类型、未审核外层调用仍保持未知。send阶段写宿主decoder内部状态，不把输入压缩数据视作输出。
 
-输出范围缓存只记“这组三个输出范围与当前纹理兴趣集无交集”。它不缓存内容、纹理Hash或复用许可。新增像素/palette范围、清空或重新登记都会推进兴趣集版本；输出尚在进行时新登记的重叠资源立即busy，结束时正确解除。命中的输出区间绝不按负缓存省略版本/busy更新。同值写入仍是事件。
+实际Switch音频播放adapter只读取Guest PCM并复制到私有audren池，因此该已审核根调用声明无Guest输出；其他adapter/未知外层不能借此收窄。四种非CB显示等待也在真实入口声明无Guest输出，带Guest回调的CB版本不放行。
 
-这些优化减少元数据锁内的查表与范围扫描，不删除同步，也不增加普通store的全局计数或bitmap查询。固定缓存开销有界。实机收益尚待本轮测量。
+## 报告与验证
 
-### 同轮统计候选字节量
+新增 `range_contracts.output_leases`：begins/ends/active、容量上界字节、重叠触达和四类来源计数。输出租约账本与原HLE账本分开；范围扫描总账纳入两者。新增根调用unknown_finishes/unknown_prefixes。分析器检查进入/退出、来源分解、版本和无复用授权；旧日志仍支持且不会补造新数据。元数据失败会显示CHECK REPORT。
 
-新增`epoch_audit.candidate_work`：按四段导出完整Hash、CPU候选、HLE范围候选及提交历史候选的**累计逻辑输入字节**，包含palette。相邻集合必须满足包含关系，并与已有Hash字节账本对上。
+新增主机测试执行真实ATRAC9/AAC/MP3 receive函数体配合明确的codec/FFmpeg替身，覆盖具体范围、同值写入、邻接字节、跨页、活跃输出期间登记palette、工作线程移动租约、异常展开、容量/溢出、AAC查询失败、精确动态类型和8192次并发输出租约。MP3按实际下标枚举验证范围。直接使用生产JSON输出做分析器正反例。普通及ASan/UBSan通过，既有epoch/HLE纯逻辑普通及sanitizer回归通过。
 
-新增`range_contracts.metadata_cache`：NID命中/探测次数、无交集命中/实际范围扫描次数及兴趣集版本。进入/退出的处理总数要与scope数量核对。分析器继续支持旧日志，不为旧记录猜测候选字节。新字段声明`content_reuse_authority=false`。
+本地为源码备份重建的稀疏工作区，没有devkitA64；不能称为完整checkout、真实FFmpeg解码或设备验证。CI必须对所有固定blob配方作完整扩展，检查实际目标函数体，并在SDK可用时编译实际FFmpeg输出布局API，之后才编译/链接NRO。SDK编译检查不替代最终链接或实机结果。
 
-逻辑字节含重复输入与稳定等待，不是唯一容量、DRAM流量或已省下的Hash时间。缺字段、错版本、丢段、计数不一致或虚假复用授权都被拒绝。旧“没有粗粒度候选”的提示不再掩盖已经存在的范围候选。
+## 上机操作不变
 
-## 实机操作保持不变
+构建成功后替换根目录 **Vita3K.nro**。进入相同目标场景，按一次 **L+R+Y**。自动A→B→B→A；每段稳定1秒，测量至少6秒且50个有效间隔，最多12秒测量预算。正常回调预算约28～52秒，停顿会延长实际时间。
 
-成功构建后替换产物根目录`Vita3K.nro`。进入相同目标场景，按一次 **L+R+Y**。自动执行 **A→B→B→A**；每段稳定1秒，测量至少6秒且50个有效间隔，最多12秒测量预算。正常回调预算约28～52秒，停顿可增加墙钟时间。
+Overlay继续显示 **OUTPUT / WAIT AUDIT**、实际段号、进度、预算、Samples:n/50、EXTENDING、HLE/unknown/overlap/diff。没有渲染回调不凭倒计时宣布完成。**看到任意DONE后正常退出，提供一个完整TraceLab ZIP；黄色、零候选或反例均不要重跑同版追求绿色。**不需要第二个NRO、新配置或私有GPU测试。
 
-原有overlay继续显示 **OUTPUT / WAIT AUDIT**、实际段号/进度/剩余预算、`Samples:n/50`与`EXTENDING`，以及HLE/unknown/overlap/diff。没有渲染回调就不凭计时宣布DONE；暂停仍显式中断，完成后退出菜单不破坏结果。
-
-**看到任意DONE后正常退出，交一个完整TraceLab ZIP即可。** 黄色、零候选、反例或样本上限都先交报告，不重跑同版去追求绿色；不增加第二个NRO或手动配置切换。导航和采集结束保留既有scene memo。
-
-## 验证范围
-
-新增主机回归对真实范围表与修改前固定Git blob作40000步随机语义对照，覆盖NID冲突/归因饱和、活跃输出期间新增palette、重置、同值事件与未知前缀。GXM helper测试覆盖context/完整VDM/不同context类型/非法或溢出环/未知外层。真实observer验证候选字节，直接编译生产JSON新增片段并检查分析器正反例。
-
-普通与ASan/UBSan通过；已有发布域和HLE范围纯逻辑、精确写入观察回归通过。本地是由源码备份重建的稀疏工作区，GXM context使用明确的主机替身；没有把它说成完整仓库、Horizon/JIT/GPU或NRO验证。CI先扩展全部固定blob配方并运行`--require-source`和完整旧/新preflight，再编译链接目标。
-
-**本轮没有live Guest RO、Hash64、新Hash跳过、强制DoubleBuffer或额外GPU等待。** 零反例不是异步写入覆盖证明；生产复用所需的GPU完成、异步输出和资源生命周期仍是单独条件。
+GPU完成、异步HLE/IPC、render attachment和生产复用生命周期仍不是这些候选的授权范围。本版没有live Guest RO、Hash64、额外GPU等待、强制DoubleBuffer或改变shader寻址。导航和完成后保留既有scene memo。下一份数据重点核对具体PCM写入账本、未知结束根及候选字节比例；不是宣称已完成免Hash提速。

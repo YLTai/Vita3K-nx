@@ -260,7 +260,31 @@ def analyze_candidate_work(e, w, issues):
         if hits > calls or probes < calls - hits or not integer(cache, 'interests_revision'):
             raise ValueError('NID cache accounting does not reconcile')
         touches = integer(cache, 'no_overlap_hits') + integer(cache, 'range_scans')
-        if integer(e, 'active_host_at_export') or touches != 2 * integer(contracts, 'scoped_calls'):
+        outputs = contracts.get('output_leases')
+        extra = 0
+        if outputs is not None:
+            if (type(outputs.get('version')) is not int or outputs.get('version') != 1
+                    or outputs.get('authority') is not False):
+                raise ValueError('Invalid concrete-output contract/authority')
+            starts = integer(outputs, 'begins'); ends = integer(outputs, 'ends')
+            active = integer(outputs, 'active')
+            if starts != ends + active or active:
+                raise ValueError('Concrete output still active or unbalanced at export')
+            source_counts = outputs.get('sources')
+            if (not isinstance(source_counts, list) or len(source_counts) != 4
+                    or any(type(v) is not int or v < 0 for v in source_counts)
+                    or sum(source_counts) != starts):
+                raise ValueError('Concrete-output source accounting does not reconcile')
+            if integer(outputs, 'capacity_bytes') < starts:
+                raise ValueError('Concrete output has impossible byte-capacity count')
+            integer(outputs, 'overlap_touches')
+            extra = starts + ends
+            for row in contracts.get('imports', []):
+                if integer(row, 'unknown_finishes') + integer(row, 'scoped') != integer(row, 'calls'):
+                    raise ValueError('Root unknown/scoped completion ledger does not reconcile')
+                if integer(row, 'unknown_prefixes') > row['scoped']:
+                    raise ValueError('More unknown prefixes than declared root calls')
+        if integer(e, 'active_host_at_export') or touches != 2 * integer(contracts, 'scoped_calls') + extra:
             raise ValueError('Output intersection cache begin/end accounting does not reconcile')
         phases = work.get('phases')
         if not isinstance(phases, list) or len(phases) != 4:
@@ -282,5 +306,6 @@ def analyze_candidate_work(e, w, issues):
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         issues.append(str(exc))
     return dict(treatment_totals=totals, metadata_cache=cache,
+                output_leases=e.get('range_contracts', {}).get('output_leases'),
                 includes_settling=True, safe_to_skip_hash=False,
                 limits='Repeated logical input including palette; not unique bytes, DRAM traffic or measured savings')

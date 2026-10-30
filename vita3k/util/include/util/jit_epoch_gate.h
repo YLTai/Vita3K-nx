@@ -93,6 +93,11 @@ public:
         std::lock_guard lock(mutex_); return ranges_.park(slot, name);
     }
     void resume_import(unsigned slot) { std::lock_guard lock(mutex_); ranges_.resume(slot); }
+    unsigned begin_output(HostSpan span, unsigned source, bool valid) {
+        std::lock_guard lock(mutex_); return ranges_.begin_output(span, source, valid);
+    }
+    void end_output(unsigned slot) { std::lock_guard lock(mutex_); ranges_.end_output(slot); }
+    HleRanges::OutputStats output_stats() const { std::lock_guard lock(mutex_); return ranges_.output_stats(); }
     void clear_interests() { std::lock_guard lock(mutex_); ranges_.clear_interests(); }
     void watch_range(unsigned id, const void *pixels, uint64_t n, const void *palette, uint64_t m) {
         std::lock_guard lock(mutex_); ranges_.watch(id, {pixels, n}, {palette, m});
