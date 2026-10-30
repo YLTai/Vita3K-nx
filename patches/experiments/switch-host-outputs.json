@@ -83,22 +83,12 @@
       ]
     },
     {
-      "path": "vita3k/util/src/switch_memory_validation.cpp",
-      "base_blob": "e805efbd80f3880ab8561fc46289dedc5dcff565",
-      "replacements": [
-        {
-          "old": "    out.watch_failed = observation.failed;",
-          "new": "    out.watch_failed = observation.failed || (options.epoch_audit && epoch::domain.snapshot().failed);"
-        }
-      ]
-    },
-    {
       "path": "scripts/tests/run-switch-performance-tests.sh",
       "base_blob": "5810c5ce63221fa1e9539e5196b773c96c71345c",
       "replacements": [
         {
           "old": "python3 \"$ROOT/scripts/tests/test_switch_gxm_contracts.py\" --cxx \"${CXX:-c++}\" --require-source",
-          "new": "python3 \"$ROOT/scripts/tests/test_switch_gxm_contracts.py\" --cxx \"${CXX:-c++}\" --require-source\npython3 \"$ROOT/scripts/tests/test_switch_host_outputs.py\" --cxx \"${CXX:-c++}\" --require-source"
+          "new": "python3 \"$ROOT/scripts/tests/test_switch_gxm_contracts.py\" --cxx \"${CXX:-c++}\" --require-source\npython3 \"$ROOT/scripts/tests/test_switch_controller_recipe_chain.py\" --require-source\npython3 \"$ROOT/scripts/tests/test_switch_host_outputs.py\" --cxx \"${CXX:-c++}\" --require-source"
         }
       ]
     }
