@@ -6,11 +6,13 @@
 #include <cstdint>
 #include <limits>
 #include <mutex>
+#include <util/hle_range_gate.h>
 
 namespace switch_validation::epoch {
 struct Stamp {
     uint64_t ticket = 0, external = 0, hle_active = 0;
     bool drained = false, valid = false;
+    RangeStamp ranges;
 };
 struct Stats {
     uint64_t publications = 0, entries = 0, exits = 0, active = 0;
@@ -25,11 +27,13 @@ class Domain {
     uint64_t generation_ = 1, external_ = 0;
     mutable uint64_t drained_through_ = 0;
     Stats stats_;
+    HleRanges ranges_;
 public:
     static constexpr unsigned invalid_slot = 64;
     bool reset() {
         std::lock_guard lock(mutex_);
         if (stats_.active || stats_.host_active) { stats_.failed = true; return false; }
+        if (!ranges_.reset()) { stats_.failed = true; return false; }
         readers_.fill(0); generation_ = 1; external_ = drained_through_ = 0; stats_ = {}; return true;
     }
     unsigned enter() {
@@ -53,31 +57,44 @@ public:
         if (generation_ == std::numeric_limits<uint64_t>::max()) { stats_.failed = true; return 0; }
         ++stats_.publications; return ++generation_;
     }
-    Stamp stamp(uint64_t ticket) const {
+    Stamp stamp(uint64_t ticket, unsigned resource = HleRanges::no_slot) const {
         std::lock_guard lock(mutex_);
-        bool drained = ticket && ticket <= generation_ && !stats_.failed;
+        bool drained = ticket && ticket <= generation_ && !stats_.failed && !ranges_.failed();
         // Once a ticket is drained, no future entrant can predate it. Avoid
         // scanning 64 slots on every unchanged texture Hash after that point.
         if (drained && ticket > drained_through_) {
             for (uint64_t reader : readers_) if (reader && reader < ticket) drained = false;
             if (drained) drained_through_ = ticket;
         }
-        return {ticket, external_, stats_.host_active, drained, !stats_.failed};
+        return {ticket, external_, stats_.host_active, drained, !stats_.failed && !ranges_.failed(), ranges_.stamp(resource)};
     }
-    void host_enter() {
+    unsigned host_enter(uint32_t nid = 0) {
         std::lock_guard lock(mutex_);
         ++stats_.host_entries; ++stats_.host_active; advance_external();
+        return ranges_.enter(nid);
     }
-    void host_leave() {
+    void host_leave(unsigned slot, const char *name = nullptr) {
         std::lock_guard lock(mutex_);
         if (!stats_.host_active) { stats_.failed = true; return; }
         ++stats_.host_exits; --stats_.host_active; advance_external();
+        ranges_.name(slot, name); ranges_.leave(slot);
     }
     void gpu_boundary() {
         std::lock_guard lock(mutex_);
-        ++stats_.gpu_boundaries; advance_external();
+        ++stats_.gpu_boundaries; advance_external(); ranges_.gpu_boundary();
     }
-    Stats snapshot() const { std::lock_guard lock(mutex_); return stats_; }
+    Stats snapshot() const { std::lock_guard lock(mutex_); auto s = stats_; s.failed |= ranges_.failed(); return s; }
+    void name_import(unsigned slot, const char *name) { std::lock_guard lock(mutex_); ranges_.name(slot, name); }
+    bool declare_import(unsigned slot, const char *name, std::initializer_list<const char *> names,
+        std::initializer_list<HostSpan> spans, bool prior_unknown) {
+        std::lock_guard lock(mutex_); ranges_.name(slot, name); return ranges_.declare(slot, names, spans, prior_unknown);
+    }
+    void clear_interests() { std::lock_guard lock(mutex_); ranges_.clear_interests(); }
+    void watch_range(unsigned id, const void *pixels, uint64_t n, const void *palette, uint64_t m) {
+        std::lock_guard lock(mutex_); ranges_.watch(id, {pixels, n}, {palette, m});
+    }
+    void explain_range(unsigned id) { std::lock_guard lock(mutex_); ranges_.explain(id); }
+    void write_ranges(FILE *file) const { std::lock_guard lock(mutex_); ranges_.write_json(file); }
 private:
     void advance_external() {
         if (external_ == std::numeric_limits<uint64_t>::max()) stats_.failed = true;
@@ -99,14 +116,37 @@ public:
 };
 class HostLease {
     Domain *domain_ = nullptr;
+    unsigned slot_ = HleRanges::no_slot;
+    HostLease *previous_ = nullptr;
+    const char *name_ = nullptr;
+    inline static thread_local HostLease *current_ = nullptr;
 public:
-    explicit HostLease(Domain *d = enabled.load(std::memory_order_acquire) ? &domain : nullptr) : domain_(d) {
-        if (domain_) domain_->host_enter();
+    explicit HostLease(Domain *d = enabled.load(std::memory_order_acquire) ? &domain : nullptr, uint32_t nid = 0)
+        : domain_(d), previous_(current_) {
+        if (domain_) slot_ = domain_->host_enter(nid);
+        current_ = this;
     }
-    ~HostLease() { if (domain_) domain_->host_leave(); }
+    ~HostLease() {
+        current_ = previous_;
+        if (domain_) domain_->host_leave(slot_, name_);
+    }
+    static void name_current(const char *name) {
+        // Thread-local metadata only: naming a frequent HLE must not add a mutex.
+        if (current_ && current_->domain_ && !current_->name_) current_->name_ = name;
+    }
+    static bool declare_current(std::initializer_list<const char *> names,
+        std::initializer_list<HostSpan> spans, bool prior_unknown) {
+        return current_ && current_->domain_
+            && current_->domain_->declare_import(current_->slot_, current_->name_, names, spans, prior_unknown);
+    }
     HostLease(const HostLease &) = delete;
     HostLease &operator=(const HostLease &) = delete;
 };
+inline void name_import(const char *name) { HostLease::name_current(name); }
+inline bool declare_outputs(std::initializer_list<const char *> names,
+    std::initializer_list<HostSpan> spans, bool prior_unknown = false) {
+    return HostLease::declare_current(names, spans, prior_unknown);
+}
 inline void gpu_boundary() {
     if (enabled.load(std::memory_order_acquire)) domain.gpu_boundary();
 }

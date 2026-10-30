@@ -44,6 +44,9 @@ def analyze(data, changed_total=None):
         issues.append('Direct Heap disabled or backing error')
     if imports.get('enabled') is not True or imports.get('frozen_at_window_end') is not True or imports.get('errors'):
         issues.append('Deferred imports unavailable, failed, or no capture-end snapshot')
+    scoped = None
+    if "range_contracts" in e:
+        scoped = analyze_ranges(e, w, issues, warnings)
     comparison = None
     totals = {k: 0 for k in ('grace_ready', 'grace_pending', 'cpu_candidates', 'cpu_candidate_changes',
         'epoch_candidates', 'epoch_candidate_changes', 'external_intervals', 'host_busy_checks')}
@@ -123,10 +126,75 @@ def analyze(data, changed_total=None):
             baseline_drift_pct=(rows[3]['loops_per_second']/rows[0]['loops_per_second']-1)*100, descriptive_only=True)
     return dict(plan='epoch-write-1',controls_ok=controls_ok,comparison_eligible=not issues,
         exclusions=issues,warnings=warnings,phases=rows,totals=totals,comparison=comparison,
-        safe_to_skip_hash=False,next_action='Exit normally and share one complete capture; do not repeat for green',
+        scoped_hle=scoped,safe_to_skip_hash=False,next_action='Exit normally and share one complete capture; do not repeat for green',
         limits=['This is a real-game software-write-table audit, not the private CPU/GPU mirror suite.',
                 'A and B share read/write tables, cross-page detection and execution/HLE boundary costs; B adds persistent selected-page interception.',
                 'Only pre-publication JIT runs are drained; no renderer pause or global stop is performed.',
                 'Generic HLE/GPU boundaries are conservative exclusions, not exact writer attribution or GPU completion proof.',
                 'Async HLE, IPC and GPU visibility remain unproven. Every actual texture Hash still uses the reference.',
                 'Counters include settling; timing excludes it. Zero mismatches is not complete writer coverage.'])
+
+
+def analyze_ranges(e, w, issues, warnings):
+    """A supplement: evidence may improve without ever authorizing Hash reuse."""
+    keys = ('hle_candidates','hle_candidate_changes','hle_unknown_blocks','hle_range_blocks',
+            'hle_history_blocks','submission_candidates','submission_candidate_changes','gpu_epoch_blocks','unrelated_mapping_updates')
+    total = {k:0 for k in keys}
+    contracts = e.get('range_contracts', {})
+    try:
+        if contracts.get('version') != 1 or contracts.get('failed') is not False or contracts.get('authority') is not False:
+            raise ValueError('Invalid scoped-HLE registry or unsupported authority')
+        if contracts.get('attribution_period') != 64:
+            raise ValueError('Unknown blocker-attribution sample period')
+        if integer(contracts,'calls') != integer(e,'host_entries') or integer(contracts,'exits') != integer(e,'host_exits'):
+            raise ValueError('Scoped/global HLE accounting mismatch')
+        if integer(contracts,'scoped_calls') > contracts['calls']:
+            raise ValueError('More declared contracts than imports')
+        imports = contracts.get('imports')
+        if not isinstance(imports,list) or len(imports)>256:
+            raise ValueError('Invalid HLE caller table')
+        seen=set();calls=scoped=0
+        for row in imports:
+            nid=integer(row,'nid')
+            if nid in seen or nid > 0xffffffff: raise ValueError('Invalid/duplicated caller identity')
+            seen.add(nid);n=integer(row,'calls');a=integer(row,'scoped')
+            if not n or a>n or not isinstance(row.get('name'),str):raise ValueError('Invalid HLE caller counts')
+            integer(row,'unknown_candidate_checks');integer(row,'overlap_candidate_checks')
+            calls+=n;scoped+=a
+        if calls+integer(contracts,'unattributed_calls') != contracts['calls'] or scoped>contracts['scoped_calls']:
+            raise ValueError('Caller coverage ledger does not reconcile')
+        phases=e.get('range_phases')
+        if not isinstance(phases,list) or len(phases)!=4:raise ValueError('Missing four scoped-HLE phases')
+        for i,(p,g) in enumerate(zip(phases,e['phases'])):
+            if p.get('index')!=i:raise ValueError('Scoped-HLE phase identity mismatch')
+            for k in keys:total[k]+=integer(p,k)
+            if p['hle_candidates']+p['hle_unknown_blocks']+p['hle_range_blocks']+p['hle_history_blocks']!=integer(g,'cpu_candidates'):
+                raise ValueError('Scoped-HLE candidate reasons do not reconcile')
+            if p['submission_candidates']+p['gpu_epoch_blocks']!=p['hle_candidates']:
+                raise ValueError('GPU submission-history classification does not reconcile')
+            if p['hle_candidate_changes']>p['hle_candidates'] or p['submission_candidate_changes']>p['submission_candidates'] or p['submission_candidate_changes']>p['hle_candidate_changes']:
+                raise ValueError('Impossible scoped-HLE mismatch counts')
+            if i in (0,3) and any(p[k] for k in keys):raise ValueError('Baseline contains scoped treatment evidence')
+        events=e.get('range_mismatches')
+        if not isinstance(events,list) or len(events)>32 or len(events)+integer(e,'range_mismatches_dropped')!=total['hle_candidate_changes']:
+            raise ValueError('Scoped-HLE counterexample ledger does not reconcile')
+        for event in events:
+            if event.get('phase') not in (1,2) or not integer(event,'publication') or integer(event,'resource')>=integer(w,'resources'):
+                raise ValueError('Invalid scoped counterexample identity')
+            for k in ('previous_hash_hex','current_hash_hex'):
+                if len(event[k])!=16:raise ValueError('Invalid scoped counterexample digest')
+                int(event[k],16)
+            if event['previous_hash_hex']==event['current_hash_hex']:raise ValueError('Equal digests in counterexample')
+        if total['hle_candidate_changes']:
+            warnings.append('Full Hash disproved scoped-host candidate(s); no Hash skipping is allowed')
+        if not total['hle_candidates']:
+            warnings.append('No scoped-host candidates: inspect sampled unknown callers and range/history blocks; do not rerun unchanged code')
+        if total['hle_candidates'] and not total['submission_candidates']:
+            warnings.append('GPU submission epochs exclude all scoped candidates; range ownership/completion integration is still required')
+        if not contracts['scoped_calls']:warnings.append('No reviewed output contract actually ran')
+    except (KeyError,TypeError,ValueError) as exc:
+        issues.append(str(exc))
+    blockers = sorted(contracts.get('imports',[]),key=lambda r:r.get('unknown_candidate_checks',0),reverse=True)
+    return dict(totals=total,contracts=contracts,unknown_blockers=blockers,
+                safe_to_skip_hash=False,attribution_sampling_only=64,
+                limits='Known synchronous output ranges only; no GPU completion or asynchronous HLE/IPC authority')

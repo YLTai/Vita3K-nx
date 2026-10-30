@@ -1,0 +1,230 @@
+{
+  "base_commit": "b32ea31b361c521bcea80f9ce6828b04b8a37e6c",
+  "purpose": "Actual synchronous HLE output ranges and caller attribution; full Hash remains reference; GPU completion/async coverage not granted.",
+  "files": [
+    {
+      "path": "vita3k/module/include/module/bridge.h",
+      "base_blob": "397e6f0a0a44ff271fb9041908e6248728b4d55a",
+      "replacements": [
+        {
+          "old": "#include \"write_return_value.h\"",
+          "new": "#include \"write_return_value.h\"\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/jit_epoch_gate.h>\n#endif"
+        },
+        {
+          "old": "        constexpr auto arr = std::get<0>(layout);",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        switch_validation::epoch::name_import(export_name);\n#endif\n        constexpr auto arr = std::get<0>(layout);"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/kernel/src/thread.cpp",
+      "base_blob": "ab13d4416624de724bf3a5f4a1b944517cb4c31c",
+      "replacements": [
+        {
+          "old": "epoch::HostLease host_activity;",
+          "new": "epoch::HostLease host_activity(switch_validation::epoch::enabled.load(std::memory_order_acquire) ? &switch_validation::epoch::domain : nullptr, nid);"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/modules/SceLibKernel/SceLibKernel.cpp",
+      "base_blob": "cf06ee74395bdd42b6638e5302ddc50145361f73",
+      "replacements": [
+        {
+          "old": "    memcpy(observed_destination, src, len);",
+          "new": "\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire))\n        switch_validation::epoch::declare_outputs({\"sceClibMemcpy\"}, {{observed_destination, len}});\n#endif\n    memcpy(observed_destination, src, len);"
+        },
+        {
+          "old": "    memmove(observed_destination, src, len);",
+          "new": "\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire))\n        switch_validation::epoch::declare_outputs({\"sceClibMemmove\"}, {{observed_destination, len}});\n#endif\n    memmove(observed_destination, src, len);"
+        },
+        {
+          "old": "    memset(observed_destination, ch, len);",
+          "new": "\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire))\n        switch_validation::epoch::declare_outputs({\"sceClibMemset\"}, {{observed_destination, len}});\n#endif\n    memset(observed_destination, ch, len);"
+        },
+        {
+          "old": "    TRACY_FUNC(sceKernelGetThreadId);",
+          "new": "    TRACY_FUNC(sceKernelGetThreadId);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire))\n        switch_validation::epoch::declare_outputs({\"sceKernelGetThreadId\"}, {});\n#endif\n"
+        },
+        {
+          "old": "    TRACY_FUNC(sceKernelGetThreadCurrentPriority);",
+          "new": "    TRACY_FUNC(sceKernelGetThreadCurrentPriority);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire))\n        switch_validation::epoch::declare_outputs({\"sceKernelGetThreadCurrentPriority\"}, {});\n#endif\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/modules/SceLibc/SceLibc.cpp",
+      "base_blob": "4147d5f1faead96f46e1688c5861f92213d9e866",
+      "replacements": [
+        {
+          "old": "    memcpy(observed_destination, source, num);",
+          "new": "\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire))\n        switch_validation::epoch::declare_outputs({\"memcpy\"}, {{observed_destination, num}});\n#endif\n    memcpy(observed_destination, source, num);"
+        },
+        {
+          "old": "    memmove(observed_destination, source, num);",
+          "new": "\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire))\n        switch_validation::epoch::declare_outputs({\"memmove\"}, {{observed_destination, num}});\n#endif\n    memmove(observed_destination, source, num);"
+        },
+        {
+          "old": "    memset(observed_destination, c, n);",
+          "new": "\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire))\n        switch_validation::epoch::declare_outputs({\"memset\"}, {{observed_destination, n}});\n#endif\n    memset(observed_destination, c, n);"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/kernel/src/sync_primitives.cpp",
+      "base_blob": "9524e3e4c010f65e95794b54195f62f550fd57dc",
+      "replacements": [
+        {
+          "old": "#include <util/log.h>",
+          "new": "#include <util/log.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/jit_epoch_gate.h>\n#endif"
+        },
+        {
+          "old": "inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, int lock_count, MutexPtr &mutex, SyncWeight weight, SceUInt *timeout, bool only_try) {",
+          "new": "inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, int lock_count, MutexPtr &mutex, SyncWeight weight, SceUInt *timeout, bool only_try) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire))\n        switch_validation::epoch::declare_outputs({\"sceKernelLockLwMutex\",\"sceKernelLockLwMutex_0\",\"_sceKernelLockLwMutex\",\"sceKernelTryLockLwMutex\",\"sceKernelTryLockLwMutex_16XX\",\"sceKernelLockMutex\",\"_sceKernelLockMutex\"}, {{mutex->workarea ? mutex->workarea.get(mem) : nullptr, sizeof(SceKernelLwMutexWork)}, {timeout, sizeof(SceUInt)}});\n#endif\n\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire))\n        switch_validation::epoch::declare_outputs({\"sceKernelLockLwMutexCB\",\"sceKernelLockMutexCB\",\"_sceKernelLockMutexCB\"}, {{mutex->workarea ? mutex->workarea.get(mem) : nullptr, sizeof(SceKernelLwMutexWork)}, {timeout, sizeof(SceUInt)}}, true);\n#endif\n"
+        },
+        {
+          "old": "inline static int mutex_unlock_impl(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, int unlock_count, MutexPtr &mutex) {",
+          "new": "inline static int mutex_unlock_impl(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, int unlock_count, MutexPtr &mutex) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire))\n        switch_validation::epoch::declare_outputs({\"sceKernelUnlockLwMutex\",\"sceKernelUnlockLwMutex_0\",\"sceKernelUnlockLwMutex2\",\"sceKernelUnlockMutex\",\"_sceKernelUnlockMutex\"}, {{mutex->workarea ? mutex->workarea.get(mem) : nullptr, sizeof(SceKernelLwMutexWork)}});\n#endif\n"
+        },
+        {
+          "old": "SceInt32 semaphore_wait(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID semaId, SceInt32 needCount, SceUInt32 *pTimeout) {",
+          "new": "SceInt32 semaphore_wait(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID semaId, SceInt32 needCount, SceUInt32 *pTimeout) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire))\n        switch_validation::epoch::declare_outputs({\"sceKernelWaitSema\",\"_sceKernelWaitSema\"}, {{pTimeout, sizeof(SceUInt32)}});\n#endif\n\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire))\n        switch_validation::epoch::declare_outputs({\"sceKernelWaitSemaCB\",\"_sceKernelWaitSemaCB\"}, {{pTimeout, sizeof(SceUInt32)}}, true);\n#endif\n"
+        },
+        {
+          "old": "    std::unique_lock<std::mutex> condition_variable_lock(condvar->mutex);",
+          "new": "\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire))\n        switch_validation::epoch::declare_outputs({\"sceKernelWaitLwCond\",\"_sceKernelWaitLwCond\",\"sceKernelWaitCond\",\"_sceKernelWaitCond\"}, {{condvar->associated_mutex->workarea ? condvar->associated_mutex->workarea.get(mem) : nullptr, sizeof(SceKernelLwMutexWork)}, {timeout, sizeof(SceUInt)}});\n#endif\n\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire))\n        switch_validation::epoch::declare_outputs({\"sceKernelWaitLwCondCB\",\"_sceKernelWaitLwCondCB\",\"sceKernelWaitCondCB\",\"_sceKernelWaitCondCB\"}, {{condvar->associated_mutex->workarea ? condvar->associated_mutex->workarea.get(mem) : nullptr, sizeof(SceKernelLwMutexWork)}, {timeout, sizeof(SceUInt)}}, true);\n#endif\n    std::unique_lock<std::mutex> condition_variable_lock(condvar->mutex);"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/modules/SceKernelThreadMgr/SceThreadmgr.cpp",
+      "base_blob": "e337930de3a91718735b988887bf8414c7d94281",
+      "replacements": [
+        {
+          "old": "#include <modules/module_parent.h>",
+          "new": "#include <modules/module_parent.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/jit_epoch_gate.h>\n#endif"
+        },
+        {
+          "old": "    TRACY_FUNC(sceKernelDelayThread, delay);",
+          "new": "    TRACY_FUNC(sceKernelDelayThread, delay);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire))\n        switch_validation::epoch::declare_outputs({\"sceKernelDelayThread\"}, {});\n#endif\n"
+        },
+        {
+          "old": "    TRACY_FUNC(sceKernelDelayThread200, delay);",
+          "new": "    TRACY_FUNC(sceKernelDelayThread200, delay);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire))\n        switch_validation::epoch::declare_outputs({\"sceKernelDelayThread200\"}, {});\n#endif\n"
+        },
+        {
+          "old": "    TRACY_FUNC(sceKernelGetSystemTimeWide);",
+          "new": "    TRACY_FUNC(sceKernelGetSystemTimeWide);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire))\n        switch_validation::epoch::declare_outputs({\"sceKernelGetSystemTimeWide\"}, {});\n#endif\n"
+        },
+        {
+          "old": "    TRACY_FUNC(sceKernelPollSema, semaid, needCount);",
+          "new": "    TRACY_FUNC(sceKernelPollSema, semaid, needCount);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire))\n        switch_validation::epoch::declare_outputs({\"sceKernelPollSema\"}, {});\n#endif\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/switch_write_watch.h",
+      "base_blob": "d02545c2ec170ad0583850de74cf2fcd741114b4",
+      "replacements": [
+        {
+          "old": "    uint64_t epoch_candidates = 0, epoch_candidate_changes = 0, external_intervals = 0, host_busy_checks = 0;",
+          "new": "    uint64_t epoch_candidates = 0, epoch_candidate_changes = 0, external_intervals = 0, host_busy_checks = 0;\n    uint64_t hle_candidates = 0, hle_candidate_changes = 0, hle_unknown_blocks = 0, hle_range_blocks = 0, hle_history_blocks = 0;\n    uint64_t submission_candidates = 0, submission_candidate_changes = 0, gpu_epoch_blocks = 0, unrelated_mapping_updates = 0;"
+        },
+        {
+          "old": "    std::array<EpochMismatch, 32> epoch_mismatches{};",
+          "new": "    std::array<EpochMismatch, 32> epoch_mismatches{};\n    std::array<EpochMismatch, 32> hle_mismatches{};\n    uint64_t hle_mismatches_stored = 0, hle_mismatches_dropped = 0;"
+        },
+        {
+          "old": "        epoch::Stamp baseline_publication;",
+          "new": "        epoch::Stamp baseline_publication;\n        bool baseline_range_stable = false;"
+        },
+        {
+          "old": "        if (restart) {\n            by_host_.clear();",
+          "new": "        if (restart) {\n            if (domain_) domain_->clear_interests();\n            by_host_.clear();"
+        },
+        {
+          "old": "            if (const auto it = by_host_.find(host_page(old, page)); it != by_host_.end()) {",
+          "new": "            bool relevant = false;\n            if (const auto it = by_host_.find(host_page(old, page)); it != by_host_.end()) {\n                relevant = true;"
+        },
+        {
+          "old": "            if (const auto it = by_host_.find(host_page(entry, page)); entry && it != by_host_.end()) {",
+          "new": "            if (const auto it = by_host_.find(host_page(entry, page)); entry && it != by_host_.end()) {\n                relevant = true;"
+        },
+        {
+          "old": "            if (domain_ && stats_.observing) publication_ticket_ = domain_->publish();",
+          "new": "            if (domain_ && stats_.observing && relevant) publication_ticket_ = domain_->publish();\n            else if (domain_ && stats_.observing) ++count().unrelated_mapping_updates;"
+        },
+        {
+          "old": "                resources_.push_back(std::move(r));",
+          "new": "                resources_.push_back(std::move(r));\n                if (domain_) domain_->watch_range(id, pixels, size, palette, palette_size);"
+        },
+        {
+          "old": "domain_ ? domain_->stamp(publication_ticket_) : epoch::Stamp{}};",
+          "new": "domain_ ? domain_->stamp(publication_ticket_, it->second) : epoch::Stamp{}};"
+        },
+        {
+          "old": "const auto current = domain_ ? domain_->stamp(publication_ticket_) : epoch::Stamp{};",
+          "new": "const auto current = domain_ ? domain_->stamp(publication_ticket_, token.resource) : epoch::Stamp{};"
+        },
+        {
+          "old": "                ++count().cpu_candidates;",
+          "new": "                ++count().cpu_candidates;\n                const auto &a = r.baseline_publication.ranges;\n                const auto &b = token.publication.ranges;\n                const auto &c = current.ranges;\n                const bool range_ok = r.baseline_range_stable && epoch::stable_host(a, b) && epoch::stable_host(b, c);\n                if (range_ok) {\n                    ++count().hle_candidates;\n                    if (audit.changed) {\n                        ++count().hle_candidate_changes;\n                        if (stats_.hle_mismatches_stored < stats_.hle_mismatches.size())\n                            stats_.hle_mismatches[stats_.hle_mismatches_stored++] = {\n                                phase_, r.address, token.resource, clock_ ? clock_() : 0,\n                                publication_ticket_, c.unknown, r.hash, hash};\n                        else ++stats_.hle_mismatches_dropped;\n                    }\n                    if (a.gpu == b.gpu && b.gpu == c.gpu) {\n                        ++count().submission_candidates;\n                        if (audit.changed) ++count().submission_candidate_changes;\n                    } else ++count().gpu_epoch_blocks;\n                } else {\n                    if (a.unknown_busy || b.unknown_busy || c.unknown_busy) ++count().hle_unknown_blocks;\n                    else if (a.busy || b.busy || c.busy) ++count().hle_range_blocks;\n                    else ++count().hle_history_blocks;\n                    domain_->explain_range(token.resource);\n                }"
+        },
+        {
+          "old": "        r.baseline_publication = current;",
+          "new": "        r.baseline_range_stable = epoch::stable_host(token.publication.ranges, current.ranges);\n        r.baseline_publication = current;"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/src/switch_memory_validation.cpp",
+      "base_blob": "e805efbd80f3880ab8561fc46289dedc5dcff565",
+      "replacements": [
+        {
+          "old": "        std::fputs(\"]},\\n  \\\"guest_backing\\\":\", file);",
+          "new": "        std::fputs(\"],\\\"range_contracts\\\":\", file);\n        epoch::domain.write_ranges(file);\n        std::fputs(\",\\\"range_phases\\\":[\", file);\n        for (unsigned i = 0; i < 4; ++i) {\n            const auto &c = observed.phases[i];\n            std::fprintf(file, \"%s{\\\"index\\\":%u,\\\"hle_candidates\\\":%llu,\\\"hle_candidate_changes\\\":%llu,\"\n                \"\\\"hle_unknown_blocks\\\":%llu,\\\"hle_range_blocks\\\":%llu,\\\"hle_history_blocks\\\":%llu,\"\n                \"\\\"submission_candidates\\\":%llu,\\\"submission_candidate_changes\\\":%llu,\\\"gpu_epoch_blocks\\\":%llu,\\\"unrelated_mapping_updates\\\":%llu}\",\n                i ? \",\" : \"\", i, U(c.hle_candidates), U(c.hle_candidate_changes), U(c.hle_unknown_blocks), U(c.hle_range_blocks),\n                U(c.hle_history_blocks), U(c.submission_candidates), U(c.submission_candidate_changes), U(c.gpu_epoch_blocks), U(c.unrelated_mapping_updates));\n        }\n        std::fprintf(file, \"],\\\"range_mismatches_dropped\\\":%llu,\\\"range_mismatches\\\":[\", U(observed.hle_mismatches_dropped));\n        for (uint64_t i = 0; i < observed.hle_mismatches_stored; ++i) {\n            const auto &e = observed.hle_mismatches[i];\n            std::fprintf(file, \"%s{\\\"phase\\\":%u,\\\"guest_address\\\":%u,\\\"resource\\\":%u,\\\"tick\\\":%llu,\"\n                \"\\\"publication\\\":%llu,\\\"unknown_epoch\\\":%llu,\\\"previous_hash_hex\\\":\\\"%016llx\\\",\\\"current_hash_hex\\\":\\\"%016llx\\\"}\",\n                i ? \",\" : \"\", e.phase, e.address, e.resource, U(e.tick), U(e.ticket), U(e.external), U(e.before_hash), U(e.after_hash));\n        }\n        std::fputs(\"]},\\n  \\\"guest_backing\\\":\", file);"
+        },
+        {
+          "old": "        out.cpu_candidates += p.cpu_candidates;",
+          "new": "        out.hle_candidates += p.hle_candidates; out.hle_changes += p.hle_candidate_changes;\n        out.hle_unknown += p.hle_unknown_blocks; out.hle_ranges += p.hle_range_blocks;\n        out.cpu_candidates += p.cpu_candidates;"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/switch_validation_status.h",
+      "base_blob": "d8f950aa3a9d4d563284584063a0fc373ac7953a",
+      "replacements": [
+        {
+          "old": "    bool epoch_audit = false;",
+          "new": "    bool epoch_audit = false;\n    uint64_t hle_candidates = 0, hle_changes = 0, hle_unknown = 0, hle_ranges = 0;"
+        },
+        {
+          "old": "s.outcome == CaptureOutcome::Ready && !s.epoch_changes ? HudText::Tone::Ready",
+          "new": "s.outcome == CaptureOutcome::Ready && !s.epoch_changes && !s.hle_changes ? HudText::Tone::Ready"
+        },
+        {
+          "old": "s.outcome == CaptureOutcome::Ready && !s.epoch_changes ? \"DONE - REPORT READY\"",
+          "new": "s.outcome == CaptureOutcome::Ready && !s.epoch_changes && !s.hle_changes ? \"DONE - REPORT READY\""
+        },
+        {
+          "old": "\"LIVE EPOCH AUDIT | %s\"",
+          "new": "\"SCOPED HLE AUDIT | %s\""
+        },
+        {
+          "old": "\"Grace:%llu pending:%llu | CPU:%llu epoch:%llu diff:%llu\",\n            (unsigned long long)s.grace_ready, (unsigned long long)s.grace_pending,\n            (unsigned long long)s.cpu_candidates, (unsigned long long)s.epoch_candidates, (unsigned long long)s.epoch_changes",
+          "new": "\"HLE:%llu unknown:%llu overlap:%llu | diff:%llu\",\n            (unsigned long long)s.hle_candidates, (unsigned long long)s.hle_unknown,\n            (unsigned long long)s.hle_ranges, (unsigned long long)s.hle_changes"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/run-switch-performance-tests.sh",
+      "base_blob": "5810c5ce63221fa1e9539e5196b773c96c71345c",
+      "replacements": [
+        {
+          "old": "python3 \"$ROOT/scripts/tests/test_switch_epoch_audit.py\" --cxx \"${CXX:-c++}\" --require-source",
+          "new": "python3 \"$ROOT/scripts/tests/test_switch_epoch_audit.py\" --cxx \"${CXX:-c++}\" --require-source\npython3 \"$ROOT/scripts/tests/test_switch_hle_ranges.py\" --require-source --cxx \"${CXX:-c++}\""
+        }
+      ]
+    }
+  ]
+}

@@ -103,7 +103,7 @@ int main(int argc,char **argv){
  auto **writes=sv::live_write_table(raw.get());assert(writes);
  uint64_t tick=10000;sv::on_render_end(tick);auto view=sv::status_snapshot();
  assert(view.stage==sv::Stage::Waiting&&view.total_ms==28000&&view.epoch_audit&&!view.heap_fault);
- assert(std::strstr(sv::make_hud_text(view,tick).title.data(),"LIVE EPOCH"));
+ assert(std::strstr(sv::make_hud_text(view,tick).title.data(),"SCOPED HLE"));
  assert(!sv::strict_hash());sv::request_benchmark();sv::on_render_end(tick);
  for(unsigned phase=0;phase<4;++phase){
   assert(sv::status_snapshot().phase_count==4);
@@ -140,7 +140,7 @@ def load(path,name):
 def source_gate(root,required):
     expected={
         'vita3k/cpu/src/dynarmic_cpu.cpp':('epoch::RunLease publication_reader;', 'halt_reason = jit->Run();', 'jit->Step();'),
-        'vita3k/kernel/src/thread.cpp':('epoch::HostLease host_activity;', 'kernel.call_import(*cpu, nid, id);'),
+        'vita3k/kernel/src/thread.cpp':('epoch::HostLease host_activity(', 'nullptr, nid);', 'kernel.call_import(*cpu, nid, id);'),
         'vita3k/renderer/src/vulkan/renderer.cpp':('epoch::gpu_boundary();',),
         'vita3k/util/src/switch_memory_validation.cpp':('VITA3K_SWITCH_EPOCH_AUDIT_DEFAULT','epoch::domain.reset()','epoch_audit'),
     }
