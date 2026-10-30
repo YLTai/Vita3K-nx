@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Replay controller and test-driver recipes from their pinned Git blobs.
+"""Replay controller, driver and concrete-output recipes from pinned Git blobs.
 
 Read-only integration regression: catches cross-recipe stale anchors and exact
-argument-order mismatches without reconstructed C++ bodies. It does not compile
+argument-order and whole-file duplicate-anchor mismatches. It does not compile
 C++ or claim a full target build.
 """
 import argparse
@@ -99,6 +99,29 @@ def main():
     rejected(engine, original, operations,
              'python3 "$ROOT/scripts/tests/test_switch_gxm_contracts.py" --cxx "${CXX:-c++}" --require-source',
              'CI #60 argument-order')
+    # Use the ENTIRE pinned original for every newly touched output file, not
+    # a copied function fragment. The latter hid the duplicate es_data line in
+    # sceAudiodecPartlyDecode and let CI #61 reach a known-broken recipe.
+    output_recipe = json.loads((ROOT / 'patches/experiments/switch-host-outputs.json').read_text())
+    targets = {item['path'] for item in output_recipe['files']} - {CONTROLLER, DRIVER}
+    audio_path = 'vita3k/modules/SceAudiodec/SceAudiodecUser.cpp'
+    require(audio_path in targets, 'Missing actual decoder integration')
+    for target in sorted(targets):
+        original, operations, result = replay(engine, target, args.require_source)
+        if target == audio_path:
+            duplicate = '    uint8_t *es_data = ctrl->es_data.get(emuenv.mem);'
+            require(original.decode().count(duplicate) == 2,
+                    'CI #61 duplicate-line fixture changed; review both decoder paths')
+            rejected(engine, original, [], duplicate, 'CI #61 duplicate decoder line')
+            before, after = original.decode(), result.decode()
+            partial = 'EXPORT(int, sceAudiodecPartlyDecode,'
+            require(before.split(partial, 1)[1] == after.split(partial, 1)[1],
+                    'Unreviewed partly-decode body was accidentally changed')
+            helper = after.split('static int decode_audio_frames(', 1)[1].split(
+                'EXPORT(int, sceAudiodecDecode,', 1)[0]
+            marker = 'typeid(*decoder) == typeid(Atrac9DecoderState)'
+            require(after.count(marker) == 1 and marker in helper,
+                    'Exact decoder contract is not solely inside the reviewed helper')
     # No fuzzy or silent rewriting, including duplicate and absent anchors.
     for source in (b'x\nx\n', b'y\n'):
         try:
@@ -107,7 +130,7 @@ def main():
             pass
         else:
             raise AssertionError('Non-unique anchor was accepted')
-    print('Controller and test-driver chains PASS; CI #59/#60 negatives rejected; '
+    print('Controller/driver/concrete-output chains PASS; CI #59/#60/#61 negatives rejected; '
           'failure gates and single test invocations retained. Not a C++/NRO or device test.')
 
 
