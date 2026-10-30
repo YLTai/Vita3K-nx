@@ -36,9 +36,10 @@ public:
         uint32_t nid = 0;
         const char *name = nullptr; // make_bridge supplies immutable static names
         uint64_t calls = 0, scoped = 0, unknown_samples = 0, overlap_samples = 0;
+        uint64_t parks = 0, resumes = 0, parked_samples = 0;
     };
 private:
-    struct Import { bool used = false, scoped = false; uint32_t row = no_slot;
+    struct Import { bool used = false, scoped = false, parked = false; uint32_t row = no_slot;
         const char *name = nullptr; std::array<HostSpan, 3> spans{}; };
     struct Interest { bool used = false; std::array<HostSpan, 2> spans{};
         uint64_t version = 0, busy = 0, visited = 0; };
@@ -49,6 +50,7 @@ private:
     uint64_t serial_ = 0, unknown_ = 0, gpu_ = 0, unknown_busy_ = 0;
     uint64_t calls_ = 0, exits_ = 0, scoped_ = 0, samples_ = 0, missing_names_ = 0;
     size_t edges_ = 0;
+    uint64_t parks_ = 0, resumes_ = 0, parked_ = 0;
     bool failed_ = false;
     uint64_t advance(uint64_t &v) {
         if (v == UINT64_MAX) { failed_ = true; return v; }
@@ -83,6 +85,7 @@ public:
         for (const auto &i : imports_) if (i.used) { failed_ = true; return false; }
         imports_ = {}; resources_ = {}; rows_ = {}; pages_.clear(); edges_ = 0;
         serial_ = unknown_ = gpu_ = unknown_busy_ = calls_ = exits_ = scoped_ = samples_ = missing_names_ = 0;
+        parks_ = resumes_ = parked_ = 0;
         failed_ = false; return true;
     }
     void clear_interests() { resources_ = {}; pages_.clear(); edges_ = 0; advance(serial_); }
@@ -112,7 +115,7 @@ public:
         std::initializer_list<HostSpan> spans, bool prior_unknown = false) {
         if (failed_ || slot >= imports_.size()) return false;
         auto &i = imports_[slot];
-        if (!i.used || i.scoped || !i.name || spans.size() > i.spans.size()) return false;
+        if (!i.used || i.scoped || i.parked || !i.name || spans.size() > i.spans.size()) return false;
         bool allowed = false;
         for (auto n : names) if (!std::strcmp(n, i.name)) allowed = true;
         if (!allowed) return false; // helper reached through an unreviewed caller stays unknown
@@ -125,11 +128,38 @@ public:
         if (i.row < rows_.size()) ++rows_[i.row].scoped;
         touch(i, true); return true;
     }
+    // Only an audited native wait may use this. This is not a read-only HLE
+    // declaration: arbitrary prefix/suffix writes remain unknown. Scoped output
+    // spans stay busy, including writes performed by a signalling thread.
+    bool park(unsigned slot, const char *root_name) {
+        if (failed_ || slot >= imports_.size()) return false;
+        auto &i = imports_[slot];
+        if (!i.used) { failed_ = true; return false; }
+        if (i.scoped || i.parked) return false;
+        name(slot, root_name);
+        if (!unknown_busy_) { failed_ = true; return false; }
+        --unknown_busy_; i.parked = true; ++parked_; ++parks_;
+        advance(unknown_); // Do not erase unknown writes before entering the wait.
+        if (i.row < rows_.size()) ++rows_[i.row].parks;
+        return true;
+    }
+    void resume(unsigned slot) {
+        if (slot >= imports_.size() || !imports_[slot].used || !imports_[slot].parked || !parked_) {
+            failed_ = true; return;
+        }
+        auto &i = imports_[slot]; i.parked = false;
+        --parked_; ++unknown_busy_; ++resumes_; advance(unknown_);
+        if (i.row < rows_.size()) ++rows_[i.row].resumes;
+    }
     void leave(unsigned slot) {
         if (slot >= imports_.size() || !imports_[slot].used) { failed_ = true; return; }
         auto &i = imports_[slot];
-        if (i.scoped) touch(i, false);
-        else { --unknown_busy_; advance(unknown_); }
+        if (i.parked) { // A wait guard must unwind BEFORE its import.
+            failed_ = true; --parked_; ++resumes_; advance(unknown_);
+            if (i.row < rows_.size()) ++rows_[i.row].resumes;
+        } else if (i.scoped) touch(i, false);
+        else if (unknown_busy_) { --unknown_busy_; advance(unknown_); }
+        else failed_ = true;
         i = {}; ++exits_;
     }
     void watch(unsigned id, HostSpan pixels, HostSpan palette) noexcept {
@@ -161,7 +191,8 @@ public:
         // Attribution only is sampled; every eligibility stamp remains exact.
         if ((samples_ & 63u) != 1u) return;
         for (const auto &i : imports_) if (i.used && i.row < rows_.size()) {
-            if (!i.scoped) ++rows_[i.row].unknown_samples;
+            if (i.parked) ++rows_[i.row].parked_samples;
+            else if (!i.scoped) ++rows_[i.row].unknown_samples;
             else if (overlaps(resources_[id], i)) ++rows_[i.row].overlap_samples;
         }
     }
@@ -170,14 +201,17 @@ public:
         std::fprintf(f,"{\"version\":1,\"failed\":%s,\"calls\":%llu,\"exits\":%llu,\"scoped_calls\":%llu,"
             "\"candidate_explanations\":%llu,\"unattributed_calls\":%llu,\"attribution_period\":64,\"authority\":false,\"imports\":[",
             failed_?"true":"false",U(calls_),U(exits_),U(scoped_),U(samples_),U(missing_names_));
+        // Version 1 remains readable; wait segmentation is an explicit extension.
+        // parks = resumes + active_parked, also after an interrupted capture.
         bool first = true;
         for (const auto &r : rows_) if (r.calls) {
             // Names originate in compiled export identifiers; never Guest input.
             std::fprintf(f,"%s{\"nid\":%u,\"name\":\"%s\",\"calls\":%llu,\"scoped\":%llu,"
-                "\"unknown_candidate_checks\":%llu,\"overlap_candidate_checks\":%llu}",first?"":",",
-                r.nid,r.name?r.name:"unresolved",U(r.calls),U(r.scoped),U(r.unknown_samples),U(r.overlap_samples)); first = false;
+                "\"unknown_candidate_checks\":%llu,\"overlap_candidate_checks\":%llu,\"parks\":%llu,\"resumes\":%llu,\"parked_candidate_checks\":%llu}",first?"":",",
+                r.nid,r.name?r.name:"unresolved",U(r.calls),U(r.scoped),U(r.unknown_samples),U(r.overlap_samples),U(r.parks),U(r.resumes),U(r.parked_samples)); first = false;
         }
-        std::fputs("]}",f);
+        std::fprintf(f,"] ,\"native_waits\":{\"version\":1,\"parks\":%llu,\"resumes\":%llu,"
+            "\"active\":%llu,\"async_outputs_covered\":false}}",U(parks_),U(resumes_),U(parked_));
     }
 };
 inline bool stable_host(const RangeStamp &a, const RangeStamp &b) {

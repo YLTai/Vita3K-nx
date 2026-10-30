@@ -89,6 +89,10 @@ public:
         std::initializer_list<HostSpan> spans, bool prior_unknown) {
         std::lock_guard lock(mutex_); ranges_.name(slot, name); return ranges_.declare(slot, names, spans, prior_unknown);
     }
+    bool park_import(unsigned slot, const char *name) {
+        std::lock_guard lock(mutex_); return ranges_.park(slot, name);
+    }
+    void resume_import(unsigned slot) { std::lock_guard lock(mutex_); ranges_.resume(slot); }
     void clear_interests() { std::lock_guard lock(mutex_); ranges_.clear_interests(); }
     void watch_range(unsigned id, const void *pixels, uint64_t n, const void *palette, uint64_t m) {
         std::lock_guard lock(mutex_); ranges_.watch(id, {pixels, n}, {palette, m});
@@ -114,7 +118,9 @@ public:
     RunLease(const RunLease &) = delete;
     RunLease &operator=(const RunLease &) = delete;
 };
+class NativeWaitLease;
 class HostLease {
+    friend class NativeWaitLease;
     Domain *domain_ = nullptr;
     unsigned slot_ = HleRanges::no_slot;
     HostLease *previous_ = nullptr;
@@ -141,6 +147,24 @@ public:
     }
     HostLease(const HostLease &) = delete;
     HostLease &operator=(const HostLease &) = delete;
+};
+// Must surround ONLY a native host wait with no Guest-memory-writing predicate,
+// not an HLE body, queue insertion, callback or submission. A scoped output
+// contract is deliberately NOT suspended. Prefix/suffix and other producers
+// remain tracked; the guard restores unknown status before the caller resumes.
+class NativeWaitLease {
+    Domain *domain_ = nullptr;
+    unsigned slot_ = HleRanges::no_slot;
+public:
+    NativeWaitLease() {
+        const auto *h = HostLease::current_;
+        if (h && h->domain_ && h->domain_->park_import(h->slot_, h->name_)) {
+            domain_ = h->domain_; slot_ = h->slot_;
+        }
+    }
+    ~NativeWaitLease() { if (domain_) domain_->resume_import(slot_); }
+    NativeWaitLease(const NativeWaitLease &) = delete;
+    NativeWaitLease &operator=(const NativeWaitLease &) = delete;
 };
 inline void name_import(const char *name) { HostLease::name_current(name); }
 inline bool declare_outputs(std::initializer_list<const char *> names,

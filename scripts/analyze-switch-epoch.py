@@ -18,7 +18,7 @@ def integer(o, k):
     return n
 
 def analyze(data, changed_total=None):
-    issues, warnings, rows = [], [], []
+    issues, warnings, rows, performance_issues = [], [], [], []
     b, w, e = (data.get(k, {}) for k in ('benchmark', 'write_shadow', 'epoch_audit'))
     tests = data.get('tests', [])
     controls = [t for t in tests if t.get('suite') == 'write_watch_canary']
@@ -48,6 +48,22 @@ def analyze(data, changed_total=None):
     if "range_contracts" in e:
         scoped = analyze_ranges(e, w, issues, warnings)
     comparison = None
+    policy = data.get('sample_policy')
+    adaptive = policy is not None
+    capped = [False] * 4
+    if adaptive:
+        if (not isinstance(policy, dict) or type(policy.get('version')) is not int
+                or policy.get('version') != 1 or policy.get('minimum_samples') != 50
+                or policy.get('minimum_seconds') != 6 or policy.get('maximum_seconds') != 12
+                or policy.get('settle_seconds') != 1):
+            issues.append('Unsupported adaptive sampling contract')
+        else:
+            capped = policy.get('capped_phases')
+            if not isinstance(capped, list) or len(capped) != 4 or any(type(x) is not bool for x in capped):
+                issues.append('Invalid sample-cap ledger')
+                capped = [True] * 4
+        if 'native_waits' not in e.get('range_contracts', {}):
+            issues.append('Adaptive wait-audit build lacks native-wait accounting')
     totals = {k: 0 for k in ('grace_ready', 'grace_pending', 'cpu_candidates', 'cpu_candidate_changes',
         'epoch_candidates', 'epoch_candidate_changes', 'external_intervals', 'host_busy_checks')}
     try:
@@ -73,8 +89,11 @@ def analyze(data, changed_total=None):
                 raise ValueError('Invalid duration')
             if type(rate) not in (int,float) or not math.isfinite(rate) or not math.isclose(rate, count*1000/duration,rel_tol=1e-5):
                 raise ValueError('Rate inconsistent with samples')
-            if p.get('complete') is not True or count < 50 or not 5400 <= duration <= 6000:
-                issues.append(f'Phase {i}: insufficient samples/time')
+            if p.get('complete') is not True:
+                issues.append(f'Phase {i}: incomplete phase')
+            valid_duration = 6000 - 1e-5 <= duration <= 12000 + 1e-5 if adaptive else 5400 <= duration <= 6000
+            if count < 50 or not valid_duration or capped[i]:
+                performance_issues.append(f'Phase {i}: insufficient samples/time' + (' (bounded extension exhausted)' if capped[i] else ''))
             if integer(g,'end_tick') <= integer(g,'begin_tick') or (i and g['begin_tick'] != e['phases'][i-1]['end_tick']):
                 raise ValueError('Invalid source-render boundaries')
             for k in totals: totals[k] += integer(g,k)
@@ -116,7 +135,7 @@ def analyze(data, changed_total=None):
         warnings.append('Full Hash disproved stable-epoch candidates; inspect GPU completion, async HLE and missing write sources')
     if not totals['epoch_candidates']:
         warnings.append('No coarse-epoch candidates: broad HLE/GPU exclusions may dominate; do not repeat the same scene for green')
-    if not issues and len(rows)==4:
+    if not issues and not performance_issues and len(rows)==4:
         def group(indices):
             n=sum(rows[i]['measured_intervals'] for i in indices); ms=sum(rows[i]['duration_ms'] for i in indices)
             return dict(loops_per_second=1000*n/ms,mean_loop_ms=ms/n)
@@ -124,8 +143,9 @@ def analyze(data, changed_total=None):
         comparison=dict(baseline=a,treatment=bb,throughput_delta_pct=(bb['loops_per_second']/a['loops_per_second']-1)*100,
             extra_ms_per_loop=bb['mean_loop_ms']-a['mean_loop_ms'],
             baseline_drift_pct=(rows[3]['loops_per_second']/rows[0]['loops_per_second']-1)*100, descriptive_only=True)
-    return dict(plan='epoch-write-1',controls_ok=controls_ok,comparison_eligible=not issues,
-        exclusions=issues,warnings=warnings,phases=rows,totals=totals,comparison=comparison,
+    return dict(plan='epoch-write-1',controls_ok=controls_ok,comparison_eligible=not issues and not performance_issues,
+        evidence_eligible=not issues,performance_exclusions=performance_issues,sample_policy=policy,
+        exclusions=issues+performance_issues,warnings=warnings,phases=rows,totals=totals,comparison=comparison,
         scoped_hle=scoped,safe_to_skip_hash=False,next_action='Exit normally and share one complete capture; do not repeat for green',
         limits=['This is a real-game software-write-table audit, not the private CPU/GPU mirror suite.',
                 'A and B share read/write tables, cross-page detection and execution/HLE boundary costs; B adds persistent selected-page interception.',
@@ -153,6 +173,14 @@ def analyze_ranges(e, w, issues, warnings):
         imports = contracts.get('imports')
         if not isinstance(imports,list) or len(imports)>256:
             raise ValueError('Invalid HLE caller table')
+        native = contracts.get('native_waits')
+        parks = resumes = 0
+        if native is not None:
+            if (native.get('version') != 1 or native.get('async_outputs_covered') is not False
+                    or integer(native, 'parks') != integer(native, 'resumes') + integer(native, 'active')):
+                raise ValueError('Invalid native-wait lease ledger/coverage')
+            if native['active']:
+                raise ValueError('Native wait still active at export; workers not stopped')
         seen=set();calls=scoped=0
         for row in imports:
             nid=integer(row,'nid')
@@ -161,8 +189,18 @@ def analyze_ranges(e, w, issues, warnings):
             if not n or a>n or not isinstance(row.get('name'),str):raise ValueError('Invalid HLE caller counts')
             integer(row,'unknown_candidate_checks');integer(row,'overlap_candidate_checks')
             calls+=n;scoped+=a
+            if native is not None:
+                park = integer(row, 'parks'); resume = integer(row, 'resumes')
+                integer(row, 'parked_candidate_checks')
+                if resume > park: raise ValueError('More native-wait resumes than parks')
+                parks += park; resumes += resume
         if calls+integer(contracts,'unattributed_calls') != contracts['calls'] or scoped>contracts['scoped_calls']:
             raise ValueError('Caller coverage ledger does not reconcile')
+        if native is not None:
+            if parks > native['parks'] or resumes > native['resumes']:
+                raise ValueError('Caller/native-wait ledger disagrees')
+            if not contracts['unattributed_calls'] and (parks != native['parks'] or resumes != native['resumes']):
+                raise ValueError('Complete caller/native-wait ledger disagrees')
         phases=e.get('range_phases')
         if not isinstance(phases,list) or len(phases)!=4:raise ValueError('Missing four scoped-HLE phases')
         for i,(p,g) in enumerate(zip(phases,e['phases'])):
@@ -197,4 +235,5 @@ def analyze_ranges(e, w, issues, warnings):
     blockers = sorted(contracts.get('imports',[]),key=lambda r:r.get('unknown_candidate_checks',0),reverse=True)
     return dict(totals=total,contracts=contracts,unknown_blockers=blockers,
                 safe_to_skip_hash=False,attribution_sampling_only=64,
+                attribution_scope='Full session including restarts; sightings can overlap and are not disjoint shares',
                 limits='Known synchronous output ranges only; no GPU completion or asynchronous HLE/IPC authority')
