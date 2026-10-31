@@ -1,0 +1,108 @@
+{
+  "base_commit": "5c0786a9742a8df2600fc62ef8bbdb224314422d",
+  "purpose": "Regression hotfix: explicit opt-in; retire tracking on terminal fallback, preserve existing JIT mirror lifetime.",
+  "files": [
+    {
+      "path": "vita3k/util/src/switch_memory_validation.cpp",
+      "base_blob": "e805efbd80f3880ab8561fc46289dedc5dcff565",
+      "replacements": [
+        {
+          "old": "std::atomic<bool> is_enabled{false};",
+          "new": "std::atomic<bool> is_enabled{false};\n// One-way runtime retirement is separate from UI/report enablement. Existing\n// leases still leave their captured Domain; never reset it while workers live.\nstd::atomic<bool> watch_runtime_active{false};"
+        },
+        {
+          "old": "    bool collector_off = false;",
+          "new": "    bool collector_off = false;\n    bool explicit_resource_profile = false;"
+        },
+        {
+          "old": "        } else if (key == \"validation_experiment\") {",
+          "new": "        } else if (key == \"validation_experiment\") {\n            explicit_resource_profile = value == \"resource_reuse\" || value == \"resource_reuse_play\";"
+        },
+        {
+          "old": "    if (collector_off) out.enabled = false;",
+          "new": "    // The fixed-scene +4.39% compared two instrumented modes. It did not pay\n    // for the shared JIT/HLE tracker. Do not enable that cost in normal play\n    // without an explicit resource profile, even with memory_validation=on.\n    if (out.resource_reuse && !explicit_resource_profile) out.enabled = false;\n    if (collector_off) out.enabled = false;"
+        },
+        {
+          "old": "    options = read_options();",
+          "new": "    options = read_options();\n    watch_runtime_active.store(options.enabled && options.write_shadow, std::memory_order_release);"
+        },
+        {
+          "old": "    is_enabled.store(false, std::memory_order_release);\n    dedup_enabled.store(false, std::memory_order_release);",
+          "new": "    is_enabled.store(false, std::memory_order_release);\n    watch_runtime_active.store(false, std::memory_order_release);\n    dedup_enabled.store(false, std::memory_order_release);"
+        },
+        {
+          "old": "else if (w.phases[0].guard_budget_exhausted) resource_play.stop(false,reuse::SourcePolicy::Capacity);",
+          "new": "else if (w.phases[0].guard_budget_exhausted)\n                    resource_play.stop(false,reuse::SourcePolicy::Capacity,\"write_budget\");"
+        },
+        {
+          "old": "            if (resource_play.stopped) live_watch.phase(watch::no_index,false);",
+          "new": "            if (resource_play.stopped) {\n                // First revoke reuse/open every write PTE under the observer\n                // lock. Then stop new per-Run/HLE/output registrations. Old\n                // leases drain normally; the write mirror remains allocated\n                // and mapping publications keep it current for existing JITs.\n                live_watch.phase(watch::no_index,false);\n                epoch::enabled.store(false, std::memory_order_release);\n                watch_runtime_active.store(false, std::memory_order_release);\n                resource_play.tracking_retired = true;\n                resource_play.stop_tick = tick;\n                resource_play.stores_at_stop = w.phases[0].watched_stores;\n                resource_play.page_only_at_stop = w.phases[0].page_only_stores;\n            }"
+        },
+        {
+          "old": "bool resource_reuse_enabled() { return enabled() && options.resource_reuse; }",
+          "new": "bool resource_reuse_enabled() {\n    return enabled() && options.resource_reuse && watch_runtime_active.load(std::memory_order_acquire);\n}"
+        },
+        {
+          "old": "    if (!resource_controls_ran) {",
+          "new": "    const auto full = [&]() {\n        return (pixels && size ? hash(pixels,size) : 0) ^ (palette && palette_size ? hash(palette,palette_size) : 0);\n    };\n    if (!resource_reuse_enabled()) return full();\n    if (!resource_controls_ran) {"
+        },
+        {
+          "old": "    const auto full = [&]() {\n        return (pixels && size ? hash(pixels,size) : 0) ^ (palette && palette_size ? hash(palette,palette_size) : 0);\n    };\n    if (options.resource_play ? !resource_play.active() : !resource_run.active) return full();",
+          "new": "    if (options.resource_play ? !resource_play.active() : !resource_run.active) return full();"
+        },
+        {
+          "old": "        const auto token = live_watch.before(table,address,pixels,size,palette,palette_size);\n        const auto admission = reuse::source_policy.admit(input);",
+          "new": "        const auto admission = reuse::source_policy.admit(input);\n        // A permanently excluded source cannot benefit. In particular, do not\n        // trap its CPU-hot pages merely to reject it after registration.\n        if (!admission.supported) return reuse::Evidence{};\n        const auto token = live_watch.before(table,address,pixels,size,palette,palette_size);"
+        },
+        {
+          "old": "    if (!enabled() || !options.write_shadow) return nullptr;\n    return live_watch.bind(normal);",
+          "new": "    if (!enabled() || !options.write_shadow || !watch_runtime_active.load(std::memory_order_acquire)) return nullptr;\n    return live_watch.bind(normal);"
+        },
+        {
+          "old": "watch::Access live_read(uint8_t **normal, uint32_t address, void *dst, size_t size) {\n    if (!enabled() || !options.write_shadow) return watch::Access::Unhandled;",
+          "new": "watch::Access live_read(uint8_t **normal, uint32_t address, void *dst, size_t size) {\n    if (!enabled() || !options.write_shadow || !watch_runtime_active.load(std::memory_order_acquire)) return watch::Access::Unhandled;"
+        },
+        {
+          "old": "watch::Access live_write(uint8_t **normal, uint32_t address, const void *src, size_t size) {\n    if (!enabled() || !options.write_shadow) return watch::Access::Unhandled;",
+          "new": "watch::Access live_write(uint8_t **normal, uint32_t address, const void *src, size_t size) {\n    if (!enabled() || !options.write_shadow || !watch_runtime_active.load(std::memory_order_acquire)) return watch::Access::Unhandled;"
+        },
+        {
+          "old": "watch::Access live_exclusive(uint8_t **normal, uint32_t address, uint64_t value,\n    uint64_t expected, size_t size, bool &success) {\n    if (!enabled() || !options.write_shadow) return watch::Access::Unhandled;",
+          "new": "watch::Access live_exclusive(uint8_t **normal, uint32_t address, uint64_t value,\n    uint64_t expected, size_t size, bool &success) {\n    if (!enabled() || !options.write_shadow || !watch_runtime_active.load(std::memory_order_acquire)) return watch::Access::Unhandled;"
+        },
+        {
+          "old": "    if (!enabled() || !options.write_shadow) return {};\n    return live_watch.before",
+          "new": "    if (!enabled() || !options.write_shadow || !watch_runtime_active.load(std::memory_order_acquire)) return {};\n    return live_watch.before"
+        },
+        {
+          "old": "    if (enabled() && options.write_shadow) live_watch.host_written(host, size, writer);",
+          "new": "    if (enabled() && options.write_shadow && watch_runtime_active.load(std::memory_order_acquire))\n        live_watch.host_written(host, size, writer);"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/switch_validation_status.h",
+      "base_blob": "d8f950aa3a9d4d563284584063a0fc373ac7953a",
+      "replacements": [
+        {
+          "old": "bool resource_reuse = false, resource_play = false;",
+          "new": "bool resource_reuse = false, resource_play = false;\n    bool reuse_tracking_retired = false;"
+        },
+        {
+          "old": "        std::snprintf(text.timing.data(),text.timing.size(),\"Continuous mode | No benchmark or countdown | Mask:0x%x\",s.reuse_blockers);",
+          "new": "        std::snprintf(text.timing.data(),text.timing.size(),\"%s | No countdown | Mask:0x%x\",\n            s.reuse_tracking_retired ? \"TRACKING OFF / ORIGINAL HASH\" : \"Explicit experimental mode\",s.reuse_blockers);"
+        }
+      ]
+    },
+    {
+      "path": "scripts/analyze-switch-resource-reuse.py",
+      "base_blob": "ab5bee98b397794654134f3e47f88b88c53d16d0",
+      "replacements": [
+        {
+          "old": "        check(isinstance(ex,list) and integer(d) and len(ex)+d==c['mismatches'],'Counterexample mismatch')\n    policy=r.get('source_policy',{})\n    check(policy.get('GPU_writers_reused')",
+          "new": "        check(isinstance(ex,list) and integer(d) and len(ex)+d==c['mismatches'],'Counterexample mismatch')\n    retirement=r.get('retirement')\n    if retirement is not None:\n        check(isinstance(retirement,dict),'Invalid retirement extension')\n        if isinstance(retirement,dict):\n            check(retirement.get('version')==1 and retirement.get('tracking_retired')==r.get('stopped'),'Stopped tracker not retired')\n            check(retirement.get('reason') in ('none','write_budget','source_policy','failure'),'Invalid stop reason')\n            check(all(integer(retirement.get(k)) for k in ('stop_tick','watched_stores','page_only_stores')),'Invalid retirement counters')\n            if all(integer(retirement.get(k)) for k in ('stop_tick','watched_stores','page_only_stores')):\n                check(retirement['page_only_stores']<=retirement['watched_stores'],'Invalid page-only count')\n                if r.get('stopped'):check(retirement['stop_tick']>0 and retirement.get('reason')!='none','Missing retirement time/reason')\n                else:check(retirement['stop_tick']==0 and retirement.get('reason')=='none','Retirement on live tracker')\n    policy=r.get('source_policy',{})\n    check(policy.get('GPU_writers_reused')"
+        }
+      ]
+    }
+  ]
+}
