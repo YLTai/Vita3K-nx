@@ -1,0 +1,150 @@
+{
+  "base_commit": "7e2ba3fd8048dd44565c69ff77317d734893d982",
+  "purpose": "Repair CI #68 clean/negative full-controller expectations; keep strict/resolved ledgers independent and reference Hash authoritative.",
+  "files": [
+    {
+      "path": "vita3k/util/include/util/switch_write_watch.h",
+      "base_blob": "d02545c2ec170ad0583850de74cf2fcd741114b4",
+      "replacements": [
+        {
+          "old": "#include <util/switch_write_watch_api.h>",
+          "new": "#include <util/switch_write_watch_api.h>\n#include <util/declaration_resolution.h>"
+        },
+        {
+          "old": "struct Snapshot {",
+          "new": "struct Snapshot {\n    epoch::ResolutionAudit declaration_resolution;"
+        },
+        {
+          "old": "    struct Resource {",
+          "new": "    struct Resource {\n        epoch::RangeStamp resolution_begin;"
+        },
+        {
+          "old": "        ++count().hash_checks; count().hash_bytes += r.key.size + r.key.palette_size;",
+          "new": "        const epoch::ResolutionScope resolution_scope(r, count(), stats_.declaration_resolution,\n            token, audit, phase_, clock_);\n        ++count().hash_checks; count().hash_bytes += r.key.size + r.key.palette_size;"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/switch_validation_status.h",
+      "base_blob": "d8f950aa3a9d4d563284584063a0fc373ac7953a",
+      "replacements": [
+        {
+          "old": "struct StatusSnapshot {",
+          "new": "struct StatusSnapshot {\n    bool declaration_resolution = false;\n    uint64_t resolved_candidates = 0, resolved_additional = 0, resolved_mismatches = 0;"
+        },
+        {
+          "old": "            (unsigned long long)s.hle_ranges, (unsigned long long)s.hle_changes);",
+          "new": "            (unsigned long long)s.hle_ranges, (unsigned long long)s.hle_changes);\n        if (s.declaration_resolution)\n            std::snprintf(text.samples.data(), text.samples.size(), \"Strict:%llu | Resolved:%llu +%llu | Diff:%llu | FULL Hash\",\n                (unsigned long long)s.hle_candidates, (unsigned long long)s.resolved_candidates,\n                (unsigned long long)s.resolved_additional, (unsigned long long)s.resolved_mismatches);"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/src/switch_memory_validation.cpp",
+      "base_blob": "e805efbd80f3880ab8561fc46289dedc5dcff565",
+      "replacements": [
+        {
+          "old": "    out.cache_changes = observation.cache.changes;",
+          "new": "    out.cache_changes = observation.cache.changes;\n    out.declaration_resolution = options.epoch_audit;\n    if (out.declaration_resolution) {\n        for (const auto &p : observation.declaration_resolution.phases) {\n            out.resolved_candidates += p.resolved; out.resolved_additional += p.additional;\n            out.resolved_mismatches += p.mismatches;\n        }\n        out.watch_failed |= observation.declaration_resolution.failed || out.resolved_mismatches != 0;\n    }"
+        },
+        {
+          "old": "    std::fputs(\"\\n}\\n\", file);\n    const bool write_error = std::ferror(file) != 0;",
+          "new": "    if (options.epoch_audit) {\n        std::fputs(\",\\n  \\\"declaration_resolution_expected\\\":true,\\n  \\\"declaration_resolution\\\":\", file);\n        live_watch.snapshot().declaration_resolution.write_json(file);\n    }\n    std::fputs(\"\\n}\\n\", file);\n    const bool write_error = std::ferror(file) != 0;"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/run-switch-performance-tests.sh",
+      "base_blob": "5810c5ce63221fa1e9539e5196b773c96c71345c",
+      "replacements": [
+        {
+          "old": "python3 \"$ROOT/scripts/tests/test_switch_declaration_transactions.py\" --cxx \"${CXX:-c++}\" --require-source",
+          "new": "python3 \"$ROOT/scripts/tests/test_switch_declaration_transactions.py\" --cxx \"${CXX:-c++}\" --require-source\npython3 \"$ROOT/scripts/tests/test_switch_declaration_resolution.py\" --cxx \"${CXX:-c++}\" --require-source"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/test_switch_epoch_audit.py",
+      "base_blob": "c1b71cb4629db7ca5f479c8f5601ba5a7cfc0c27",
+      "replacements": [
+        {
+          "old": "import json\n",
+          "new": "import json\nimport os\n"
+        },
+        {
+          "old": " assert(argc==2);std::filesystem::current_path(argv[1]);",
+          "new": " assert(argc==2);\n const bool inject_missing=std::getenv(\"FIXTURE_CLEAN\")==nullptr;\n bool missing_writer_injected=false;\n std::filesystem::current_path(argv[1]);"
+        },
+        {
+          "old": "   if(phase==1&&n==31){uint32_t v=333;std::memcpy(data,&v,4);} // deliberate missing writer",
+          "new": "   if(inject_missing&&phase==1&&n==31){uint32_t v=333;std::memcpy(data,&v,4);missing_writer_injected=true;} // deliberate missing writer"
+        },
+        {
+          "old": "view.outcome==sv::CaptureOutcome::Ready);",
+          "new": "view.outcome==(missing_writer_injected?sv::CaptureOutcome::Invalid:sv::CaptureOutcome::Ready));"
+        },
+        {
+          "old": " assert(view.epoch_changes==1&&view.grace_ready&&view.epoch_candidates&&!sv::strict_hash());",
+          "new": " assert(view.epoch_changes==uint64_t(missing_writer_injected)&&view.grace_ready&&view.epoch_candidates&&!sv::strict_hash());\n assert(view.resolved_mismatches==uint64_t(missing_writer_injected));\n assert(view.watch_failed==missing_writer_injected);\n const auto hud=sv::make_hud_text(view,tick);\n assert(std::strstr(hud.title.data(),view.outcome==sv::CaptureOutcome::Invalid?\"DONE - CHECK REPORT\":\"DONE - REPORT READY\"));"
+        },
+        {
+          "old": "        subprocess.run([str(d/'controller'),str(d)],check=True,timeout=30)\n        data=json.loads((d/'report/memory-validation.json').read_text())\n        analyzer=load(ROOT/'scripts/analyze-switch-epoch.py','epoch_analysis');out=analyzer.analyze(data)",
+          "new": "        # Compile once, then exercise both real completion paths. The old\n        # fixture deliberately injected a missing writer but demanded READY.\n        analyzer=load(ROOT/'scripts/analyze-switch-epoch.py','epoch_analysis')\n        clean=d/'clean';clean.mkdir()\n        subprocess.run([str(d/'controller'),str(clean)],env=dict(os.environ,FIXTURE_CLEAN='1'),check=True,timeout=30)\n        clean_data=json.loads((clean/'report/memory-validation.json').read_text())\n        clean_out=analyzer.analyze(clean_data)\n        assert clean_data['capture_outcome']=='ready' and not clean_out['exclusions'],clean_out['exclusions']\n        assert clean_out['totals']['epoch_candidate_changes']==0\n        assert sum(p['mismatches'] for p in clean_data['declaration_resolution']['phases'])==0\n        assert not clean_out['safe_to_skip_hash']\n        fault_env=dict(os.environ);fault_env.pop('FIXTURE_CLEAN',None)\n        subprocess.run([str(d/'controller'),str(d)],env=fault_env,check=True,timeout=30)\n        data=json.loads((d/'report/memory-validation.json').read_text())\n        assert data['capture_outcome']=='invalid'\n        assert sum(p['mismatches'] for p in data['declaration_resolution']['phases'])==1\n        out=analyzer.analyze(data)"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/test_switch_hle_ranges.py",
+      "base_blob": "913b0ec3f75ff9c45453b599478817deb7402f14",
+      "replacements": [
+        {
+          "old": "'view.epoch_changes==1&&view.grace_ready&&view.epoch_candidates',\n                      'view.hle_changes==1&&view.grace_ready&&view.hle_candidates'",
+          "new": "'view.epoch_changes==uint64_t(missing_writer_injected)&&view.grace_ready&&view.epoch_candidates',\n                      'view.hle_changes==uint64_t(missing_writer_injected)&&view.grace_ready&&view.hle_candidates'"
+        },
+        {
+          "old": "    data=json.loads((d/'report/memory-validation.json').read_text())\n    analyzer=",
+          "new": "    data=json.loads((d/'report/memory-validation.json').read_text())\n    assert data['capture_outcome']=='invalid'\n    assert sum(p['mismatches'] for p in data['declaration_resolution']['phases'])==1\n    analyzer="
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/test_switch_native_waits.py",
+      "base_blob": "65aed8d2474837556ec6fb0543826dcc98d3de4c",
+      "replacements": [
+        {
+          "old": "code=code.replace('view.outcome==sv::CaptureOutcome::Ready',\n        'view.outcome==(frame>=1000?sv::CaptureOutcome::Invalid:sv::CaptureOutcome::Ready)')",
+          "new": "code=code.replace('view.outcome==(missing_writer_injected?sv::CaptureOutcome::Invalid:sv::CaptureOutcome::Ready)',\n        'view.outcome==(frame>=1000||missing_writer_injected?sv::CaptureOutcome::Invalid:sv::CaptureOutcome::Ready)')"
+        },
+        {
+          "old": "code=code.replace('assert(view.epoch_changes==1&&view.grace_ready&&view.epoch_candidates&&!sv::strict_hash());',\n        'assert(!sv::strict_hash()); if(frame<1000)assert(view.hle_changes==1&&view.grace_ready&&view.hle_candidates);')",
+          "new": "code=code.replace('assert(view.epoch_changes==uint64_t(missing_writer_injected)&&view.grace_ready&&view.epoch_candidates&&!sv::strict_hash());',\n        'assert(!sv::strict_hash()); if(frame<1000)assert(view.hle_changes==uint64_t(missing_writer_injected)&&view.grace_ready&&view.hle_candidates);')"
+        },
+        {
+          "old": "    for frame in (100,130,1000):\n        run=d/f'frame-{frame}';run.mkdir()\n        subprocess.run([str(d/'controller'),str(run)],env=dict(os.environ,FIXTURE_FRAME_MS=str(frame)),check=True,timeout=30)",
+          "new": "    for frame,clean in ((100,True),(100,False),(130,True),(130,False),(1000,False)):\n        run=d/f'frame-{frame}-clean-{int(clean)}';run.mkdir()\n        env=dict(os.environ,FIXTURE_FRAME_MS=str(frame));env.pop('FIXTURE_CLEAN',None)\n        if clean:env['FIXTURE_CLEAN']='1'\n        subprocess.run([str(d/'controller'),str(run)],env=env,check=True,timeout=30)"
+        },
+        {
+          "old": "        assert out['evidence_eligible'],out['exclusions']\n",
+          "new": "        assert out['evidence_eligible'],out['exclusions']\n        assert data['capture_outcome']==('ready' if clean and frame<1000 else 'invalid')\n        assert sum(p['mismatches'] for p in data['declaration_resolution']['phases'])==int(not clean and frame<1000)\n"
+        },
+        {
+          "old": "assert out['scoped_hle']['totals']['hle_candidate_changes']==1",
+          "new": "assert out['scoped_hle']['totals']['hle_candidate_changes']==int(not clean)"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/test_switch_declaration_resolution.py",
+      "base_blob": "d13173db7d8fb02ce016ddb974c3487d56a34878",
+      "replacements": [
+        {
+          "old": "out.epoch_changes==1",
+          "new": "out.epoch_changes==7"
+        },
+        {
+          "old": "publish+='switch_validation::StatusSnapshot out;struct {bool epoch_audit;}options{active};\\n'",
+          "new": "publish+='switch_validation::StatusSnapshot out;out.epoch_changes=7;struct {bool epoch_audit;}options{active};\\n'"
+        }
+      ]
+    }
+  ]
+}

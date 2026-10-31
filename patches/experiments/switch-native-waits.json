@@ -1,0 +1,174 @@
+{
+  "base_commit": "400f86d76952e3e3f9a0f2a97f10540beac14dd1",
+  "purpose": "Exact native wait segmentation, pending event outputs and bounded sample-aware ABBA. Never Hash reuse authority.",
+  "files": [
+    {
+      "path": "vita3k/kernel/src/sync_primitives.cpp",
+      "base_blob": "9524e3e4c010f65e95794b54195f62f550fd57dc",
+      "replacements": [
+        {
+          "old": "#include <util/log.h>",
+          "new": "#include <util/native_wait_scope.h>\n#include <util/log.h>"
+        },
+        {
+          "old": "            status = thread->status_cond.wait_for(primitive_lock, std::chrono::microseconds{ *timeout }, [&] { return thread->status == ThreadStatus::run; });",
+          "new": "            {\n                V3K_NATIVE_WAIT_SCOPE();\n                status = thread->status_cond.wait_for(primitive_lock, std::chrono::microseconds{ *timeout }, [&] { return thread->status == ThreadStatus::run; });\n            }"
+        },
+        {
+          "old": "        thread->status_cond.wait(primitive_lock, [&] { return thread->status == ThreadStatus::run; });",
+          "new": "        {\n            V3K_NATIVE_WAIT_SCOPE();\n            thread->status_cond.wait(primitive_lock, [&] { return thread->status == ThreadStatus::run; });\n        }"
+        },
+        {
+          "old": "static int eventflag_waitorpoll(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id, unsigned int flags, unsigned int wait, unsigned int *outBits, SceUInt *timeout, bool dowait) {",
+          "new": "static int eventflag_waitorpoll(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID event_id, unsigned int flags, unsigned int wait, unsigned int *outBits, SceUInt *timeout, bool dowait) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    // The signaller may write outBits on another thread. Keep BOTH output\n    // spans busy for the entire wait; NativeWaitLease never suspends them.\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire)) {\n        switch_validation::epoch::declare_outputs(\n            {\"sceKernelWaitEventFlag\", \"_sceKernelWaitEventFlag\", \"sceKernelPollEventFlag\", \"_sceKernelPollEventFlag\"},\n            {{outBits, sizeof(*outBits)}, {timeout, sizeof(*timeout)}});\n        switch_validation::epoch::declare_outputs(\n            {\"sceKernelWaitEventFlagCB\", \"_sceKernelWaitEventFlagCB\"},\n            {{outBits, sizeof(*outBits)}, {timeout, sizeof(*timeout)}}, true);\n    }\n#endif\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/audio/src/impl/switch_audio.cpp",
+      "base_blob": "fe313876368923235ef66810b08f063cd43020c0",
+      "replacements": [
+        {
+          "old": "        wait_cond.wait_for(dlock, std::chrono::microseconds(port.len_microseconds * 2 + 1000));",
+          "new": "        {\n            V3K_NATIVE_WAIT_SCOPE();\n            wait_cond.wait_for(dlock, std::chrono::microseconds(port.len_microseconds * 2 + 1000));\n        }"
+        },
+        {
+          "old": "// Vita3K emulator project",
+          "new": "#include <util/native_wait_scope.h>\n// Vita3K emulator project"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/display/src/display.cpp",
+      "base_blob": "0fd13d1146d18df2a36c3164b54ff31aa057aa58",
+      "replacements": [
+        {
+          "old": "#include <display/functions.h>",
+          "new": "#include <display/functions.h>\n#include <util/native_wait_scope.h>"
+        },
+        {
+          "old": "        wait_thread->status_cond.wait(thread_lock, [&]() {\n            return wait_thread->status == ThreadStatus::run;\n        });",
+          "new": "        {\n            V3K_NATIVE_WAIT_SCOPE();\n        wait_thread->status_cond.wait(thread_lock, [&]() {\n            return wait_thread->status == ThreadStatus::run;\n        });\n        } // Resume the unknown prefix BEFORE any vblank Guest callbacks."
+        }
+      ]
+    },
+    {
+      "path": "vita3k/threads/include/threads/queue.h",
+      "base_blob": "eaf086ff89be1c1819c3ef12f55fffec40cb71d9",
+      "replacements": [
+        {
+          "old": "#include <queue>",
+          "new": "#include <queue>\n#include <util/native_wait_scope.h>"
+        },
+        {
+          "old": "            while (!aborted && queue_.size() == maxPendingCount_) {\n                cond_.wait(mlock);\n            }",
+          "new": "            while (!aborted && queue_.size() == maxPendingCount_) {\n                V3K_NATIVE_WAIT_SCOPE();\n                cond_.wait(mlock);\n            } // The wait lease is gone before queue_.push or notification."
+        },
+        {
+          "old": "        cond_.wait(mlock, [&]() { return aborted || queue_.empty(); });",
+          "new": "        {\n            V3K_NATIVE_WAIT_SCOPE();\n            cond_.wait(mlock, [&]() { return aborted || queue_.empty(); });\n        }"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/threads/CMakeLists.txt",
+      "base_blob": "5e3330f88daa6625e8613fdb062e986be5add35b",
+      "replacements": [
+        {
+          "old": "target_include_directories(threads INTERFACE include)",
+          "new": "target_include_directories(threads INTERFACE include)\n# Queue's optional TraceLab wait guard is header-only; no utility/link cycle.\ntarget_include_directories(threads INTERFACE \"${CMAKE_CURRENT_SOURCE_DIR}/../util/include\")"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/src/switch_memory_validation.cpp",
+      "base_blob": "e805efbd80f3880ab8561fc46289dedc5dcff565",
+      "replacements": [
+        {
+          "old": "#include <util/switch_validation_schedule.h>",
+          "new": "#include <util/switch_validation_schedule.h>\n#include <util/sampled_phase_clock.h>"
+        },
+        {
+          "old": "PhasePosition position_at(uint64_t elapsed, uint64_t settle, uint64_t measure) {",
+          "new": "SampledPhaseClock sample_clock;\nstd::array<bool, 4> sample_caps{};\nPhasePosition position_at(uint64_t elapsed, uint64_t settle, uint64_t measure) {"
+        },
+        {
+          "old": "    phases.fill({});\n    phase_begin_ticks.fill(0);",
+          "new": "    phases.fill({});\n    if (options.epoch_audit) { sample_clock.reset(tick, armGetSystemTickFreq()); sample_caps.fill(false); }\n    phase_begin_ticks.fill(0);"
+        },
+        {
+          "old": "    } else {\n        const uint64_t elapsed = tick >= run_start_tick ? tick - run_start_tick : 0;",
+          "new": "    } else if (options.epoch_audit) {\n        out.phase = sample_clock.index() + 1;\n        out.policy_letter = out.phase == 2 || out.phase == 3 ? 'B' : 'A';\n        out.deduplicate = out.policy_letter == 'B';\n        out.stage = sample_clock.measuring(tick) ? Stage::Measuring : Stage::Settling;\n        out.sample_extending = sample_clock.extending(tick);\n        out.phase_samples = sample_clock.samples();\n        out.remaining_ms = sample_clock.remaining_ms(tick);\n        out.progress_per_mille = sample_clock.progress(tick);\n        out.total_ms = 52000; // upper bound; completion uses actual samples\n    } else {\n        const uint64_t elapsed = tick >= run_start_tick ? tick - run_start_tick : 0;"
+        },
+        {
+          "old": "    if (!run_start_tick || completed || aborted) return;\n    const uint64_t settle = uint64_t(options.settle_seconds) * hz;",
+          "new": "    if (!run_start_tick || completed || aborted) return;\n    if (options.epoch_audit) {\n        const auto step = sample_clock.advance(tick);\n        if (sample_clock.failed()) {\n            aborted = true; capture_active.store(false, std::memory_order_release);\n            apply_watch_phase(watch::no_index); public_state.store(10, std::memory_order_release); return;\n        }\n        auto &phase = phases[step.phase];\n        if (step.sample) {\n            ++phase.intervals; phase.ticks += step.delta;\n            phase.publish_calls += calls; phase.publish_bytes += bytes;\n            phase.dedup_calls += dedup_calls; phase.dedup_bytes += dedup_bytes;\n            if (interval_count < kMaxIntervals) intervals[interval_count++] = {step.delta, step.phase};\n            else ++overflow;\n        } else { ++phase.excluded_intervals; phase.excluded_ticks += step.delta; }\n        previous_tick = tick;\n        if (step.ended) {\n            phase.complete = true; sample_caps[step.phase] = step.capped;\n            phase_end_ticks[step.phase] = tick;\n            if (!step.complete) phase_begin_ticks[step.phase + 1] = tick;\n            apply_watch_phase(step.complete ? watch::no_index : step.phase + 1);\n            phase_entry_tick = tick;\n#if defined(__aarch64__)\n            phase_entry_tick = std::max(tick, uint64_t(armGetSystemTick()));\n#endif\n            sample_clock.defer_start(phase_entry_tick);\n        }\n        if (step.complete) {\n            deferred_import::registry.freeze_window(); completed = true;\n            capture_active.store(false, std::memory_order_release); dedup_enabled.store(false, std::memory_order_release);\n            public_state.store(9, std::memory_order_release);\n        } else {\n            dedup_enabled.store(sample_clock.index() == 1 || sample_clock.index() == 2, std::memory_order_release);\n            public_state.store(sample_clock.index() + 1, std::memory_order_release);\n        }\n        return;\n    }\n    const uint64_t settle = uint64_t(options.settle_seconds) * hz;"
+        },
+        {
+          "old": "    if (options.epoch_audit) {\n        const auto stats = epoch::domain.snapshot();",
+          "new": "    if (options.epoch_audit) {\n        std::fprintf(file, \",\\n  \\\"sample_policy\\\":{\\\"version\\\":1,\\\"minimum_samples\\\":50,\"\n            \"\\\"minimum_seconds\\\":6,\\\"maximum_seconds\\\":12,\\\"settle_seconds\\\":1,\\\"capped_phases\\\":[%s,%s,%s,%s]}\",\n            sample_caps[0]?\"true\":\"false\", sample_caps[1]?\"true\":\"false\", sample_caps[2]?\"true\":\"false\", sample_caps[3]?\"true\":\"false\");\n        const auto stats = epoch::domain.snapshot();"
+        },
+        {
+          "old": "|| phases[i].ticks < measure * 9 / 10;",
+          "new": "|| phases[i].ticks < measure * 9 / 10\n                || (options.epoch_audit && (sample_caps[i] || phases[i].ticks < measure));"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/switch_validation_status.h",
+      "base_blob": "d8f950aa3a9d4d563284584063a0fc373ac7953a",
+      "replacements": [
+        {
+          "old": "    bool epoch_audit = false;",
+          "new": "    bool epoch_audit = false, sample_extending = false;"
+        },
+        {
+          "old": "\"SCOPED HLE AUDIT | %s\"",
+          "new": "\"OUTPUT / WAIT AUDIT | %s\""
+        },
+        {
+          "old": "\"Phase %u/%u %c | %u%% | %llu s left\",\n            s.phase, s.phase_count, s.policy_letter, s.progress_per_mille / 10,\n            (unsigned long long)((s.remaining_ms + 999) / 1000)",
+          "new": "\"Phase %u/%u %c | %u%% | <=%llu s | Samples:%llu/50%s\",\n            s.phase, s.phase_count, s.policy_letter, s.progress_per_mille / 10,\n            (unsigned long long)((s.remaining_ms + 999) / 1000), (unsigned long long)s.phase_samples,\n            s.sample_extending ? \" EXTENDING\" : \"\""
+        },
+        {
+          "old": "\"28-second ABBA | Do not open menus | Hash never skipped\"",
+          "new": "\"ABBA: auto-extend for samples, maximum 52s | Full Hash\""
+        },
+        {
+          "old": "\"Enter target scene, then L+R+Y once | 28 seconds | No private GPU retest\"",
+          "new": "\"Target scene, L+R+Y once | 28-52s | No private GPU retest\""
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/run-switch-performance-tests.sh",
+      "base_blob": "5810c5ce63221fa1e9539e5196b773c96c71345c",
+      "replacements": [
+        {
+          "old": "python3 \"$ROOT/scripts/tests/test_switch_hle_ranges.py\" --require-source --cxx \"${CXX:-c++}\"",
+          "new": "python3 \"$ROOT/scripts/tests/test_switch_hle_ranges.py\" --require-source --cxx \"${CXX:-c++}\"\npython3 \"$ROOT/scripts/tests/test_switch_native_waits.py\" --require-source --cxx \"${CXX:-c++}\""
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/test_switch_epoch_audit.py",
+      "base_blob": "c1b71cb4629db7ca5f479c8f5601ba5a7cfc0c27",
+      "replacements": [
+        {
+          "old": " assert(view.stage==sv::Stage::Waiting&&view.total_ms==28000&&view.epoch_audit&&!view.heap_fault);\n assert(std::strstr(sv::make_hud_text(view,tick).title.data(),\"SCOPED HLE\"));\n assert(!sv::strict_hash());sv::request_benchmark();sv::on_render_end(tick);\n",
+          "new": " assert(view.stage==sv::Stage::Waiting&&view.total_ms==28000&&view.epoch_audit&&!view.heap_fault);\n assert(std::strstr(sv::make_hud_text(view,tick).title.data(),\"OUTPUT / WAIT\"));\n assert(!sv::strict_hash());sv::request_benchmark();sv::on_render_end(tick);\n"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/test_switch_hle_ranges.py",
+      "base_blob": "913b0ec3f75ff9c45453b599478817deb7402f14",
+      "replacements": [
+        {
+          "old": "def source_gate(required):\n    recipe=json.loads((ROOT/'patches/experiments/switch-scoped-hle.json').read_text())\n    for f in recipe['files']:\n        p=ROOT/f['path']\n        if not p.exists():\n            if required:raise RuntimeError('missing production source: '+f['path'])\n            continue\n        text=p.read_text()\n        # Some later replacements extend earlier inserted blocks. Check the\n        # final declaration markers and exact one-site insertions by extraction.\n        for op in f['replacements']:\n            needle=op['new']\n            if needle not in text and not any(needle in newer['old'] for newer in f['replacements']):\n                if required:raise RuntimeError('unapplied production contract: '+f['path']+' '+needle[:90])\n    # Review boundaries are pinned by the engine. Callbacks must precede the\n",
+          "new": "def source_gate(required):\n    if required:\n        subprocess.run(['python3', str(ROOT/'scripts/apply-switch-write-watch-hooks.py'), '--check-applied'], check=True)\n    # Review boundaries are pinned by the engine. Callbacks must precede the\n"
+        }
+      ]
+    }
+  ]
+}

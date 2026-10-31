@@ -1,0 +1,240 @@
+{
+  "base_commit": "0ee874b677368219b8a4522550d3d993894fc70a",
+  "purpose": "Actual game CPU publication grace periods plus conservative HLE/GPU boundary audit; full reference Hash, no reuse authority.",
+  "files": [
+    {
+      "path": "vita3k/util/src/switch_memory_validation.cpp",
+      "base_blob": "e805efbd80f3880ab8561fc46289dedc5dcff565",
+      "replacements": [
+        {
+          "old": "struct Options {",
+          "new": "struct Options {\n#ifdef VITA3K_SWITCH_EPOCH_AUDIT_DEFAULT\n    bool epoch_audit = true;\n#else\n    bool epoch_audit = false;\n#endif"
+        },
+        {
+          "old": "uint32_t phase_count() { if (options.heap_fault) return 0; return options.compact ?",
+          "new": "uint32_t phase_count() { if (options.heap_fault) return 0; return options.epoch_audit ? 4 : options.compact ?"
+        },
+        {
+          "old": "    if (options.compact) return compact_order[phase];",
+          "new": "    if (options.epoch_audit) return phase == 1 || phase == 2 ? CaptureMode::Exact : CaptureMode::Open;\n    if (options.compact) return compact_order[phase];"
+        },
+        {
+          "old": "    if (!file && !out.compact) return out;",
+          "new": "    if (!file && !out.compact && !out.epoch_audit) return out;"
+        },
+        {
+          "old": "            if (value == \"heap_fault\") out.heap_fault = true;",
+          "new": "            if (value == \"legacy_content_compare\" || value == \"write_audit\" || value == \"staging\") out.epoch_audit = false;\n            if (value == \"epoch_audit\") out.epoch_audit = true;\n            else if (value == \"legacy_heap_fault\") { out.epoch_audit = false; out.heap_fault = true; }\n            else if (value == \"heap_fault\") out.heap_fault = true; // Old shipped preset follows the new default."
+        },
+        {
+          "old": "    if (collector_off) out.enabled = false;",
+          "new": "    if (out.epoch_audit) {\n        out.heap_fault = out.content_compare = out.automatic = false;\n        out.compact = out.write_shadow = true;\n        out.warmup_seconds = 0; out.settle_seconds = 1; out.measure_seconds = 6;\n    }\n    if (collector_off) out.enabled = false;"
+        },
+        {
+          "old": "    options = read_options();",
+          "new": "    options = read_options();\n    epoch::enabled.store(false, std::memory_order_release);\n    if (options.enabled && options.epoch_audit) {\n        const bool idle = epoch::domain.reset();\n        live_watch.set_epoch_domain(&epoch::domain);\n        // Configuration occurs before Guest workers are started. Never enable\n        // leases halfway through a running JIT and pretend it was registered.\n        epoch::enabled.store(idle, std::memory_order_release);\n    }"
+        },
+        {
+          "old": "    live_watch.phase(watch::no_index, false);\n    content_memo.clear();",
+          "new": "    live_watch.phase(watch::no_index, false);\n    epoch::enabled.store(false, std::memory_order_release);\n    content_memo.clear();"
+        },
+        {
+          "old": "    out.write_shadow = options.write_shadow;",
+          "new": "    out.write_shadow = options.write_shadow;\n    out.epoch_audit = options.epoch_audit;"
+        },
+        {
+          "old": "        out.first_write_pages += p.first_write_pages;",
+          "new": "        out.cpu_candidates += p.cpu_candidates; out.grace_ready += p.grace_ready; out.grace_pending += p.grace_pending;\n        out.epoch_candidates += p.epoch_candidates; out.epoch_changes += p.epoch_candidate_changes;\n        out.first_write_pages += p.first_write_pages;"
+        },
+        {
+          "old": "    out.watch_failed = observation.failed;",
+          "new": "    out.watch_failed = observation.failed || (options.epoch_audit && epoch::domain.snapshot().failed);"
+        },
+        {
+          "old": "out.policy_letter = options.compact ? capture_mode_letter(phase_mode(position.index))",
+          "new": "out.policy_letter = options.epoch_audit ? (phase_mode(position.index) == CaptureMode::Exact ? 'B' : 'A') : options.compact ? capture_mode_letter(phase_mode(position.index))"
+        },
+        {
+          "old": "options.compact ? \"ABCCBA\" : options.write_shadow ? \"ABBA\" : \"ABBA/BAAB\", options.content_compare ?",
+          "new": "options.epoch_audit ? \"ABBA\" : options.compact ? \"ABCCBA\" : options.write_shadow ? \"ABBA\" : \"ABBA/BAAB\", options.epoch_audit ? \"epoch_write_audit\" : options.content_compare ?"
+        },
+        {
+          "old": "    if (options.compact && !options.content_compare) std::fputs(",
+          "new": "    if (options.compact && !options.content_compare && !options.epoch_audit) std::fputs("
+        },
+        {
+          "old": "    if (options.write_shadow) write_shadow_report(file);",
+          "new": "    if (options.write_shadow) write_shadow_report(file);\n    if (options.epoch_audit) {\n        const auto stats = epoch::domain.snapshot();\n        const auto observed = live_watch.snapshot();\n        using U = unsigned long long;\n        std::fprintf(file, \",\\n  \\\"capture_plan\\\":\\\"epoch-write-1\\\",\\n  \\\"min_phase_samples\\\":50,\"\n            \"\\n  \\\"strict_reference_scope\\\":\\\"capture_only\\\",\\n  \\\"epoch_audit\\\":{\"\n            \"\\\"absence_authorizes_hash_skip\\\":false,\\\"GPU_completion_covered\\\":false,\\\"async_HLE_covered\\\":false,\"\n            \"\\\"publications\\\":%llu,\\\"jit_entries\\\":%llu,\\\"jit_exits\\\":%llu,\\\"active_jits_at_export\\\":%llu,\"\n            \"\\\"host_entries\\\":%llu,\\\"host_exits\\\":%llu,\\\"active_host_at_export\\\":%llu,\"\n            \"\\\"gpu_boundaries\\\":%llu,\\\"failed\\\":%s,\\\"phases\\\":[\",\n            U(stats.publications), U(stats.entries), U(stats.exits), U(stats.active), U(stats.host_entries),\n            U(stats.host_exits), U(stats.host_active), U(stats.gpu_boundaries), stats.failed ? \"true\" : \"false\");\n        for (unsigned i = 0; i < 4; ++i) {\n            const auto &c = observed.phases[i];\n            std::fprintf(file, \"%s{\\\"index\\\":%u,\\\"begin_tick\\\":%llu,\\\"end_tick\\\":%llu,\"\n                \"\\\"grace_ready\\\":%llu,\\\"grace_pending\\\":%llu,\\\"cpu_candidates\\\":%llu,\\\"cpu_candidate_changes\\\":%llu,\"\n                \"\\\"epoch_candidates\\\":%llu,\\\"epoch_candidate_changes\\\":%llu,\\\"external_intervals\\\":%llu,\\\"host_busy_checks\\\":%llu}\",\n                i ? \",\" : \"\", i, U(phase_begin_ticks[i]), U(phase_end_ticks[i]), U(c.grace_ready), U(c.grace_pending),\n                U(c.cpu_candidates), U(c.cpu_candidate_changes), U(c.epoch_candidates), U(c.epoch_candidate_changes),\n                U(c.external_intervals), U(c.host_busy_checks));\n        }\n        std::fprintf(file, \"],\\\"mismatches_dropped\\\":%llu,\\\"mismatches\\\":[\", U(observed.epoch_mismatches_dropped));\n        for (uint64_t i = 0; i < observed.epoch_mismatches_stored; ++i) {\n            const auto &e = observed.epoch_mismatches[i];\n            std::fprintf(file, \"%s{\\\"phase\\\":%u,\\\"guest_address\\\":%u,\\\"resource\\\":%u,\\\"tick\\\":%llu,\"\n                \"\\\"publication\\\":%llu,\\\"external_epoch\\\":%llu,\\\"previous_hash_hex\\\":\\\"%016llx\\\",\\\"current_hash_hex\\\":\\\"%016llx\\\"}\",\n                i ? \",\" : \"\", e.phase, e.address, e.resource, U(e.tick), U(e.ticket), U(e.external), U(e.before_hash), U(e.after_hash));\n        }\n        std::fputs(\"]},\\n  \\\"guest_backing\\\":\", file);\n        direct_heap::write_json(file);\n    }"
+        },
+        {
+          "old": "    apply_watch_phase(0, true);",
+          "new": "    if (options.epoch_audit) deferred_import::registry.start_window();\n    apply_watch_phase(0, true);"
+        },
+        {
+          "old": "    if (position.complete) {\n        completed = true;",
+          "new": "    if (position.complete) {\n        if (options.epoch_audit) deferred_import::registry.freeze_window();\n        completed = true;"
+        },
+        {
+          "old": "    out.watch_failed = observation.failed || (options.epoch_audit && epoch::domain.snapshot().failed);",
+          "new": "    out.watch_failed = observation.failed || (options.epoch_audit && (epoch::domain.snapshot().failed\n        || direct_heap::state.errors.load() || deferred_import::registry.summary().errors));"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/cpu/src/dynarmic_cpu.cpp",
+      "base_blob": "aa20b8a5baadff077c7dfd173d37aa754cad87a0",
+      "replacements": [
+        {
+          "old": "            halt_reason = jit->Run();",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n            switch_validation::epoch::RunLease publication_reader;\n#endif\n            halt_reason = jit->Run();"
+        },
+        {
+          "old": "    jit->Step();",
+          "new": "    {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        switch_validation::epoch::RunLease publication_reader;\n#endif\n        jit->Step();\n    }"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/kernel/src/thread.cpp",
+      "base_blob": "ab13d4416624de724bf3a5f4a1b944517cb4c31c",
+      "replacements": [
+        {
+          "old": "#include <util/switch_tracelab.h>",
+          "new": "#include <util/switch_tracelab.h>\n#include <util/jit_epoch_gate.h>"
+        },
+        {
+          "old": "                    kernel.call_import(*cpu, nid, id);",
+          "new": "                    {\n                        // Coarse synchronous-HLE boundary, never attributed as\n                        // an actual write to a particular texture. Async work\n                        // after this scope remains explicitly unproven.\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n                        switch_validation::epoch::HostLease host_activity;\n#endif\n                        kernel.call_import(*cpu, nid, id);\n                    }"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/renderer/src/vulkan/renderer.cpp",
+      "base_blob": "4f62037e80751c16c2aedeaee34e9903fa4fe154",
+      "replacements": [
+        {
+          "old": "#include <util/switch_tracelab.h>",
+          "new": "#include <util/switch_tracelab.h>\n#include <util/jit_epoch_gate.h>"
+        },
+        {
+          "old": "void VKState::submit_general_sequence(const std::vector<vk::CommandBuffer> &commands, vk::Fence fence) {",
+          "new": "void VKState::submit_general_sequence(const std::vector<vk::CommandBuffer> &commands, vk::Fence fence) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::gpu_boundary();\n#endif"
+        },
+        {
+          "old": "vk::Result VKState::submit_and_present_general(const vk::SubmitInfo &submit_info,\n    vk::Fence fence, const vk::PresentInfoKHR &present_info) {",
+          "new": "vk::Result VKState::submit_and_present_general(const vk::SubmitInfo &submit_info,\n    vk::Fence fence, const vk::PresentInfoKHR &present_info) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::gpu_boundary();\n#endif"
+        },
+        {
+          "old": "void VKState::submit_one_time_command(OneTimeCommand command, const char *stage) {",
+          "new": "void VKState::submit_one_time_command(OneTimeCommand command, const char *stage) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::gpu_boundary();\n#endif"
+        },
+        {
+          "old": "void VKState::submit_general(const vk::SubmitInfo &submit_info, vk::Fence fence, const char *stage) {",
+          "new": "void VKState::submit_general(const vk::SubmitInfo &submit_info, vk::Fence fence, const char *stage) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::gpu_boundary();\n#endif"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/switch_validation_status.h",
+      "base_blob": "d8f950aa3a9d4d563284584063a0fc373ac7953a",
+      "replacements": [
+        {
+          "old": "    bool write_shadow = false, watch_failed = false;",
+          "new": "    bool write_shadow = false, watch_failed = false;\n    bool epoch_audit = false;\n    uint64_t grace_ready = 0, grace_pending = 0, epoch_candidates = 0, epoch_changes = 0, cpu_candidates = 0;"
+        },
+        {
+          "old": "    if (s.heap_fault && s.gpu_mirror) {",
+          "new": "    if (s.epoch_audit) {\n        const bool done = s.stage == Stage::Complete || s.stage == Stage::Blocked || s.stage == Stage::Stopped;\n        const bool interrupted = s.stage == Stage::Interrupted;\n        const bool measuring = s.stage == Stage::Measuring || s.stage == Stage::Settling;\n        text.tone = done ? (s.outcome == CaptureOutcome::Ready && !s.epoch_changes ? HudText::Tone::Ready : HudText::Tone::Warning) : HudText::Tone::Running;\n        std::snprintf(text.title.data(), text.title.size(), \"LIVE EPOCH AUDIT | %s\",\n            done ? (s.outcome == CaptureOutcome::Ready && !s.epoch_changes ? \"DONE - REPORT READY\" : \"DONE - CHECK REPORT\")\n                : interrupted ? \"INTERRUPTED - RESTART OR EXIT\" : measuring ? \"FULL HASH REFERENCE\" : \"WAITING FOR GAMEPLAY\");\n        std::snprintf(text.timing.data(), text.timing.size(), \"Phase %u/%u %c | %u%% | %llu s left\",\n            s.phase, s.phase_count, s.policy_letter, s.progress_per_mille / 10,\n            (unsigned long long)((s.remaining_ms + 999) / 1000));\n        std::snprintf(text.samples.data(), text.samples.size(), \"Grace:%llu pending:%llu | CPU:%llu epoch:%llu diff:%llu\",\n            (unsigned long long)s.grace_ready, (unsigned long long)s.grace_pending,\n            (unsigned long long)s.cpu_candidates, (unsigned long long)s.epoch_candidates, (unsigned long long)s.epoch_changes);\n        std::snprintf(text.action.data(), text.action.size(), \"%s\", done\n            ? \"EXIT GAME NORMALLY TO SAVE | Do not repeat for green\"\n            : measuring ? \"28-second ABBA | Do not open menus | Hash never skipped\"\n            : \"Enter target scene, then L+R+Y once | 28 seconds | No private GPU retest\");\n        return text;\n    }\n    if (s.heap_fault && s.gpu_mirror) {"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/run-switch-performance-tests.sh",
+      "base_blob": "5810c5ce63221fa1e9539e5196b773c96c71345c",
+      "replacements": [
+        {
+          "old": "python3 \"$ROOT/scripts/tests/test_switch_gpu_mirror.py\" --cxx \"${CXX:-c++}\"",
+          "new": "python3 \"$ROOT/scripts/tests/test_switch_gpu_mirror.py\" --cxx \"${CXX:-c++}\"\npython3 \"$ROOT/scripts/tests/test_switch_epoch_audit.py\" --cxx \"${CXX:-c++}\" --require-source"
+        }
+      ]
+    },
+    {
+      "path": "scripts/analyze-switch-capture.py",
+      "base_blob": "9cfa77fd4be7b2a7fd8ea6f58c9bfaf638844bef",
+      "replacements": [
+        {
+          "old": "def analyze(data, changed_total=None):",
+          "new": "def analyze(data, changed_total=None):\n    if data.get('capture_plan') == 'epoch-write-1':\n        import importlib.util\n        spec = importlib.util.spec_from_file_location('switch_epoch_analysis', Path(__file__).with_name('analyze-switch-epoch.py'))\n        module = importlib.util.module_from_spec(spec)\n        spec.loader.exec_module(module)\n        return module.analyze(data, changed_total)"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/switch_write_watch.h",
+      "base_blob": "d02545c2ec170ad0583850de74cf2fcd741114b4",
+      "replacements": [
+        {
+          "old": "    uint64_t changed_host_seen = 0, changed_raced = 0, discarded_tokens = 0;\n    uint64_t guard_budget_exhausted = 0;\n};\nstruct Event {\n",
+          "new": "    uint64_t changed_host_seen = 0, changed_raced = 0, discarded_tokens = 0;\n    uint64_t guard_budget_exhausted = 0;\n    uint64_t grace_pending = 0, grace_ready = 0, cpu_candidates = 0, cpu_candidate_changes = 0;\n    uint64_t epoch_candidates = 0, epoch_candidate_changes = 0, external_intervals = 0, host_busy_checks = 0;\n};\nstruct Event {\n"
+        },
+        {
+          "old": "    std::array<CacheEvent, 128> events{};\n};\nstruct Snapshot {\n    bool bound = false, failed = false, observing = false, capacity_limited = false;\n",
+          "new": "    std::array<CacheEvent, 128> events{};\n};\nstruct EpochMismatch {\n    uint32_t phase = no_index, address = 0, resource = no_index;\n    uint64_t tick = 0, ticket = 0, external = 0, before_hash = 0, after_hash = 0;\n};\nstruct Snapshot {\n    bool bound = false, failed = false, observing = false, capacity_limited = false;\n"
+        },
+        {
+          "old": "    bool persistent = false;\n    CacheLedger cache;\n};\n\n",
+          "new": "    bool persistent = false;\n    CacheLedger cache;\n    uint64_t epoch_mismatches_stored = 0, epoch_mismatches_dropped = 0;\n    std::array<EpochMismatch, 32> epoch_mismatches{};\n};\n\n"
+        },
+        {
+          "old": "        uint64_t mapping_version = 0, cpu_version = 0, host_version = 0;\n        uint64_t baseline_cpu = 0, baseline_host = 0;\n        std::vector<uint32_t> groups;\n    };\n",
+          "new": "        uint64_t mapping_version = 0, cpu_version = 0, host_version = 0;\n        uint64_t baseline_cpu = 0, baseline_host = 0;\n        epoch::Stamp baseline_publication;\n        bool baseline_external_stable = false;\n        std::vector<uint32_t> groups;\n    };\n"
+        },
+        {
+          "old": "    CacheLedger ledger_;\n    uint64_t interval_serial_ = 0;\n    static constexpr uint64_t max_watched_stores = 100000;\n    size_t edges_ = 0;\n",
+          "new": "    CacheLedger ledger_;\n    uint64_t interval_serial_ = 0;\n    epoch::Domain *domain_ = nullptr;\n    uint64_t publication_ticket_ = 0;\n    static constexpr uint64_t max_watched_stores = 100000;\n    size_t edges_ = 0;\n"
+        },
+        {
+          "old": "public:\n    auto hold() { return std::unique_lock<std::recursive_mutex>(mutex_); }\n    void set_clock(uint64_t (*fn)()) { auto lock = hold(); clock_ = fn; }\n    Page *bind(Page *raw) noexcept {\n",
+          "new": "public:\n    auto hold() { return std::unique_lock<std::recursive_mutex>(mutex_); }\n    // Set only at session bootstrap, before any Guest worker or binding.\n    void set_epoch_domain(epoch::Domain *domain) { auto lock = hold(); domain_ = domain; publication_ticket_ = 0; }\n    void set_clock(uint64_t (*fn)()) { auto lock = hold(); clock_ = fn; }\n    Page *bind(Page *raw) noexcept {\n"
+        },
+        {
+          "old": "        groups_.clear(); resources_.clear(); stats_ = {}; phase_ = no_index; event_kinds_ = {};\n        collecting_ = false; persistent_ = false; edges_ = 0; ledger_ = {}; ++interval_serial_;\n    }\n    void detach(Page *raw) {\n",
+          "new": "        groups_.clear(); resources_.clear(); stats_ = {}; phase_ = no_index; event_kinds_ = {};\n        collecting_ = false; persistent_ = false; edges_ = 0; ledger_ = {}; ++interval_serial_;\n        domain_ = nullptr; publication_ticket_ = 0;\n    }\n    void detach(Page *raw) {\n"
+        },
+        {
+          "old": "                if (g.armed && g.epoch == stats_.epoch) store(writes_.get(), page, nullptr);\n            }\n        } catch (...) { fail(); }\n    }\n",
+          "new": "                if (g.armed && g.epoch == stats_.epoch) store(writes_.get(), page, nullptr);\n            }\n            if (domain_ && stats_.observing) publication_ticket_ = domain_->publish();\n        } catch (...) { fail(); }\n    }\n"
+        },
+        {
+          "old": "                r.covered = std::all_of(r.groups.begin(), r.groups.end(), [&](uint32_t g) { return groups_[g].epoch == stats_.epoch; });\n            }\n            stats_.observing = true;\n        } catch (...) { fail(); }\n",
+          "new": "                r.covered = std::all_of(r.groups.begin(), r.groups.end(), [&](uint32_t g) { return groups_[g].epoch == stats_.epoch; });\n            }\n            // Only a later Run/Step entry or the exit of every earlier run\n            // closes the stale-loaded-PTE window. No renderer-side waiting.\n            publication_ticket_ = domain_ ? domain_->publish() : 0;\n            stats_.observing = true;\n        } catch (...) { fail(); }\n"
+        },
+        {
+          "old": "            }\n            const auto &r = resources_[it->second];\n            return {interval_serial_, it->second, r.mapping_version, r.cpu_version, r.host_version};\n        } catch (...) { fail(); return {}; }\n    }\n",
+          "new": "            }\n            const auto &r = resources_[it->second];\n            return {interval_serial_, it->second, r.mapping_version, r.cpu_version, r.host_version,\n                domain_ ? domain_->stamp(publication_ticket_) : epoch::Stamp{}};\n        } catch (...) { fail(); return {}; }\n    }\n"
+        },
+        {
+          "old": "        audit.stable = r.cpu_version == token.cpu_version && r.host_version == token.host_version;\n        audit.changed = r.baseline && r.hash != hash;\n        audit.reason = r.baseline ? HashReason::Unchanged : HashReason::Baseline;\n        if (audit.changed) {\n            ++count().changed;\n            if (!audit.stable) { ++count().changed_raced; audit.reason = HashReason::Raced; }\n            else if (!stats_.observing || !r.covered) { ++count().changed_uncovered; audit.reason = HashReason::Uncovered; }\n            else if (r.cpu_version != r.baseline_cpu) { ++count().changed_cpu_seen; audit.reason = HashReason::CpuWrite; }\n",
+          "new": "        audit.stable = r.cpu_version == token.cpu_version && r.host_version == token.host_version;\n        audit.changed = r.baseline && r.hash != hash;\n        const auto current = domain_ ? domain_->stamp(publication_ticket_) : epoch::Stamp{};\n        const bool grace = domain_ && token.publication.ticket == publication_ticket_\n            && token.publication.drained && current.drained && current.valid;\n        if (domain_ && stats_.observing && r.covered) {\n            if (grace) ++count().grace_ready; else ++count().grace_pending;\n            if (current.hle_active || token.publication.hle_active) ++count().host_busy_checks;\n            const bool candidate = grace && persistent_ && r.baseline && r.baseline_publication.drained\n                && r.baseline_publication.ticket == publication_ticket_ && audit.stable\n                && r.cpu_version == r.baseline_cpu && r.host_version == r.baseline_host;\n            if (candidate) {\n                ++count().cpu_candidates;\n                if (audit.changed) ++count().cpu_candidate_changes;\n                // Coarse boundaries are exclusions, NOT proof that an HLE or\n                // GPU command wrote this resource. No completion/IPC claim.\n                const bool external = r.baseline_external_stable && !current.hle_active && !token.publication.hle_active\n                    && !r.baseline_publication.hle_active\n                    && current.external == token.publication.external\n                    && current.external == r.baseline_publication.external;\n                if (external) {\n                    ++count().epoch_candidates;\n                    if (audit.changed) {\n                        ++count().epoch_candidate_changes;\n                        if (stats_.epoch_mismatches_stored < stats_.epoch_mismatches.size())\n                            stats_.epoch_mismatches[stats_.epoch_mismatches_stored++] = {\n                                phase_, r.address, token.resource, clock_ ? clock_() : 0,\n                                publication_ticket_, current.external, r.hash, hash};\n                        else ++stats_.epoch_mismatches_dropped;\n                    }\n                } else ++count().external_intervals;\n            }\n        }\n        audit.reason = r.baseline ? HashReason::Unchanged : HashReason::Baseline;\n        if (audit.changed) {\n            ++count().changed;\n            if (!audit.stable || (domain_ && stats_.observing && r.covered && !grace)) { ++count().changed_raced; audit.reason = HashReason::Raced; }\n            else if (!stats_.observing || !r.covered) { ++count().changed_uncovered; audit.reason = HashReason::Uncovered; }\n            else if (r.cpu_version != r.baseline_cpu) { ++count().changed_cpu_seen; audit.reason = HashReason::CpuWrite; }\n"
+        },
+        {
+          "old": "            }\n        }\n        r.hash = hash; r.baseline = audit.stable;\n        r.baseline_cpu = r.cpu_version; r.baseline_host = r.host_version;\n",
+          "new": "            }\n        }\n        r.baseline_external_stable = current.valid && token.publication.valid\n            && !current.hle_active && !token.publication.hle_active\n            && current.external == token.publication.external;\n        r.baseline_publication = current;\n        r.baseline_publication.drained = grace && audit.stable;\n        r.hash = hash; r.baseline = audit.stable;\n        r.baseline_cpu = r.cpu_version; r.baseline_host = r.host_version;\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/switch_write_watch_api.h",
+      "base_blob": "e5732f37a80cd981997b3657d4d593a3a4b9987f",
+      "replacements": [
+        {
+          "old": "#include <cstdint>\n#include <mutex>\nnamespace switch_validation {\nnamespace watch {\n",
+          "new": "#include <cstdint>\n#include <mutex>\n#include <util/jit_epoch_gate.h>\nnamespace switch_validation {\nnamespace watch {\n"
+        },
+        {
+          "old": "    uint32_t resource = ~0u;\n    uint64_t mapping_version = 0, cpu_version = 0, host_version = 0;\n};\nenum class HashReason : uint32_t { Missing, Baseline, Unchanged, CpuWrite, HostNotice, Unobserved, Uncovered, Raced };\n",
+          "new": "    uint32_t resource = ~0u;\n    uint64_t mapping_version = 0, cpu_version = 0, host_version = 0;\n    epoch::Stamp publication;\n};\nenum class HashReason : uint32_t { Missing, Baseline, Unchanged, CpuWrite, HostNotice, Unobserved, Uncovered, Raced };\n"
+        }
+      ]
+    }
+  ]
+}

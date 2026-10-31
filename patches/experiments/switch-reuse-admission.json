@@ -1,0 +1,34 @@
+{
+  "base_commit": "7c075e34ca738596915c67ca41390dc0eb3f70ff",
+  "purpose": "Do not deny reuse for an idle network service. Preserve denial before native work; show and stop zero-treatment runs.",
+  "files": [
+    {
+      "path": "vita3k/modules/SceNetCtl/SceNetCtl.cpp",
+      "base_blob": "51a6c781dad6ddfa82d75d87ce29c235e587bc23",
+      "replacements": [
+        {
+          "old": "static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::resource_deny(32);\n#endif\n",
+          "new": "static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {"
+        },
+        {
+          "old": "        LOG_INFO(\"Adhoc thread: starting network loop\");",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        // sceNetCtlInit creates this worker even without adhoc use. Waiting\n        // touches host state only; deny BEFORE actual native network work.\n        // Sticky until session end, including disconnect/reconnect/restart.\n        switch_validation::resource_deny(32);\n#endif\n        LOG_INFO(\"Adhoc thread: starting network loop\");"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/switch_validation_status.h",
+      "base_blob": "d8f950aa3a9d4d563284584063a0fc373ac7953a",
+      "replacements": [
+        {
+          "old": "    uint64_t reuse_calls = 0, reuse_bytes = 0, reuse_audits = 0, reuse_diffs = 0;",
+          "new": "    uint64_t reuse_calls = 0, reuse_bytes = 0, reuse_audits = 0, reuse_diffs = 0;\n    uint32_t reuse_stop_reason = 0, reuse_blockers = 0;"
+        },
+        {
+          "old": "        std::snprintf(text.action.data(), text.action.size(), \"%s\",done ? \"EXIT NORMALLY TO SAVE | Submit this run; no repeat required\" : waiting ? \"Enter target scene; L+R+Y once | Automatic 6 stages\" : \"One run: stock, audit, reuse, reuse, audit, stock\");\n        return text;",
+          "new": "        std::snprintf(text.action.data(), text.action.size(), \"%s\",done ? \"EXIT NORMALLY TO SAVE | Submit this run; no repeat required\" : waiting ? \"Enter target scene; L+R+Y once | Automatic 6 stages\" : \"One run: stock, audit, reuse, reuse, audit, stock\");\n        if (done && s.reuse_stop_reason && !bad) {\n            const char *reason = s.reuse_stop_reason == 2 ? \"NO AUDITABLE INPUTS\"\n                : s.reuse_stop_reason == 3 ? \"NO HASH SAVED\"\n                : (s.reuse_blockers & 32) ? \"NATIVE NETWORK ACTIVE\"\n                : (s.reuse_blockers & 1) ? \"SHADER BUFFER STORES\"\n                : (s.reuse_blockers & 2) ? \"DEBUGGER ACTIVE\"\n                : (s.reuse_blockers & 4) ? \"TRACKING CAPACITY\"\n                : (s.reuse_blockers & 8) ? \"INVALID SOURCE RANGE\"\n                : (s.reuse_blockers & 16) ? \"UNSUPPORTED BACKEND\" : \"SOURCE POLICY BLOCKED\";\n            std::snprintf(text.title.data(), text.title.size(), \"RESOURCE REUSE | DONE - NO TREATMENT\");\n            std::snprintf(text.action.data(), text.action.size(), \"%s (mask=0x%x) | EXIT NORMALLY TO SAVE\", reason, s.reuse_blockers);\n        }\n        return text;"
+        }
+      ]
+    }
+  ]
+}

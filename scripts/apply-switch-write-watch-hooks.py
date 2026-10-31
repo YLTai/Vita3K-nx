@@ -14,6 +14,23 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RECIPE = ROOT / 'patches/experiments/switch-live-write-watch.json'
+RECIPES = (RECIPE, ROOT / 'patches/experiments/switch-heap-fault.json',
+           ROOT / 'patches/experiments/switch-direct-heap.json',
+           ROOT / 'patches/experiments/switch-deferred-import.json',
+           ROOT / 'patches/experiments/switch-mirror-shader.json',
+           ROOT / 'patches/experiments/switch-epoch-audit.json',
+           ROOT / 'patches/experiments/switch-scoped-hle.json',
+           ROOT / 'patches/experiments/switch-native-waits.json',
+           ROOT / 'patches/experiments/switch-gxm-contracts.json',
+           ROOT / 'patches/experiments/switch-host-outputs.json',
+           ROOT / 'patches/experiments/switch-uniform-outputs.json',
+           ROOT / 'patches/experiments/switch-callback-batch.json',
+           ROOT / 'patches/experiments/switch-declaration-transactions.json',
+           ROOT / 'patches/experiments/switch-declaration-resolution.json',
+           ROOT / 'patches/experiments/switch-resource-integration.json',
+           ROOT / 'patches/experiments/switch-reuse-admission.json',
+           ROOT / 'patches/experiments/switch-scene-reuse.json',
+           ROOT / 'patches/experiments/switch-resource-play.json')
 
 
 def blob_sha(data):
@@ -34,9 +51,21 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check-applied', action='store_true')
     args = parser.parse_args()
-    recipe = json.loads(RECIPE.read_text())
+    # An ordered extension must pin the SAME original blob. Merge anchors and
+    # transform once from that original; never patch an arbitrary intermediate.
+    merged = {}
+    for recipe in RECIPES:
+        for item in json.loads(recipe.read_text())['files']:
+            key = item['path']
+            if key in merged:
+                if merged[key]['base_blob'] != item['base_blob']:
+                    raise ValueError(f'{key}: extension changed the original blob pin')
+                merged[key]['replacements'].extend(item['replacements'])
+            else:
+                merged[key] = dict(item, replacements=list(item['replacements']))
+    specs = list(merged.values())
     pending, provenance = [], []
-    for spec in recipe['files']:
+    for spec in specs:
         rel = Path(spec['path'])
         if rel.is_absolute() or '..' in rel.parts:
             raise ValueError('unsafe recipe path')
@@ -60,8 +89,9 @@ def main():
     if not args.check_applied:
         dest = ROOT / 'build-switch-preflight/write-watch-hooks.json'
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(json.dumps(dict(recipe_sha256=hashlib.sha256(RECIPE.read_bytes()).hexdigest(),
-                                       files=provenance), indent=2) + '\n')
+        dest.write_text(json.dumps(dict(recipe_sha256=hashlib.sha256(b''.join(p.read_bytes() for p in RECIPES)).hexdigest(),
+            recipes=[dict(path=p.relative_to(ROOT).as_posix(), sha256=hashlib.sha256(p.read_bytes()).hexdigest()) for p in RECIPES],
+            files=provenance), indent=2) + '\n')
     print('Live write-watch hooks: exact pinned source and compiled identities verified')
 
 
