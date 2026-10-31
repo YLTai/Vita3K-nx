@@ -20,7 +20,7 @@ class SourcePolicy {
     uint32_t deny_ = 0;
     uint64_t serial_ = 1, generation_ = 1, events_ = 0;
 public:
-    enum : uint32_t { ShaderStore = 1, Debugger = 2, Capacity = 4, InvalidRange = 8, Backend = 16 };
+    enum : uint32_t { ShaderStore = 1, Debugger = 2, Capacity = 4, InvalidRange = 8, Backend = 16, NativeNetwork = 32 };
     void reset() noexcept {
         std::lock_guard lock(mutex_);
         ++serial_; ++generation_; used_ = 0; events_ = 0; deny_ = 0; backend_ = false;
@@ -29,6 +29,10 @@ public:
     void backend(bool supported) noexcept {
         std::lock_guard lock(mutex_); backend_ = supported;
         if (!supported) deny_ |= Backend;
+    }
+    uint32_t blockers() const noexcept {
+        std::lock_guard lock(mutex_);
+        return deny_ | (backend_ ? 0u : uint32_t(Backend));
     }
     void deny(uint32_t why) noexcept { std::lock_guard lock(mutex_); deny_ |= why; }
     void veto(const void *host, uint64_t bytes) noexcept {
