@@ -76,6 +76,8 @@ struct Counters {
     uint64_t reused_calls = 0, reused_bytes = 0;
     uint64_t audits = 0, audit_bytes = 0, mismatches = 0, raced_hashes = 0;
     uint64_t exceptions = 0;
+    // Multi-label differences on a VersionChanged miss, not exclusive shares.
+    std::array<uint64_t, 9> version_fields{};
     std::array<uint64_t, size_t(Reason::Count)> fallback{};
 };
 struct Counterexample {
@@ -119,6 +121,18 @@ template<size_t Capacity = 1024> class HashCache {
             ^ (in.palette_bytes << 17) ^ (in.hash_domain << 7);
         x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33;
         return size_t(x) & (Capacity - 1);
+    }
+    size_t locate(const Input &input) const noexcept {
+        const auto first = bucket(input);
+        for (size_t n = 0; n < Capacity; ++n) {
+            const auto slot = (first + n) & (Capacity - 1);
+            if (!entries_[slot].used || entries_[slot].input == input) return slot;
+        }
+        return Capacity; // Full table: reference fallback, never evict audit proof.
+    }
+    static void invalidate(Entry &e) noexcept {
+        e.evidence = {}; e.hash = 0; e.audited = false;
+        // Preserve e.input/e.used so a probe chain has no deletion holes.
     }
     template<class F> void count(F &&fn) noexcept {
         fn(report_.total);
@@ -165,7 +179,7 @@ public:
         const auto before = snapshot();
         uint64_t session = 0, phase_serial = 0, expected = 0;
         bool candidate = false, inherited_audit = false;
-        size_t slot = 0;
+        size_t slot = Capacity;
         Reason why = Reason::None;
         Mode mode;
         {
@@ -176,18 +190,30 @@ public:
             else if (!input.valid()) why = Reason::InvalidInput;
             else why = before.rejection();
             if (why == Reason::None) {
-                slot = bucket(input);
-                auto &e = entries_[slot];
-                const bool identity = e.used && e.input == input
-                    && e.evidence.allocation == before.allocation
-                    && e.evidence.lifetime == before.lifetime
-                    && e.evidence.mapping == before.mapping;
-                inherited_audit = identity && e.audited;
-                candidate = identity && e.evidence == before;
-                if (candidate) expected = e.hash;
-                else why = !e.used ? Reason::Cold : identity ? Reason::VersionChanged : Reason::Capacity;
-                if (candidate && mode == Mode::Performance && !e.audited) {
-                    candidate = false; why = Reason::NotAudited;
+                slot = locate(input);
+                if (slot == Capacity) why = Reason::Capacity;
+                else {
+                    auto &e = entries_[slot];
+                    const bool identity = e.used && e.input == input
+                        && e.evidence.allocation == before.allocation
+                        && e.evidence.lifetime == before.lifetime
+                        && e.evidence.mapping == before.mapping;
+                    inherited_audit = identity && e.audited;
+                    candidate = identity && e.evidence == before;
+                    if (candidate) expected = e.hash;
+                    else why = !e.used ? Reason::Cold : identity ? Reason::VersionChanged : Reason::StaleLifetime;
+                    if (why == Reason::VersionChanged) {
+                        const std::array<bool, 9> changed{e.evidence.cpu != before.cpu,
+                            e.evidence.host != before.host, e.evidence.host_notice != before.host_notice,
+                            e.evidence.async != before.async, e.evidence.gpu != before.gpu,
+                            e.evidence.unknown != before.unknown, e.evidence.publication != before.publication,
+                            e.evidence.external_host != before.external_host,
+                            e.evidence.external_lifetime != before.external_lifetime};
+                        count([&](Counters &c) { for (size_t i = 0; i < changed.size(); ++i) c.version_fields[i] += changed[i]; });
+                    }
+                    if (candidate && mode == Mode::Performance && !e.audited) {
+                        candidate = false; why = Reason::NotAudited;
+                    }
                 }
             }
             if (why != Reason::None && why != Reason::Cold && why != Reason::VersionChanged
@@ -195,8 +221,9 @@ public:
                 // A withdrawn coverage contract must not become reusable again
                 // just by restoring its old bits. Discard its audit and baseline
                 // even if the source adapter forgot to advance an epoch.
-                auto &old = entries_[bucket(input)];
-                if (old.used && old.input == input) {
+                const auto old_slot = locate(input);
+                if (old_slot < Capacity && entries_[old_slot].used) {
+                    auto &old = entries_[old_slot];
                     const bool same_live_input = old.evidence.allocation == before.allocation
                         && old.evidence.lifetime == before.lifetime && old.evidence.mapping == before.mapping;
                     // A tracked in-flight operation revokes the hash baseline,
@@ -206,7 +233,7 @@ public:
                     if (why == Reason::Busy && same_live_input
                         && (before.coverage & CompleteCoverage) == CompleteCoverage)
                         old.evidence.publication = 0;
-                    else old = {};
+                    else invalidate(old);
                 }
             }
             if (mode == Mode::Performance && candidate) {
@@ -234,13 +261,13 @@ public:
             std::lock_guard lock(mutex_);
             if (session != session_ || phase_serial != phase_serial_ || !report_.enabled || report_.failed)
                 return actual;
-            if (!input.valid() || before.rejection() != Reason::None || after.rejection() != Reason::None)
+            if (slot == Capacity || !input.valid() || before.rejection() != Reason::None || after.rejection() != Reason::None)
                 return actual;
             if (!(before == after)) {
                 count([](Counters &c) { ++c.raced_hashes; });
                 fallback(Reason::ConcurrentChange);
-                auto &old = entries_[bucket(input)];
-                if (old.used && old.input == input) old = {};
+                auto &old = entries_[slot];
+                if (old.used && old.input == input) invalidate(old);
                 return actual; // Do not seed a baseline from a raced reference.
             }
             bool audited = inherited_audit;

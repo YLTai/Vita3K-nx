@@ -30,7 +30,8 @@ extern "C" uint64_t XXH3_64bits(const void *,size_t);
 #endif
 namespace sv=switch_validation;
 static uint64_t reads=0;
-uint64_t hash(const void*p,size_t n){++reads;return XXH3_64bits(p,n);}
+static void (*during_hash)()=nullptr;
+uint64_t hash(const void*p,size_t n){++reads;if(during_hash){auto f=during_hash;during_hash=nullptr;f();}return XXH3_64bits(p,n);}
 
 #include <util/switch_content_compare.h>
 namespace switch_validation {
@@ -110,11 +111,15 @@ int main(int argc,char**argv){
  for(unsigned frame=0;frame<700;++frame){
   auto view=sv::status_snapshot();if(view.stage==sv::Stage::Complete)break;
   const unsigned phase=view.phase-1;if(phase!=old){old=phase;n=0;}
-  assert(view.resource_reuse&&view.phase_count==6);assert(sv::strict_hash()==(phase==1||phase==4));
+  assert(view.resource_reuse&&view.phase_count==6);assert(!sv::strict_hash()); // all modes use the production scene memo
   const auto title=sv::make_hud_text(view,tick);assert(std::strstr(title.title.data(),"RESOURCE REUSE"));
   if(phase==2&&n==5){uint32_t v=7;assert(!writes[2]&&!writes[8]);assert(sv::live_write(raw.get(),32768,&v,4)==sv::watch::Access::Complete);}
   if(phase==3&&n==5){sv::epoch::HostOutputLease write(data+3,{1,true});data[3]^=4;const auto before=reads;assert(get()==expected()&&reads>before);}
   if(phase==3&&n==10){sv::epoch::HostLease unknown;data[20]^=9;}
+  if(scenario=="race"&&phase==2&&n==12){
+   {sv::epoch::HostLease before_scan;}
+   during_hash=[](){sv::epoch::HostLease during_scan;};
+  }
   if(scenario=="missing"&&phase==4&&n==15){data[39]^=11;injected=true;}
   if(scenario=="veto"&&phase==2&&n==12){sv::resource_gpu_write(data,4096);saw_veto=true;}
   if(scenario=="remap"&&phase==3&&n==18){sv::live_publish_page(raw.get(),2,nullptr);sv::live_publish_page(raw.get(),2,reinterpret_cast<uint8_t*>(uintptr_t(data)-8192));}
@@ -194,7 +199,7 @@ def main():
   cmd=[a.cxx,'-std=c++20','-O0' if a.sanitize else '-O2','-Wall','-Wextra','-Werror','-pthread','-D__SWITCH__','-DVITA3K_SWITCH_TRACELAB=1','-DVITA3K_SWITCH_RESOURCE_REUSE_DEFAULT=1','-DVITA3K_SWITCH_CLEAN_CAPTURE_DEFAULT=1','-DVITA3K_SWITCH_EPOCH_AUDIT_DEFAULT=1','-I'+str(inc),'-I'+str(ROOT/'vita3k/util/include'),str(d/'main.cpp'),str(ROOT/'vita3k/util/src/switch_memory_validation.cpp'),*hash_flags,'-o',str(d/'controller')]
   if a.sanitize:cmd+=['-fsanitize=address,undefined','-fno-omit-frame-pointer']
   subprocess.run(cmd,check=True,timeout=90)
-  for scenario in ['clean','missing','veto','remap','denied','slow','net-active','blocked-start','no-audit','no-reuse']:
+  for scenario in ['clean','missing','veto','remap','denied','slow','net-active','blocked-start','no-audit','no-reuse','race']:
    out=d/scenario;out.mkdir();subprocess.run([str(d/'controller'),str(out),scenario],check=True,timeout=45)
    data=json.loads((out/'report/memory-validation.json').read_text());report=analyzer.analyze(data)
    if scenario=='clean':
@@ -205,6 +210,10 @@ def main():
     assert not report['exclusions'],report
     if scenario in ('denied','net-active','blocked-start','no-audit','no-reuse'):assert not report['comparison_eligible'],report
    if scenario=='net-active':blocked=data
+   if scenario=='race':
+    assert report['comparison_eligible'] and report['actual_work']['raced_hashes']>0,report
+    bad=copy.deepcopy(data);bad['resource_reuse']['phases'][2]['work']['fallback'][8]+=1
+    assert analyzer.analyze(bad)['exclusions']
    print(scenario,report['actual_work']['reused_calls'],report['actual_work']['reference_calls'],flush=True)
   if not a.sanitize:
    # Both errors compile. They must fail at runtime, not merely a source grep.

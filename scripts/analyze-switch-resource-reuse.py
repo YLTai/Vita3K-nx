@@ -13,13 +13,13 @@ def analyze(data):
     def check(ok,msg):
         if not ok:errors.append(msg)
     def integer(x):return type(x) is int and 0<=x<2**64
-    check(data.get('capture_plan')=='resource-reuse-1' and type(r.get('version')) is int and r.get('version') in (1,2),'Wrong integration schema')
+    check(data.get('capture_plan')=='resource-reuse-1' and type(r.get('version')) is int and r.get('version') in (1,2,3),'Wrong integration schema')
     check(data.get('controls_complete') is True and data.get('tests_dropped')==0,'Automatic controls missing/failed/dropped')
     tests=data.get('tests',[])
     check(all(t.get('status') in ('pass','skip') for t in tests),'Automatic control failure')
     check(sum(t.get('suite')=='resource_reuse' and t.get('name')=='dynamic_core' and t.get('status')=='pass' for t in tests)==1,'Missing/duplicate private core control')
     check(r.get('production_path') is True and r.get('hash_before_reuse_audit') is True and r.get('GPU_write_sources_reused') is False,'Invalid source authority')
-    check(r.get('scene_memo')=='stock_and_performance_only','Unfair stock/reuse memo configuration')
+    check(r.get('scene_memo')==('all_stages' if r.get('version')==3 else 'stock_and_performance_only'),'Unfair stock/reuse memo configuration')
     check(r.get('completed') is True and r.get('interrupted') is False and r.get('failed') is False,'Incomplete/failed/interrupted run')
     hz=r.get('timebase_hz',0);check(integer(hz) and hz>0 and hz==data.get('timebase_hz'),'Invalid timebase')
     check([p.get('mode') for p in rows]==ORDER and [p.get('index') for p in rows]==list(range(6)),'Wrong six-stage order')
@@ -32,7 +32,9 @@ def analyze(data):
         fb=c.get('fallback',[])
         check(isinstance(fb,list) and len(fb)==len(FALLBACK) and all(integer(x) for x in fb),f'Phase {i}: invalid fallback counts')
         if isinstance(fb,list) and len(fb)==len(FALLBACK) and all(integer(x) for x in fb):
-            check(fb[0]==0 and sum(fb)<=c['reference_calls'],f'Phase {i}: impossible fallback count')
+            # A pre-scan miss and a detected in-scan race describe the SAME call.
+            check(fb[0]==0 and fb[8]==c['raced_hashes'] and c['raced_hashes']<=c['reference_calls']
+                  and sum(fb)-fb[8]<=c['reference_calls'],f'Phase {i}: impossible fallback count')
             fallback=[a+b for a,b in zip(fallback,fb)]
         check(c['calls']==c['reference_calls']+c['reused_calls'],f'Phase {i}: calls do not reconcile')
         check(c['audits']<=c['reference_calls'] and c['audit_bytes']<=c['reference_bytes'],f'Phase {i}: impossible audit counts')
@@ -45,6 +47,18 @@ def analyze(data):
         if not q:warnings.append(f'Phase {i}: insufficient comparable samples')
     check(sums=={k:r.get('total',{}).get(k) for k in FIELDS},'Total/per-stage ledger mismatch')
     check(fallback==r.get('total',{}).get('fallback'),'Fallback total/per-stage mismatch')
+    if r.get('version')==3:
+        fields=[0]*9
+        for i,p in enumerate(rows):
+            v=p.get('work',{}).get('version_fields')
+            valid=isinstance(v,list) and len(v)==9 and all(integer(x) for x in v)
+            check(valid,f'Phase {i}: missing version-change evidence')
+            if valid:
+                n=p['work']['fallback'][6]
+                check(all(x<=n for x in v) and sum(v)>=n,f'Phase {i}: impossible version-change evidence')
+                fields=[a+b for a,b in zip(fields,v)]
+        check(fields==r.get('total',{}).get('version_fields'),'Version-field total/per-stage mismatch')
+
     examples=r.get('counterexamples',[])
     check(isinstance(examples,list) and integer(r.get('counterexamples_dropped')) and len(examples)+r.get('counterexamples_dropped',0)==sums['mismatches'],'Counterexample ledger mismatch')
     check(r.get('minimum_samples')==32 and r.get('minimum_seconds')==4 and r.get('maximum_seconds')==8,'Wrong measurement schedule')
@@ -55,7 +69,7 @@ def analyze(data):
     check(policy_mask_valid,'Invalid global policy mask')
     termination=r.get('termination',{})
     early=False
-    if r.get('version')==2:
+    if r.get('version') in (2,3):
         check(isinstance(termination,dict),'Missing v2 termination record')
         if not isinstance(termination,dict):termination={}
         why,phase,mask=termination.get('reason'),termination.get('phase'),termination.get('denials')
@@ -87,4 +101,4 @@ def analyze(data):
     if not errors and len(qualified)==6 and all(qualified) and treatment:
         def pooled(indices):return sum(rows[i]['samples'] for i in indices)*hz/sum(rows[i]['ticks'] for i in indices)
         a,b=pooled((0,5)),pooled((2,3));comparison={'stock_loops_per_second':a,'reuse_loops_per_second':b,'throughput_change_percent':100*(b/a-1),'ms_per_loop_change':1000/b-1000/a,'stock_end_start_drift_percent':100*((rows[5]['samples']/rows[5]['ticks'])/(rows[0]['samples']/rows[0]['ticks'])-1)}
-    return dict(capture_plan='resource-reuse-1',evidence_valid=not errors,comparison_eligible=comparison is not None,comparison=comparison,actual_work=sums,source_policy=policy,denial_reasons=labels,termination=termination if r.get('version')==2 else None,fallback_counts=dict(zip(FALLBACK,fallback)),exclusions=errors,warnings=warnings+['Only the bounded source profile is enabled. No GPU-written inputs are reused.','STOCK and REUSE share baseline instrumentation. This is not a comparison to an uninstrumented build.','Counters include settling; timing excludes settling and audit phases. Logical bytes are not DRAM bandwidth.','Zero mismatch in this session is not a claim of all-game correctness.'])
+    return dict(capture_plan='resource-reuse-1',evidence_valid=not errors,comparison_eligible=comparison is not None,comparison=comparison,actual_work=sums,source_policy=policy,denial_reasons=labels,termination=termination if r.get('version') in (2,3) else None,fallback_counts=dict(zip(FALLBACK,fallback)),exclusions=errors,warnings=warnings+['Only the bounded source profile is enabled. No GPU-written inputs are reused.','STOCK and REUSE share baseline instrumentation. This is not a comparison to an uninstrumented build.','Counters include settling; timing excludes settling and audit phases. Logical bytes are not DRAM bandwidth.','Zero mismatch in this session is not a claim of all-game correctness.'])

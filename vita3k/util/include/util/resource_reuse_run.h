@@ -90,11 +90,13 @@ public:
             (unsigned long long)c.reused_calls,(unsigned long long)c.reused_bytes,(unsigned long long)c.audits,
             (unsigned long long)c.audit_bytes,(unsigned long long)c.mismatches,(unsigned long long)c.raced_hashes,(unsigned long long)c.exceptions);
         for(size_t i=0;i<c.fallback.size();++i) { std::fprintf(f,"%s%llu",i?",":"",(unsigned long long)c.fallback[i]); }
+        std::fputs("],\"version_fields\":[",f);
+        for(size_t i=0;i<c.version_fields.size();++i) std::fprintf(f,"%s%llu",i?",":"",(unsigned long long)c.version_fields[i]);
         std::fputs("]}",f);
     }
     void write(FILE *f) const {
         const auto r=cache.report();
-        std::fprintf(f,"{\"version\":2,\"production_path\":true,\"completed\":%s,\"failed\":%s,\"interrupted\":%s,\"run_id\":%u,\"hash_before_reuse_audit\":true,\"GPU_write_sources_reused\":false,\"scene_memo\":\"stock_and_performance_only\",\"timebase_hz\":%llu,\"minimum_samples\":%u,\"minimum_seconds\":%u,\"maximum_seconds\":%u,\"total\":",
+        std::fprintf(f,"{\"version\":3,\"production_path\":true,\"completed\":%s,\"failed\":%s,\"interrupted\":%s,\"run_id\":%u,\"hash_before_reuse_audit\":true,\"GPU_write_sources_reused\":false,\"scene_memo\":\"all_stages\",\"timebase_hz\":%llu,\"minimum_samples\":%u,\"minimum_seconds\":%u,\"maximum_seconds\":%u,\"total\":",
             done?"true":"false",failure||r.failed?"true":"false",interrupted?"true":"false",run_id,(unsigned long long)hz_,min_samples,min_seconds,max_seconds);
         counts(f,r.total);
         std::fprintf(f,",\"termination\":{\"reason\":\"%s\",\"phase\":%u,\"denials\":%u}", stop_name(stop_reason), stop_phase, stop_denials);

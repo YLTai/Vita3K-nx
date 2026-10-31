@@ -7,7 +7,7 @@ namespace switch_validation::epoch {
 template<class Context, class Memory, class ContextType>
 bool declare_gxm_context(Context *context, const Memory &mem,
     std::initializer_list<const char *> roots, bool commands,
-    ContextType immediate_type, uint64_t command_bytes) {
+    ContextType immediate_type, uint64_t command_bytes, HostSpan extra = {}) {
     if (!enabled.load(std::memory_order_acquire) || !context) return false;
     HostSpan ring;
     if (commands) {
@@ -29,6 +29,7 @@ bool declare_gxm_context(Context *context, const Memory &mem,
     }
     // Immediate commands can be constructed inside the Guest VDM allocation,
     // not only in the host pool. The full ring also includes previous next links.
-    return declare_outputs(roots, {{context, sizeof(*context)}, ring});
+    if (!extra.valid()) return false;
+    return declare_outputs(roots, {{context, sizeof(*context)}, ring, extra});
 }
 } // namespace switch_validation::epoch
