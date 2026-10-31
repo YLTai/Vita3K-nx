@@ -1,0 +1,160 @@
+{
+  "base_commit": "039da60db5252b83dfa068808e450dfef023ad8a",
+  "purpose": "Continuous bounded-profile reuse; unchanged benchmark and writer admission",
+  "files": [
+    {
+      "path": "vita3k/util/include/util/switch_write_watch.h",
+      "base_blob": "d02545c2ec170ad0583850de74cf2fcd741114b4",
+      "replacements": [
+        {
+          "old": "    void open_all() {",
+          "new": "    bool refresh_pending_ = false;\n    void open_all() {"
+        },
+        {
+          "old": "        domain_ = nullptr; publication_ticket_ = 0;",
+          "new": "        domain_ = nullptr; publication_ticket_ = 0; refresh_pending_ = false;"
+        },
+        {
+          "old": "            if (domain_ && stats_.observing && relevant) publication_ticket_ = domain_->publish();",
+          "new": "            if (relevant) refresh_pending_ = true;\n            if (domain_ && stats_.observing && relevant) publication_ticket_ = domain_->publish();"
+        },
+        {
+          "old": "                resources_.push_back(std::move(r));",
+          "new": "                resources_.push_back(std::move(r));\n                refresh_pending_ = true;"
+        },
+        {
+          "old": "    Token before(Page *raw, uint32_t address, const void *pixels, uint64_t size,",
+          "new": "    // Normal-play registration batch. Existing guards never open here. A new\n    // interest/remap schedules at most one scan; absent aliases do not spin.\n    // The published ticket still rejects every JIT holding a pre-guard PTE.\n    bool refresh_persistent() noexcept {\n        auto lock = hold();\n        if (!collecting_ || !persistent_ || !stats_.observing || stats_.failed) return false;\n        if (!refresh_pending_) return true;\n        refresh_pending_ = false;\n        try {\n            for (auto &g : groups_) if (!g.armed || g.epoch != stats_.epoch) g.aliases.clear();\n            for (uint32_t p = 1; p < page_count; ++p) {\n                const auto entry = load(raw_, p);\n                if (!entry) continue;\n                const auto it = by_host_.find(host_page(entry, p));\n                if (it != by_host_.end()) {\n                    auto &g = groups_[it->second];\n                    if (!g.armed || g.epoch != stats_.epoch) g.aliases.push_back(p);\n                }\n            }\n            for (auto &g : groups_) {\n                if ((g.armed && g.epoch == stats_.epoch) || g.aliases.empty()) continue;\n                g.epoch = stats_.epoch; g.armed = true;\n                ++count().armed_pages; count().armed_aliases += g.aliases.size();\n                for (auto p : g.aliases) store(writes_.get(), p, nullptr);\n            }\n            for (auto &r : resources_) r.covered = std::all_of(r.groups.begin(), r.groups.end(), [&](uint32_t g) {\n                return groups_[g].armed && groups_[g].epoch == stats_.epoch && !groups_[g].aliases.empty();\n            });\n            publication_ticket_ = domain_ ? domain_->publish() : 0;\n            return true;\n        } catch (...) { fail(); return false; }\n    }\n    Token before(Page *raw, uint32_t address, const void *pixels, uint64_t size,"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/switch_validation_status.h",
+      "base_blob": "d8f950aa3a9d4d563284584063a0fc373ac7953a",
+      "replacements": [
+        {
+          "old": "    bool resource_reuse = false;",
+          "new": "    bool resource_reuse = false, resource_play = false;"
+        },
+        {
+          "old": "    if (s.resource_reuse) {",
+          "new": "    if (s.resource_play) {\n        const bool bad=s.watch_failed||s.failed||s.reuse_diffs;\n        const bool stopped=s.stage==Stage::Stopped;\n        text.tone=bad?HudText::Tone::Error:stopped?HudText::Tone::Warning:HudText::Tone::Running;\n        std::snprintf(text.title.data(),text.title.size(),\"RESOURCE REUSE | %s\",bad?\"CHECK REPORT / FULL HASH\":stopped?\"FULL HASH FALLBACK\":!s.run_id?\"STARTING\":s.reuse_calls?\"ACTIVE / NORMAL PLAY\":\"PRIMING / FULL HASH\");\n        std::snprintf(text.timing.data(),text.timing.size(),\"Continuous mode | No benchmark or countdown | Mask:0x%x\",s.reuse_blockers);\n        std::snprintf(text.samples.data(),text.samples.size(),\"Skipped:%llu / %llu MiB | Entry audits:%llu | Diff:%llu\",(unsigned long long)s.reuse_calls,(unsigned long long)(s.reuse_bytes>>20),(unsigned long long)s.reuse_audits,(unsigned long long)s.reuse_diffs);\n        std::snprintf(text.tests.data(),text.tests.size(),\"Self-tests:%u PASS / %u FAIL / %u SKIP\",s.passed,s.failed,s.skipped);\n        std::snprintf(text.action.data(),text.action.size(),\"Play normally | Exit normally to save | No fixed-scene rerun\");\n        return text;\n    }\n    if (s.resource_reuse) {"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/src/switch_memory_validation.cpp",
+      "base_blob": "e805efbd80f3880ab8561fc46289dedc5dcff565",
+      "replacements": [
+        {
+          "old": "#include <util/resource_reuse_run.h>",
+          "new": "#include <util/resource_reuse_run.h>\n#include <util/resource_reuse_play.h>"
+        },
+        {
+          "old": "    bool resource_reuse = true;",
+          "new": "    bool resource_reuse = true;\n    bool resource_play = true;"
+        },
+        {
+          "old": "    bool resource_reuse = false;",
+          "new": "    bool resource_reuse = false;\n    bool resource_play = false;"
+        },
+        {
+          "old": "reuse::Run resource_run;",
+          "new": "reuse::Run resource_run;\nreuse::Play resource_play{resource_run.cache};"
+        },
+        {
+          "old": "            if (value == \"resource_reuse\") out.resource_reuse = true;",
+          "new": "            if (value == \"resource_reuse\") { out.resource_reuse = true; out.resource_play = false; }\n            else if (value == \"resource_reuse_play\") { out.resource_reuse = out.resource_play = true; }"
+        },
+        {
+          "old": "        resource_run.view(integrated,tick);",
+          "new": "        if (options.resource_play) resource_play.view(integrated);\n        else resource_run.view(integrated,tick);"
+        },
+        {
+          "old": "    resource_run.reset(); reuse::source_policy.reset();",
+          "new": "    resource_run.reset(); resource_play.reset(); reuse::source_policy.reset();"
+        },
+        {
+          "old": "    if (!enabled() || mirror_probe::state.requested.load()) return;",
+          "new": "    if (!enabled() || mirror_probe::state.requested.load() || (options.resource_reuse && options.resource_play)) return;"
+        },
+        {
+          "old": "    if (options.resource_reuse) {\n        if (abort_requested.exchange(false) && resource_run.active) {",
+          "new": "    if (options.resource_reuse) {\n        if (options.resource_play) {\n            abort_requested.store(false); // Ordinary pause/menu is not a failed benchmark.\n            if (is_paused.load() || resource_play.stopped) return;\n            const auto w=live_watch.snapshot();\n            const bool bad=w.failed || epoch::domain.snapshot().failed || direct_heap::state.errors.load()\n                || duplicate_control || test_failed || lost_results.load() || deferred_import::registry.summary().errors\n                || resource_run.cache.failed() || (resource_controls_ran && !resource_controls_ok);\n            if (bad) resource_play.stop(true);\n            else if (!resource_play.started && !resource_play.stopped && resource_controls_ok\n                && control_mask==compact_controls_mask) {\n                resource_play.begin(); live_watch.phase(0,true,true,true);\n            }\n            if (resource_play.active()) {\n                if (const auto mask=reuse::source_policy.blockers()) resource_play.stop(false,mask);\n                else if (w.phases[0].guard_budget_exhausted) resource_play.stop(false,reuse::SourcePolicy::Capacity);\n                else if (!live_watch.refresh_persistent()) resource_play.stop(true);\n                else { ++resource_play.frames; ++resource_play.refreshes; }\n            }\n            if (resource_play.stopped) live_watch.phase(watch::no_index,false);\n            capture_active.store(false,std::memory_order_release); // No timed capture/automatic restart.\n            return;\n        }\n        if (abort_requested.exchange(false) && resource_run.active) {"
+        },
+        {
+          "old": "    if (!resource_run.active) return full();",
+          "new": "    if (options.resource_play ? !resource_play.active() : !resource_run.active) return full();"
+        },
+        {
+          "old": "    if (paused && !was_paused) abort_requested.store(true, std::memory_order_release);",
+          "new": "    if (paused && !was_paused && !(options.resource_reuse && options.resource_play)) abort_requested.store(true, std::memory_order_release);"
+        },
+        {
+          "old": "        if (paused || abort_requested.load(std::memory_order_acquire)) {",
+          "new": "        if ((paused || abort_requested.load(std::memory_order_acquire)) && !out.resource_play) {"
+        },
+        {
+          "old": "        StatusSnapshot view; resource_run.view(view, resource_run.last_tick());",
+          "new": "        StatusSnapshot view; if (options.resource_play) resource_play.view(view); else resource_run.view(view, resource_run.last_tick());"
+        },
+        {
+          "old": "        std::fputs(\"{\\\"schema_version\\\":1,\\\"capture_plan\\\":\\\"resource-reuse-1\\\",\\\"title\\\":\",file); json_string(file,title);",
+          "new": "        std::fputs(options.resource_play ? \"{\\\"schema_version\\\":1,\\\"capture_plan\\\":\\\"resource-reuse-play-1\\\",\\\"title\\\":\"\n            : \"{\\\"schema_version\\\":1,\\\"capture_plan\\\":\\\"resource-reuse-1\\\",\\\"title\\\":\",file); json_string(file,title);"
+        },
+        {
+          "old": "        std::fputs(\"],\\\"resource_reuse\\\":\",file);resource_run.write(file);",
+          "new": "        std::fputs(\"],\\\"resource_reuse\\\":\",file);if (options.resource_play) resource_play.write(file); else resource_run.write(file);"
+        }
+      ]
+    },
+    {
+      "path": "scripts/analyze-switch-capture.py",
+      "base_blob": "9cfa77fd4be7b2a7fd8ea6f58c9bfaf638844bef",
+      "replacements": [
+        {
+          "old": "    if data.get('capture_plan') == 'resource-reuse-1':",
+          "new": "    if data.get('capture_plan') in ('resource-reuse-1', 'resource-reuse-play-1'):"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/run-switch-performance-tests.sh",
+      "base_blob": "5810c5ce63221fa1e9539e5196b773c96c71345c",
+      "replacements": [
+        {
+          "old": "python3 \"$ROOT/scripts/tests/test_switch_scene_reuse.py\" --require-source --cxx \"${CXX:-c++}\"",
+          "new": "python3 \"$ROOT/scripts/tests/test_switch_scene_reuse.py\" --require-source --cxx \"${CXX:-c++}\"\npython3 \"$ROOT/scripts/tests/test_switch_resource_play.py\" --require-source --cxx \"${CXX:-c++}\""
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/resource_hash_reuse.h",
+      "base_blob": "bea6988ae26d756f1714f76329c229c70e1c49ca",
+      "replacements": [
+        {
+          "old": "enum class Mode : uint8_t { Reference, Audit, Performance };",
+          "new": "enum class Mode : uint8_t { Reference, Audit, Performance, Online };"
+        },
+        {
+          "old": "if (mode == Mode::Performance && candidate) {",
+          "new": "if ((mode == Mode::Performance || (mode == Mode::Online && inherited_audit)) && candidate) {"
+        },
+        {
+          "old": "if (mode == Mode::Audit && candidate) {",
+          "new": "if ((mode == Mode::Audit || mode == Mode::Online) && candidate) {"
+        }
+      ]
+    },
+    {
+      "path": "scripts/analyze-switch-resource-reuse.py",
+      "base_blob": "ab5bee98b397794654134f3e47f88b88c53d16d0",
+      "replacements": [
+        {
+          "old": "def analyze(data):\n",
+          "new": "def analyze_play(data):\n    \"\"\"Continuous counters are not a paired speed or all-game correctness test.\"\"\"\n    r=data.get('resource_reuse',{});c=r.get('total',{});errors=[]\n    def check(ok,msg):\n        if not ok:errors.append(msg)\n    def integer(v):return type(v) is int and 0<=v<2**64\n    check(data.get('capture_plan')=='resource-reuse-play-1' and r.get('version')==1,'Wrong normal-play schema')\n    check(r.get('continuous') is True and r.get('first_reuse_requires_full_audit') is True\n          and r.get('GPU_write_sources_reused') is False and r.get('scene_memo')=='original','Wrong normal-play authority')\n    check(data.get('controls_complete') is True and data.get('tests_dropped')==0,'Controls missing or failed')\n    check(all(t.get('status') in ('pass','skip') for t in data.get('tests',[])),'Automatic control failure')\n    check(sum(t.get('suite')=='resource_reuse' and t.get('name')=='dynamic_core' and t.get('status')=='pass'\n              for t in data.get('tests',[]))==1,'Missing/duplicate private control')\n    check(all(type(r.get(k)) is bool for k in ('started','stopped','failed')),'Invalid state flags')\n    check(all(integer(r.get(k)) for k in ('frames','refresh_checks','blockers')),'Invalid session counters')\n    valid=all(integer(c.get(k)) for k in FIELDS)\n    check(valid,'Invalid work counters')\n    if valid:\n        check(c['calls']==c['reference_calls']+c['reused_calls'],'Calls do not reconcile')\n        check(c['audits']<=c['reference_calls'] and c['audit_bytes']<=c['reference_bytes'],'Invalid audits')\n        check(not c['reused_calls'] or c['audits']>0,'Reuse without an audit')\n        check(not c['mismatches'] and not c['exceptions'] and r.get('failed') is False,'Mismatch or runtime failure')\n        fb=c.get('fallback',[])\n        check(len(fb)==len(FALLBACK) and all(integer(x) for x in fb),'Invalid fallback ledger')\n        if len(fb)==len(FALLBACK) and all(integer(x) for x in fb):\n            check(fb[0]==0 and fb[8]==c['raced_hashes'] and c['raced_hashes']<=c['reference_calls']\n                  and sum(fb)-fb[8]<=c['reference_calls'],'Fallback ledger does not reconcile')\n        v=c.get('version_fields',[])\n        check(len(v)==9 and all(integer(x) for x in v),'Invalid version fields')\n        if len(v)==9 and all(integer(x) for x in v) and len(fb)==len(FALLBACK):\n            check(all(x<=fb[6] for x in v) and sum(v)>=fb[6],'Version-field ledger mismatch')\n        ex=r.get('counterexamples',[]);d=r.get('counterexamples_dropped')\n        check(isinstance(ex,list) and integer(d) and len(ex)+d==c['mismatches'],'Counterexample mismatch')\n    policy=r.get('source_policy',{})\n    check(policy.get('GPU_writers_reused') is False and policy.get('veto_release')=='session_end_only','Invalid source exclusions')\n    return dict(capture_plan='resource-reuse-play-1',evidence_valid=not errors,comparison_eligible=False,comparison=None,\n        actual_work=c,source_policy=policy,stopped=r.get('stopped'),blockers=r.get('blockers'),exclusions=errors,\n        warnings=['Continuous normal play has no STOCK/REUSE timing comparison; do not infer a speedup.',\n                  'Entry audits are per-resource admission, not periodic detection of arbitrary untracked writers.',\n                  'Counters cover active cache evaluation, not full-reference work after session fallback.',\n                  'Dynamic game-wide correctness and normal-play net benefit are not established by the earlier fixed-scene capture.'])\n\ndef analyze(data):\n    if data.get(\"capture_plan\")==\"resource-reuse-play-1\":return analyze_play(data)\n"
+        }
+      ]
+    }
+  ]
+}

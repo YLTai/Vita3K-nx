@@ -1,0 +1,84 @@
+{
+  "base_commit": "f5d441a3681aeffbb32aa6349d1f1905a7c67f56",
+  "purpose": "Automatic private shader BDA + ownership + image validation, no live Guest changes.",
+  "files": [
+    {
+      "path": "vita3k/renderer/CMakeLists.txt",
+      "base_blob": "a907e172589a4ad1d7d643477edeb2904fa19445",
+      "replacements": [
+        {
+          "old": "if(SWITCH)\n",
+          "new": "if(SWITCH AND SWITCH_TRACELAB)\n    find_package(Python3 REQUIRED COMPONENTS Interpreter)\n    set(MIRROR_SHADER_DIR \"${CMAKE_BINARY_DIR}/generated/switch-mirror\")\n    add_custom_command(\n        OUTPUT \"${MIRROR_SHADER_DIR}/switch_mirror_shader_spv.h\"\n        COMMAND \"${Python3_EXECUTABLE}\" \"${CMAKE_SOURCE_DIR}/scripts/build-switch-mirror-shader.py\"\n            --output-dir \"${MIRROR_SHADER_DIR}\"\n        DEPENDS \"${CMAKE_SOURCE_DIR}/scripts/build-switch-mirror-shader.py\"\n            \"${CMAKE_SOURCE_DIR}/vita3k/renderer/shaders/switch_mirror_probe.comp\"\n        VERBATIM)\n    add_custom_target(switch-mirror-shader DEPENDS \"${MIRROR_SHADER_DIR}/switch_mirror_shader_spv.h\")\n    add_dependencies(renderer switch-mirror-shader)\n    target_include_directories(renderer PRIVATE \"${MIRROR_SHADER_DIR}\")\nendif()\n\nif(SWITCH)\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/switch_validation_status.h",
+      "base_blob": "d8f950aa3a9d4d563284584063a0fc373ac7953a",
+      "replacements": [
+        {
+          "old": "    uint64_t mirror_cases = 0, mirror_audits = 0, mirror_upload = 0, mirror_download = 0;",
+          "new": "    uint64_t mirror_cases = 0, mirror_audits = 0, mirror_upload = 0, mirror_download = 0;\n    uint64_t mirror_dispatches = 0, mirror_guards = 0;"
+        },
+        {
+          "old": "\"Step %llu / 14 | %u%% | No scene timer or button required\"",
+          "new": "\"Step %llu / 14 | %u%% | Compute BDA + image | Automatic\""
+        },
+        {
+          "old": "\"Byte audits:%llu | Upload:%llu KiB | Readback:%llu KiB\",\n            (unsigned long long)s.mirror_audits, (unsigned long long)(s.mirror_upload / 1024),\n            (unsigned long long)(s.mirror_download / 1024)",
+          "new": "\"Audits:%llu | Dispatch:%llu | Guards:%llu | U:%lluK D:%lluK\",\n            (unsigned long long)s.mirror_audits, (unsigned long long)s.mirror_dispatches,\n            (unsigned long long)s.mirror_guards, (unsigned long long)(s.mirror_upload / 1024),\n            (unsigned long long)(s.mirror_download / 1024)"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/src/switch_memory_validation.cpp",
+      "base_blob": "e805efbd80f3880ab8561fc46289dedc5dcff565",
+      "replacements": [
+        {
+          "old": "        out.mirror_cases = mirror_probe::state.completed.load();",
+          "new": "        out.mirror_cases = mirror_probe::state.completed.load();\n        out.mirror_dispatches = mirror_probe::state.shader_dispatches.load();\n        out.mirror_guards = mirror_probe::state.guard_checks.load();"
+        },
+        {
+          "old": "gpu.finished && (!gpu.passed || !gpu.cleanup)",
+          "new": "gpu.finished && (!gpu.passed || !gpu.cleanup || !mirror_probe::shader_verified(gpu))"
+        },
+        {
+          "old": "gpu.finished && gpu.passed && gpu.cleanup && gpu.completed == mirror_probe::case_count",
+          "new": "gpu.finished && gpu.passed && gpu.cleanup && gpu.completed == mirror_probe::case_count && mirror_probe::shader_verified(gpu)"
+        },
+        {
+          "old": "Direct Heap retained; private CPU/GPU mirror transfer and image controls when requested; live Guest Hash retained; no shader-store/IPC/concurrent-rearm proof",
+          "new": "Direct Heap retained; private compute-BDA/transfer/image controls; live Guest Hash retained; no attachment/IPC/concurrent-rearm proof"
+        }
+      ]
+    },
+    {
+      "path": "scripts/analyze-switch-capture.py",
+      "base_blob": "9cfa77fd4be7b2a7fd8ea6f58c9bfaf638844bef",
+      "replacements": [
+        {
+          "old": "        gpu_tests = [t for t in tests if t.get('suite') == 'gpu_mirror']",
+          "new": "        gpu_tests = [t for t in tests if t.get('suite') == 'gpu_mirror']\n        # Version 1 remains readable, but never qualifies as shader evidence.\n        if gpu.get('probe_version') == 2:\n            required_gpu.add('shader_program')\n            fills = gpu.get('shader_fill_dispatches', 0)\n            copies = gpu.get('shader_copy_dispatches', 0)\n            if (fills < 5 or copies < 5 or gpu.get('shader_dispatches', 0) != fills + copies\n                    or gpu.get('shader_chain_submissions') != 1 or gpu.get('gpu_guard_audits', 0) < 2):\n                issues.append('Missing compute BDA, single-submit chain or guard evidence')\n            imports = topology.get('deferred_imports', {})\n            if imports.get('enabled') and not imports.get('frozen_at_window_end'):\n                issues.append('Missing pre-teardown GPU probe mapping snapshot')\n        elif gpu.get('probe_version', 1) == 1 and ('shader_dispatches' in gpu or any(t.get('name') == 'shader_program' for t in gpu_tests)):\n            issues.append('Shader report lost its v2 identity')\n        elif gpu.get('probe_version', 1) != 1:\n            issues.append('Unknown GPU probe version')"
+        },
+        {
+          "old": "'gpu-mirror-1 executes private Vulkan transfer/image writes, not shader stores, IPC or concurrent production writers.'",
+          "new": "'GPU probe v1 uses transfer/image; v2 adds private compute BDA. Neither covers live Guest, attachment writes, IPC or concurrent production writers.'"
+        },
+        {
+          "old": "                GPU_mirror_controls_passed=data.get('capture_plan') == 'gpu-mirror-1' and not issues,",
+          "new": "                GPU_mirror_controls_passed=data.get('capture_plan') == 'gpu-mirror-1' and not issues,\n                GPU_shader_controls_passed=data.get('capture_plan') == 'gpu-mirror-1' and topology.get('gpu_mirror', {}).get('probe_version') == 2 and not issues,"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/renderer/src/vulkan/renderer.cpp",
+      "base_blob": "4f62037e80751c16c2aedeaee34e9903fa4fe154",
+      "replacements": [
+        {
+          "old": "            .pEngineName = org_name, // Engine Name, using org instead.\n            .engineVersion = VK_MAKE_API_VERSION(0, 0, 0, 1), // Engine Version\n            .apiVersion = VK_API_VERSION_1_0",
+          "new": "            .pEngineName = org_name, // Engine Name, using org instead.\n            .engineVersion = VK_MAKE_API_VERSION(0, 0, 0, 1), // Engine Version\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n            // PhysicalStorageBuffer requires SPIR-V 1.3 / Vulkan 1.1.\n            // Do not run the private BDA shader under an advertised 1.0 contract.\n            .apiVersion = VK_API_VERSION_1_1\n#else\n            .apiVersion = VK_API_VERSION_1_0\n#endif"
+        }
+      ]
+    }
+  ]
+}

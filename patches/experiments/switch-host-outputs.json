@@ -1,0 +1,96 @@
+{
+  "base_commit": "42e0da246d4ad046df418cdd94e64c554fe1a9c4",
+  "purpose": "Observe runtime PCM write bounds at actual output sites; distinguish reviewed read-only playback/display waits. No content authority, full Hash unchanged.",
+  "files": [
+    {
+      "path": "vita3k/codec/src/atrac9.cpp",
+      "base_blob": "c7227c81ed111f9e8348c2c51e915ac2126fd3f0",
+      "replacements": [
+        {
+          "old": "#include <codec/state.h>",
+          "new": "#include <codec/state.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/host_output_scope.h>\n#endif"
+        },
+        {
+          "old": "        memcpy(data, result.data(), info->frameSamples * info->channels * sizeof(uint16_t));",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        switch_validation::epoch::HostOutputLease output(data,\n            switch_validation::epoch::packed_pcm_extent(info->frameSamples, info->channels, sizeof(uint16_t)),\n            switch_validation::epoch::OutputSource::Atrac9);\n#endif\n        memcpy(data, result.data(), info->frameSamples * info->channels * sizeof(uint16_t));"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/codec/src/aac.cpp",
+      "base_blob": "68d97ad339d0d54c169272d7f547c389011ef7cf",
+      "replacements": [
+        {
+          "old": "#include <codec/state.h>",
+          "new": "#include <codec/state.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/host_output_scope.h>\n#endif"
+        },
+        {
+          "old": "        int ret = swr_convert(swr, &data, frame->nb_samples, const_cast<const uint8_t **>(frame->extended_data), frame->nb_samples);",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        AVChannelLayout output_layout{};\n        const bool observing = switch_validation::epoch::enabled.load(std::memory_order_acquire);\n        const int layout_result = observing ? av_opt_get_chlayout(swr, \"out_chlayout\", 0, &output_layout) : -1;\n        const auto output_extent = layout_result >= 0\n            ? switch_validation::epoch::packed_pcm_extent(frame->nb_samples, output_layout.nb_channels, sizeof(int16_t))\n            : switch_validation::epoch::WriteExtent{0, false};\n        av_channel_layout_uninit(&output_layout);\n        // out_count is the permitted output sample capacity per channel, not\n        // the actual count eventually returned by swr_convert. Packed S16 is\n        // fixed by this decoder's pinned constructor. Query failure fails audit.\n        switch_validation::epoch::HostOutputLease output(data, output_extent,\n            switch_validation::epoch::OutputSource::Aac);\n#endif\n        int ret = swr_convert(swr, &data, frame->nb_samples, const_cast<const uint8_t **>(frame->extended_data), frame->nb_samples);"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/codec/src/mp3.cpp",
+      "base_blob": "28f485f6388708258f4a060da433487475b4075f",
+      "replacements": [
+        {
+          "old": "#include <codec/state.h>",
+          "new": "#include <codec/state.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/host_output_scope.h>\n#endif"
+        },
+        {
+          "old": "        int data_size = av_get_bytes_per_sample(context->sample_fmt);",
+          "new": "        int data_size = av_get_bytes_per_sample(context->sample_fmt);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        switch_validation::epoch::HostOutputLease output(data,\n            switch_validation::epoch::mp3_loop_extent(frame->nb_samples, context->ch_layout.nb_channels, data_size),\n            switch_validation::epoch::OutputSource::Mp3);\n#endif"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/modules/SceAudiodec/SceAudiodecUser.cpp",
+      "base_blob": "92ae9571e88074f812991cb5ee334f155b9e7ce0",
+      "replacements": [
+        {
+          "old": "#include <codec/state.h>",
+          "new": "#include <codec/state.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/host_output_scope.h>\n#endif\n#include <typeinfo>"
+        },
+        {
+          "old": "static int decode_audio_frames(EmuEnvState &emuenv, const char *export_name, SceAudiodecCtrl *ctrl, SceUInt32 nb_frames) {\n    if (!ctrl)\n        return SCE_AUDIODEC_ERROR_INVALID_PTR;\n\n    if (ctrl->size != sizeof(SceAudiodecCtrl))\n        return SCE_AUDIODEC_ERROR_INVALID_SIZE;\n\n    const auto state = emuenv.kernel.obj_store.get<AudiodecState>();\n    const DecoderPtr &decoder = lock_and_find(ctrl->handle, state->decoders, state->mutex);\n\n    uint8_t *es_data = ctrl->es_data.get(emuenv.mem);",
+          "new": "static int decode_audio_frames(EmuEnvState &emuenv, const char *export_name, SceAudiodecCtrl *ctrl, SceUInt32 nb_frames) {\n    if (!ctrl)\n        return SCE_AUDIODEC_ERROR_INVALID_PTR;\n\n    if (ctrl->size != sizeof(SceAudiodecCtrl))\n        return SCE_AUDIODEC_ERROR_INVALID_SIZE;\n\n    const auto state = emuenv.kernel.obj_store.get<AudiodecState>();\n    const DecoderPtr &decoder = lock_and_find(ctrl->handle, state->decoders, state->mutex);\n\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (switch_validation::epoch::enabled.load(std::memory_order_acquire) && decoder\n        && (typeid(*decoder) == typeid(Atrac9DecoderState) || typeid(*decoder) == typeid(AacDecoderState)\n            || typeid(*decoder) == typeid(Mp3DecoderState))) {\n        // Only these exact reviewed implementations bracket every receive\n        // write at the backend. Subclasses/other codecs stay unknown. send()\n        // reads compressed input and writes internal host-owned state only.\n        switch_validation::epoch::declare_outputs({\"sceAudiodecDecode\", \"sceAudiodecDecodeNFrames\"},\n            {{ctrl, sizeof(*ctrl)}});\n    }\n#endif\n    uint8_t *es_data = ctrl->es_data.get(emuenv.mem);"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/audio/src/impl/switch_audio.cpp",
+      "base_blob": "fe313876368923235ef66810b08f063cd43020c0",
+      "replacements": [
+        {
+          "old": "void SwitchAudioAdapter::audio_output(AudioOutPort &out_port, const void *buffer) {",
+          "new": "void SwitchAudioAdapter::audio_output(AudioOutPort &out_port, const void *buffer) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    // Reviewed sceAudioOutOutput prefix only changes host thread state. This\n    // adapter reads Guest PCM into its private audren pool; no Guest output.\n    // Other audio adapters and unreviewed enclosing imports remain unknown.\n    switch_validation::epoch::declare_outputs({\"sceAudioOutOutput\"}, {});\n#endif"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/modules/SceDisplay/SceDisplay.cpp",
+      "base_blob": "e084a37a0f7caf7539279749ae4ca959665cbdf6",
+      "replacements": [
+        {
+          "old": "#include <util/types.h>",
+          "new": "#include <util/types.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/host_output_scope.h>\n#endif"
+        },
+        {
+          "old": "    const auto &thread = emuenv.kernel.get_thread(thread_id);",
+          "new": "    const auto &thread = emuenv.kernel.get_thread(thread_id);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (!is_cb)\n        switch_validation::epoch::declare_outputs({\"sceDisplayWaitSetFrameBuf\", \"sceDisplayWaitSetFrameBufMulti\",\n            \"sceDisplayWaitVblankStart\", \"sceDisplayWaitVblankStartMulti\"}, {});\n#endif"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/run-switch-performance-tests.sh",
+      "base_blob": "5810c5ce63221fa1e9539e5196b773c96c71345c",
+      "replacements": [
+        {
+          "old": "python3 \"$ROOT/scripts/tests/test_switch_gxm_contracts.py\" --require-source --cxx \"${CXX:-c++}\"",
+          "new": "python3 \"$ROOT/scripts/tests/test_switch_gxm_contracts.py\" --require-source --cxx \"${CXX:-c++}\"\npython3 \"$ROOT/scripts/tests/test_switch_controller_recipe_chain.py\" --require-source\npython3 \"$ROOT/scripts/tests/test_switch_host_outputs.py\" --cxx \"${CXX:-c++}\" --require-source"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,244 @@
+{
+  "base_commit": "0749a71cf688ecca17ea6ffe6b1a634ce8c7864b",
+  "purpose": "Repair real scene-boundary reuse, exact synchronous outputs and production-cadence auditing; unknown I/O/GPU paths still fall back.",
+  "reviewed_dependencies": {
+    "vita3k/kernel/src/kernel.cpp": "4d231c7cbbeeb8a92939382d29e2139712bf3f94",
+    "vita3k/display/src/display.cpp": "0fd13d1146d18df2a36c3164b54ff31aa057aa58",
+    "vita3k/modules/SceDriverUser/SceDisplayUser.cpp": "b96324c93e4cd8dad1e2e2c66c3268d24dd44f9e",
+    "vita3k/renderer/src/scene.cpp": "ddd5940db164be2b9832ab2352e9ced5d25398f2"
+  },
+  "files": [
+    {
+      "path": "vita3k/modules/SceGxm/SceGxm.cpp",
+      "base_blob": "6ffd59055b844412e0e17c11b2ae1ce6f099a920",
+      "replacements": [
+        {
+          "old": "    context->state.fragment_sync_object = fragmentSyncObject;",
+          "new": "\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_gxm_context(context, emuenv.mem,\n        {\"sceGxmBeginScene\", \"sceGxmBeginSceneEx\"}, true, SCE_GXM_CONTEXT_TYPE_IMMEDIATE, sizeof(renderer::Command));\n#endif\n    context->state.fragment_sync_object = fragmentSyncObject;"
+        },
+        {
+          "old": "    SceGxmNotification empty_notification = { Ptr<uint32_t>(0), 0 };",
+          "new": "\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_gxm_context(context, emuenv.mem, {\"sceGxmEndScene\"},\n        true, SCE_GXM_CONTEXT_TYPE_IMMEDIATE, sizeof(renderer::Command),\n        {context->state.fragment_sync_object ? context->state.fragment_sync_object.get(mem) : nullptr, sizeof(SceGxmSyncObject)});\n#endif\n    SceGxmNotification empty_notification = { Ptr<uint32_t>(0), 0 };"
+        },
+        {
+          "old": "EXPORT(int, sceGxmTextureSetData, SceGxmTexture *texture, Ptr<const void> data) {\n    TRACY_FUNC(sceGxmTextureSetData, texture, data);",
+          "new": "EXPORT(int, sceGxmTextureSetData, SceGxmTexture *texture, Ptr<const void> data) {\n    TRACY_FUNC(sceGxmTextureSetData, texture, data);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmTextureSetData\"}, {{texture, sizeof(*texture)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceGxmTextureSetFormat, SceGxmTexture *texture, SceGxmTextureFormat texFormat) {\n    TRACY_FUNC(sceGxmTextureSetFormat, texture, texFormat);",
+          "new": "EXPORT(int, sceGxmTextureSetFormat, SceGxmTexture *texture, SceGxmTextureFormat texFormat) {\n    TRACY_FUNC(sceGxmTextureSetFormat, texture, texFormat);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmTextureSetFormat\"}, {{texture, sizeof(*texture)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceGxmTextureSetGammaMode, SceGxmTexture *texture, SceGxmTextureGammaMode gammaMode) {\n    TRACY_FUNC(sceGxmTextureSetGammaMode, texture, gammaMode);",
+          "new": "EXPORT(int, sceGxmTextureSetGammaMode, SceGxmTexture *texture, SceGxmTextureGammaMode gammaMode) {\n    TRACY_FUNC(sceGxmTextureSetGammaMode, texture, gammaMode);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmTextureSetGammaMode\"}, {{texture, sizeof(*texture)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceGxmTextureSetHeight, SceGxmTexture *texture, uint32_t height) {\n    TRACY_FUNC(sceGxmTextureSetHeight, texture, height);",
+          "new": "EXPORT(int, sceGxmTextureSetHeight, SceGxmTexture *texture, uint32_t height) {\n    TRACY_FUNC(sceGxmTextureSetHeight, texture, height);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmTextureSetHeight\",\"_sceGxmTextureSetHeight\"}, {{texture, sizeof(*texture)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceGxmTextureSetLodBias, SceGxmTexture *texture, uint32_t bias) {\n    TRACY_FUNC(sceGxmTextureSetLodBias, texture, bias);",
+          "new": "EXPORT(int, sceGxmTextureSetLodBias, SceGxmTexture *texture, uint32_t bias) {\n    TRACY_FUNC(sceGxmTextureSetLodBias, texture, bias);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmTextureSetLodBias\"}, {{texture, sizeof(*texture)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceGxmTextureSetLodMin, SceGxmTexture *texture, uint32_t lodMin) {\n    TRACY_FUNC(sceGxmTextureSetLodMin, texture, lodMin);",
+          "new": "EXPORT(int, sceGxmTextureSetLodMin, SceGxmTexture *texture, uint32_t lodMin) {\n    TRACY_FUNC(sceGxmTextureSetLodMin, texture, lodMin);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmTextureSetLodMin\"}, {{texture, sizeof(*texture)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceGxmTextureSetMagFilter, SceGxmTexture *texture, SceGxmTextureFilter magFilter) {\n    TRACY_FUNC(sceGxmTextureSetMagFilter, texture, magFilter);",
+          "new": "EXPORT(int, sceGxmTextureSetMagFilter, SceGxmTexture *texture, SceGxmTextureFilter magFilter) {\n    TRACY_FUNC(sceGxmTextureSetMagFilter, texture, magFilter);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmTextureSetMagFilter\"}, {{texture, sizeof(*texture)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceGxmTextureSetMinFilter, SceGxmTexture *texture, SceGxmTextureFilter minFilter) {\n    TRACY_FUNC(sceGxmTextureSetMinFilter, texture, minFilter);",
+          "new": "EXPORT(int, sceGxmTextureSetMinFilter, SceGxmTexture *texture, SceGxmTextureFilter minFilter) {\n    TRACY_FUNC(sceGxmTextureSetMinFilter, texture, minFilter);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmTextureSetMinFilter\"}, {{texture, sizeof(*texture)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceGxmTextureSetMipFilter, SceGxmTexture *texture, SceGxmTextureMipFilter mipFilter) {\n    TRACY_FUNC(sceGxmTextureSetMipFilter, texture, mipFilter);",
+          "new": "EXPORT(int, sceGxmTextureSetMipFilter, SceGxmTexture *texture, SceGxmTextureMipFilter mipFilter) {\n    TRACY_FUNC(sceGxmTextureSetMipFilter, texture, mipFilter);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmTextureSetMipFilter\"}, {{texture, sizeof(*texture)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceGxmTextureSetMipmapCount, SceGxmTexture *texture, uint32_t mipCount) {\n    TRACY_FUNC(sceGxmTextureSetMipmapCount, texture, mipCount);",
+          "new": "EXPORT(int, sceGxmTextureSetMipmapCount, SceGxmTexture *texture, uint32_t mipCount) {\n    TRACY_FUNC(sceGxmTextureSetMipmapCount, texture, mipCount);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmTextureSetMipmapCount\"}, {{texture, sizeof(*texture)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceGxmTextureSetNormalizeMode, SceGxmTexture *texture, SceGxmTextureNormalizeMode normalizeMode) {\n    TRACY_FUNC(sceGxmTextureSetNormalizeMode, texture, normalizeMode);",
+          "new": "EXPORT(int, sceGxmTextureSetNormalizeMode, SceGxmTexture *texture, SceGxmTextureNormalizeMode normalizeMode) {\n    TRACY_FUNC(sceGxmTextureSetNormalizeMode, texture, normalizeMode);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmTextureSetNormalizeMode\"}, {{texture, sizeof(*texture)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceGxmTextureSetPalette, SceGxmTexture *texture, Ptr<const void> paletteData) {\n    TRACY_FUNC(sceGxmTextureSetPalette, texture, paletteData);",
+          "new": "EXPORT(int, sceGxmTextureSetPalette, SceGxmTexture *texture, Ptr<const void> paletteData) {\n    TRACY_FUNC(sceGxmTextureSetPalette, texture, paletteData);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmTextureSetPalette\"}, {{texture, sizeof(*texture)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceGxmTextureSetStride, SceGxmTexture *texture, uint32_t byteStride) {\n    TRACY_FUNC(sceGxmTextureSetStride, texture, byteStride);",
+          "new": "EXPORT(int, sceGxmTextureSetStride, SceGxmTexture *texture, uint32_t byteStride) {\n    TRACY_FUNC(sceGxmTextureSetStride, texture, byteStride);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmTextureSetStride\"}, {{texture, sizeof(*texture)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceGxmTextureSetUAddrMode, SceGxmTexture *texture, SceGxmTextureAddrMode mode) {\n    TRACY_FUNC(sceGxmTextureSetUAddrMode, texture, mode);",
+          "new": "EXPORT(int, sceGxmTextureSetUAddrMode, SceGxmTexture *texture, SceGxmTextureAddrMode mode) {\n    TRACY_FUNC(sceGxmTextureSetUAddrMode, texture, mode);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmTextureSetUAddrMode\"}, {{texture, sizeof(*texture)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceGxmTextureSetUAddrModeSafe, SceGxmTexture *texture, SceGxmTextureAddrMode mode) {\n    TRACY_FUNC(sceGxmTextureSetUAddrModeSafe, texture, mode);",
+          "new": "EXPORT(int, sceGxmTextureSetUAddrModeSafe, SceGxmTexture *texture, SceGxmTextureAddrMode mode) {\n    TRACY_FUNC(sceGxmTextureSetUAddrModeSafe, texture, mode);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmTextureSetUAddrModeSafe\"}, {{texture, sizeof(*texture)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceGxmTextureSetVAddrMode, SceGxmTexture *texture, SceGxmTextureAddrMode mode) {\n    TRACY_FUNC(sceGxmTextureSetVAddrMode, texture, mode);",
+          "new": "EXPORT(int, sceGxmTextureSetVAddrMode, SceGxmTexture *texture, SceGxmTextureAddrMode mode) {\n    TRACY_FUNC(sceGxmTextureSetVAddrMode, texture, mode);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmTextureSetVAddrMode\"}, {{texture, sizeof(*texture)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceGxmTextureSetVAddrModeSafe, SceGxmTexture *texture, SceGxmTextureAddrMode mode) {\n    TRACY_FUNC(sceGxmTextureSetVAddrModeSafe, texture, mode);",
+          "new": "EXPORT(int, sceGxmTextureSetVAddrModeSafe, SceGxmTexture *texture, SceGxmTextureAddrMode mode) {\n    TRACY_FUNC(sceGxmTextureSetVAddrModeSafe, texture, mode);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmTextureSetVAddrModeSafe\"}, {{texture, sizeof(*texture)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceGxmTextureSetWidth, SceGxmTexture *texture, uint32_t width) {\n    TRACY_FUNC(sceGxmTextureSetWidth, texture, width);",
+          "new": "EXPORT(int, sceGxmTextureSetWidth, SceGxmTexture *texture, uint32_t width) {\n    TRACY_FUNC(sceGxmTextureSetWidth, texture, width);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmTextureSetWidth\",\"_sceGxmTextureSetWidth\"}, {{texture, sizeof(*texture)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(void, sceGxmDepthStencilSurfaceSetBackgroundDepth, SceGxmDepthStencilSurface *surface, float depth) {\n    TRACY_FUNC(sceGxmDepthStencilSurfaceSetBackgroundDepth, surface, depth);",
+          "new": "EXPORT(void, sceGxmDepthStencilSurfaceSetBackgroundDepth, SceGxmDepthStencilSurface *surface, float depth) {\n    TRACY_FUNC(sceGxmDepthStencilSurfaceSetBackgroundDepth, surface, depth);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmDepthStencilSurfaceSetBackgroundDepth\"}, {{surface, sizeof(*surface)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(void, sceGxmDepthStencilSurfaceSetBackgroundMask, SceGxmDepthStencilSurface *surface, bool mask) {\n    TRACY_FUNC(sceGxmDepthStencilSurfaceSetBackgroundMask, surface, mask);",
+          "new": "EXPORT(void, sceGxmDepthStencilSurfaceSetBackgroundMask, SceGxmDepthStencilSurface *surface, bool mask) {\n    TRACY_FUNC(sceGxmDepthStencilSurfaceSetBackgroundMask, surface, mask);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmDepthStencilSurfaceSetBackgroundMask\"}, {{surface, sizeof(*surface)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(void, sceGxmDepthStencilSurfaceSetBackgroundStencil, SceGxmDepthStencilSurface *surface, uint8_t stencil) {\n    TRACY_FUNC(sceGxmDepthStencilSurfaceSetBackgroundStencil, surface, stencil);",
+          "new": "EXPORT(void, sceGxmDepthStencilSurfaceSetBackgroundStencil, SceGxmDepthStencilSurface *surface, uint8_t stencil) {\n    TRACY_FUNC(sceGxmDepthStencilSurfaceSetBackgroundStencil, surface, stencil);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmDepthStencilSurfaceSetBackgroundStencil\"}, {{surface, sizeof(*surface)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(void, sceGxmDepthStencilSurfaceSetForceLoadMode, SceGxmDepthStencilSurface *surface, SceGxmDepthStencilForceLoadMode forceLoad) {\n    TRACY_FUNC(sceGxmDepthStencilSurfaceSetForceLoadMode, surface, forceLoad);",
+          "new": "EXPORT(void, sceGxmDepthStencilSurfaceSetForceLoadMode, SceGxmDepthStencilSurface *surface, SceGxmDepthStencilForceLoadMode forceLoad) {\n    TRACY_FUNC(sceGxmDepthStencilSurfaceSetForceLoadMode, surface, forceLoad);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmDepthStencilSurfaceSetForceLoadMode\"}, {{surface, sizeof(*surface)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(void, sceGxmDepthStencilSurfaceSetForceStoreMode, SceGxmDepthStencilSurface *surface, SceGxmDepthStencilForceStoreMode forceStore) {\n    TRACY_FUNC(sceGxmDepthStencilSurfaceSetForceStoreMode, surface, forceStore);",
+          "new": "EXPORT(void, sceGxmDepthStencilSurfaceSetForceStoreMode, SceGxmDepthStencilSurface *surface, SceGxmDepthStencilForceStoreMode forceStore) {\n    TRACY_FUNC(sceGxmDepthStencilSurfaceSetForceStoreMode, surface, forceStore);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmDepthStencilSurfaceSetForceStoreMode\"}, {{surface, sizeof(*surface)}});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceGxmNotificationWait, const SceGxmNotification *notification) {\n    TRACY_FUNC(sceGxmNotificationWait, notification);",
+          "new": "EXPORT(int, sceGxmNotificationWait, const SceGxmNotification *notification) {\n    TRACY_FUNC(sceGxmNotificationWait, notification);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmNotificationWait\"}, {});\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceGxmSetVisibilityBuffer, SceGxmContext *immediateContext, Ptr<void> bufferBase, uint32_t stridePerCore) {\n    TRACY_FUNC(sceGxmSetVisibilityBuffer, immediateContext, bufferBase, stridePerCore);",
+          "new": "EXPORT(int, sceGxmSetVisibilityBuffer, SceGxmContext *immediateContext, Ptr<void> bufferBase, uint32_t stridePerCore) {\n    TRACY_FUNC(sceGxmSetVisibilityBuffer, immediateContext, bufferBase, stridePerCore);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_gxm_context(immediateContext, emuenv.mem, {\"sceGxmSetVisibilityBuffer\"},\n        true, SCE_GXM_CONTEXT_TYPE_IMMEDIATE, sizeof(renderer::Command),\n        {bufferBase ? bufferBase.get(emuenv.mem) : nullptr, uint64_t(SCE_GXM_GPU_CORE_COUNT) * stridePerCore});\n#endif\n"
+        },
+        {
+          "old": "    const Address address = alloc(emuenv.mem, emuenv.gxm.params.displayQueueCallbackDataSize, __FUNCTION__);\n    const Ptr<void> ptr(address);\n    memcpy(ptr.get(emuenv.mem), callbackData.get(emuenv.mem), emuenv.gxm.params.displayQueueCallbackDataSize);",
+          "new": "\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceGxmDisplayQueueAddEntry\"}, {{oldBuffer.get(emuenv.mem), sizeof(SceGxmSyncObject)}, {newBuffer.get(emuenv.mem), sizeof(SceGxmSyncObject)}});\n#endif\n    const Address address = alloc(emuenv.mem, emuenv.gxm.params.displayQueueCallbackDataSize, __FUNCTION__);\n    const Ptr<void> ptr(address);\n    {\n\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        switch_validation::epoch::HostOutputLease callback_copy(ptr.get(emuenv.mem),\n            {emuenv.gxm.params.displayQueueCallbackDataSize, true});\n#endif\n        memcpy(ptr.get(emuenv.mem), callbackData.get(emuenv.mem), emuenv.gxm.params.displayQueueCallbackDataSize);\n    }"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/modules/SceLibKernel/SceLibKernel.cpp",
+      "base_blob": "cf06ee74395bdd42b6638e5302ddc50145361f73",
+      "replacements": [
+        {
+          "old": "EXPORT(Ptr<Ptr<void>>, sceKernelGetTLSAddr, int key) {\n    TRACY_FUNC(sceKernelGetTLSAddr, key);",
+          "new": "EXPORT(Ptr<Ptr<void>>, sceKernelGetTLSAddr, int key) {\n    TRACY_FUNC(sceKernelGetTLSAddr, key);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceKernelGetTLSAddr\"}, {});\n#endif\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/modules/SceProcessmgr/SceProcessmgr.cpp",
+      "base_blob": "816f88d8428d67c65f6f4729093362be17a0affc",
+      "replacements": [
+        {
+          "old": "#include \"SceProcessmgr.h\"",
+          "new": "#include \"SceProcessmgr.h\"\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/host_output_scope.h>\n#endif\n"
+        },
+        {
+          "old": "EXPORT(VitaTime, sceKernelLibcClock) {\n    TRACY_FUNC(sceKernelLibcClock);",
+          "new": "EXPORT(VitaTime, sceKernelLibcClock) {\n    TRACY_FUNC(sceKernelLibcClock);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceKernelLibcClock\"}, {});\n#endif\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/modules/SceAudio/SceAudio.cpp",
+      "base_blob": "69e9caae65afb9598acbe053f8b1b9db8247c75e",
+      "replacements": [
+        {
+          "old": "#include <module/module.h>",
+          "new": "#include <module/module.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/host_output_scope.h>\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceAudioOutGetAdopt, SceAudioOutPortType type) {\n    TRACY_FUNC(sceAudioOutGetAdopt, type);",
+          "new": "EXPORT(int, sceAudioOutGetAdopt, SceAudioOutPortType type) {\n    TRACY_FUNC(sceAudioOutGetAdopt, type);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceAudioOutGetAdopt\"}, {});\n#endif\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/modules/SceDisplay/SceDisplay.cpp",
+      "base_blob": "e084a37a0f7caf7539279749ae4ca959665cbdf6",
+      "replacements": [
+        {
+          "old": "EXPORT(SceInt32, _sceDisplaySetFrameBuf, const SceDisplayFrameBuf *pFrameBuf, SceDisplaySetBufSync sync, uint32_t *pFrameBuf_size) {\n    TRACY_FUNC(_sceDisplaySetFrameBuf, pFrameBuf, sync, pFrameBuf_size);",
+          "new": "EXPORT(SceInt32, _sceDisplaySetFrameBuf, const SceDisplayFrameBuf *pFrameBuf, SceDisplaySetBufSync sync, uint32_t *pFrameBuf_size) {\n    TRACY_FUNC(_sceDisplaySetFrameBuf, pFrameBuf, sync, pFrameBuf_size);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"_sceDisplaySetFrameBuf\",\"sceDisplaySetFrameBuf\",\"sceDisplaySetFrameBufInternal\"}, {});\n#endif\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/ctrl/src/ctrl.cpp",
+      "base_blob": "58eb7fa92aee5eba7e08d0df5982732682c03b30",
+      "replacements": [
+        {
+          "old": "#include <ctrl/ctrl.h>",
+          "new": "#include <ctrl/ctrl.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/host_output_scope.h>\n#endif\n"
+        },
+        {
+          "old": "    const size_t element_size = is_v2 ? sizeof(SceCtrlData2) : sizeof(SceCtrlData);",
+          "new": "    const size_t element_size = is_v2 ? sizeof(SceCtrlData2) : sizeof(SceCtrlData);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceCtrlPeekBufferPositive\",\"sceCtrlPeekBufferPositive2\",\"sceCtrlPeekBufferPositiveExt\",\"sceCtrlPeekBufferPositiveExt2\",\"sceCtrlPeekBufferNegative\",\"sceCtrlPeekBufferNegative2\",\"sceCtrlPeekBufferNegativeExt\",\"sceCtrlPeekBufferNegativeExt2\",\"sceCtrlReadBufferPositive\",\"sceCtrlReadBufferPositive2\",\"sceCtrlReadBufferPositiveExt\",\"sceCtrlReadBufferPositiveExt2\",\"sceCtrlReadBufferNegative\",\"sceCtrlReadBufferNegative2\",\"sceCtrlReadBufferNegativeExt\",\"sceCtrlReadBufferNegativeExt2\"}, {{pData, uint64_t(element_size) * (count ? count : 1u)}});\n#endif\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/touch/src/touch.cpp",
+      "base_blob": "ab1034f46903fecb7f3c7eae9b9b6a0ab33e3635",
+      "replacements": [
+        {
+          "old": "#include <ctrl/state.h>",
+          "new": "#include <ctrl/state.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/host_output_scope.h>\n#endif\n"
+        },
+        {
+          "old": "int touch_get(const SceUID thread_id, EmuEnvState &emuenv, const SceUInt32 &port, SceTouchData *pData, SceUInt32 count, bool is_peek) {",
+          "new": "int touch_get(const SceUID thread_id, EmuEnvState &emuenv, const SceUInt32 &port, SceTouchData *pData, SceUInt32 count, bool is_peek) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceTouchPeek\",\"sceTouchPeek2\",\"sceTouchPeekRegion\",\"sceTouchRead\",\"sceTouchRead2\"}, {{pData, uint64_t(sizeof(*pData)) * count}});\n#endif\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/modules/SceDriverUser/SceMotion.cpp",
+      "base_blob": "371ae3035bb1cf44e94214a4a13843c4b5feb1c8",
+      "replacements": [
+        {
+          "old": "#include <module/module.h>",
+          "new": "#include <module/module.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/host_output_scope.h>\n#endif\n"
+        },
+        {
+          "old": "EXPORT(int, sceMotionGetState, SceMotionState *motionState) {\n    TRACY_FUNC(sceMotionGetState, motionState);",
+          "new": "EXPORT(int, sceMotionGetState, SceMotionState *motionState) {\n    TRACY_FUNC(sceMotionGetState, motionState);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::declare_outputs({\"sceMotionGetState\"}, {{motionState, sizeof(*motionState)}});\n#endif\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/src/switch_memory_validation.cpp",
+      "base_blob": "e805efbd80f3880ab8561fc46289dedc5dcff565",
+      "replacements": [
+        {
+          "old": "    if (enabled() && options.resource_reuse) return resource_run.active && reuse::Run::mode(resource_run.phase) == reuse::Mode::Audit;",
+          "new": "    if (enabled() && options.resource_reuse) return false; // identical production scene-memo cadence in ALL six stages"
+        },
+        {
+          "old": "std::fputs(\"],\\\"resource_reuse\\\":\",file);resource_run.write(file);std::fputs(\"}\\n\",file);",
+          "new": "std::fputs(\"],\\\"resource_reuse\\\":\",file);resource_run.write(file);\n        std::fputs(\",\\\"writer_ranges\\\":\",file);epoch::domain.write_ranges(file);std::fputs(\"}\\n\",file);"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/run-switch-performance-tests.sh",
+      "base_blob": "5810c5ce63221fa1e9539e5196b773c96c71345c",
+      "replacements": [
+        {
+          "old": "python3 \"$ROOT/scripts/tests/test_switch_resource_integration.py\" --require-source --cxx \"${CXX:-c++}\"",
+          "new": "python3 \"$ROOT/scripts/tests/test_switch_resource_integration.py\" --require-source --cxx \"${CXX:-c++}\"\npython3 \"$ROOT/scripts/tests/test_switch_scene_reuse.py\" --require-source --cxx \"${CXX:-c++}\""
+        }
+      ]
+    }
+  ]
+}

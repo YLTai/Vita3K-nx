@@ -1,0 +1,515 @@
+{
+  "base_commit": "a2a1cd1470448be177ddfad226aca7b19a1e7893",
+  "purpose": "Integrated ordinary texture reuse. Persistent GPU/native destination exclusion, real CPU/HLE version admission, stock/audit/reuse/reuse/audit/stock. No arbitrary hash cadence.",
+  "reviewed_dependencies": {
+    "vita3k/display/src/display.cpp": "0fd13d1146d18df2a36c3164b54ff31aa057aa58",
+    "vita3k/audio/src/impl/switch_audio.cpp": "fe313876368923235ef66810b08f063cd43020c0",
+    "vita3k/kernel/src/kernel.cpp": "4d231c7cbbeeb8a92939382d29e2139712bf3f94",
+    "vita3k/kernel/src/callback.cpp": "1faa1db0e8e4058ce96114b2e729f7901b03caa6",
+    "vita3k/kernel/src/sync_primitives.cpp": "9524e3e4c010f65e95794b54195f62f550fd57dc",
+    "vita3k/switch/switch_state.cpp": "ba3f89e72a6f72794c793dafc6d8c65c054d2e80",
+    "vita3k/modules/SceIofilemgr/SceIofilemgr.cpp": "7bd8c0f3916c843256aa67b5e8ee4be45a125125",
+    "vita3k/renderer/src/batch.cpp": "c52dc0ab5e2de6357fcabad45b384c1a0298c723",
+    "vita3k/renderer/src/vulkan/scene.cpp": "6983281f6341c68b64023c005f465d5a1e515335",
+    "vita3k/renderer/src/vulkan/sync_state.cpp": "d9a4eef7a01e4a78fe63f48b0e630783d943daaa",
+    "vita3k/renderer/include/renderer/gxm_types.h": "e0daba4f6961aa723972325068cca2eb8d5291f2"
+  },
+  "files": [
+    {
+      "path": "vita3k/util/include/util/switch_write_watch.h",
+      "base_blob": "d02545c2ec170ad0583850de74cf2fcd741114b4",
+      "replacements": [
+        {
+          "old": "    struct Footprint { uint32_t id, address; Key key; };",
+          "new": "    // Source-adapter admission, not a content-validity decision. Keep the\n    // check in Table so late interests, remaps and budget fallback cannot be\n    // mistaken for persistent JIT coverage by an external cache.\n    bool fully_watched(const Token &t) const noexcept {\n        std::lock_guard lock(mutex_);\n        if (!collecting_ || !persistent_ || !stats_.observing || stats_.failed\n            || t.epoch != interval_serial_ || t.resource >= resources_.size()) return false;\n        const auto &r = resources_[t.resource];\n        if (!r.covered || t.mapping_version != r.mapping_version\n            || t.cpu_version != r.cpu_version || t.host_version != r.host_version) return false;\n        return std::all_of(r.groups.begin(), r.groups.end(), [&](uint32_t id) {\n            const auto &g = groups_[id];\n            return g.armed && g.epoch == stats_.epoch && !g.aliases.empty();\n        });\n    }\n    struct Footprint { uint32_t id, address; Key key; };"
+        },
+        {
+          "old": "    Token before(Page *raw, uint32_t address, const void *pixels, uint64_t size,",
+          "new": "    // Render-thread phase bookkeeping only. No PTE is opened, no history or\n    // resource lifetime is reset between Audit and Performance.\n    void reuse_phase(uint32_t phase) noexcept {\n        auto lock = hold();\n        if (phase >= 8 || !collecting_ || !persistent_ || !stats_.observing) { fail(); return; }\n        phase_ = phase;\n        if (domain_) { domain_->callback_audit().phase(phase, false); domain_->range_phase(phase, false); }\n    }\n    Token before(Page *raw, uint32_t address, const void *pixels, uint64_t size,"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/run-switch-performance-tests.sh",
+      "base_blob": "5810c5ce63221fa1e9539e5196b773c96c71345c",
+      "replacements": [
+        {
+          "old": "python3 \"$ROOT/scripts/tests/test_switch_declaration_resolution.py\" --cxx \"${CXX:-c++}\" --require-source",
+          "new": "python3 \"$ROOT/scripts/tests/test_switch_declaration_resolution.py\" --cxx \"${CXX:-c++}\" --require-source\npython3 \"$ROOT/scripts/tests/test_resource_hash_reuse.py\" --cxx \"${CXX:-c++}\" --require-source"
+        },
+        {
+          "old": "python3 \"$ROOT/scripts/tests/test_resource_hash_reuse.py\" --cxx \"${CXX:-c++}\" --require-source",
+          "new": "python3 \"$ROOT/scripts/tests/test_resource_hash_reuse.py\" --cxx \"${CXX:-c++}\" --require-source\npython3 \"$ROOT/scripts/tests/test_switch_resource_integration.py\" --require-source --cxx \"${CXX:-c++}\""
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/switch_write_watch_api.h",
+      "base_blob": "e5732f37a80cd981997b3657d4d593a3a4b9987f",
+      "replacements": [
+        {
+          "old": "    MappingGuard();",
+          "new": "    MappingGuard();\n    explicit MappingGuard(bool acquire);"
+        },
+        {
+          "old": "class MappingGuard {};",
+          "new": "class MappingGuard { public: MappingGuard() = default; explicit MappingGuard(bool) {} };"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/src/switch_memory_validation.cpp",
+      "base_blob": "e805efbd80f3880ab8561fc46289dedc5dcff565",
+      "replacements": [
+        {
+          "old": "MappingGuard::MappingGuard() {\n    if (enabled() && options.write_shadow) lock_ = live_watch.hold();\n}",
+          "new": "MappingGuard::MappingGuard() : MappingGuard(true) {}\nMappingGuard::MappingGuard(bool acquire) {\n    if (acquire && enabled() && options.write_shadow) lock_ = live_watch.hold();\n}"
+        },
+        {
+          "old": "#include <util/switch_write_watch.h>",
+          "new": "#include <util/switch_write_watch.h>\n#include <util/switch_resource_reuse.h>\n#include <util/resource_reuse_run.h>\n#include <util/observer_reuse_bridge.h>\n#include <util/resource_reuse_controls.h>"
+        },
+        {
+          "old": "struct Options {",
+          "new": "struct Options {\n#ifdef VITA3K_SWITCH_RESOURCE_REUSE_DEFAULT\n    bool resource_reuse = true;\n#else\n    bool resource_reuse = false;\n#endif"
+        },
+        {
+          "old": "watch::Table live_watch;",
+          "new": "watch::Table live_watch;\nreuse::Run resource_run;\nbool resource_controls_ran = false, resource_controls_ok = false;"
+        },
+        {
+          "old": "if (!file && !out.compact && !out.epoch_audit) return out;",
+          "new": "if (!file && !out.compact && !out.epoch_audit && !out.resource_reuse) return out;"
+        },
+        {
+          "old": "        } else if (key == \"validation_experiment\") {",
+          "new": "        } else if (key == \"validation_experiment\") {\n            if (value == \"resource_reuse\") out.resource_reuse = true;\n            else if (value.rfind(\"legacy_\", 0) == 0 || value == \"staging\" || value == \"write_audit\") out.resource_reuse = false;"
+        },
+        {
+          "old": "    if (collector_off) out.enabled = false;",
+          "new": "    if (out.resource_reuse) {\n        out.epoch_audit = out.compact = out.write_shadow = true;\n        out.heap_fault = out.content_compare = out.automatic = false;\n        out.warmup_seconds = 0; out.settle_seconds = 1; out.measure_seconds = 4;\n    }\n    if (collector_off) out.enabled = false;"
+        },
+        {
+          "old": "    options = read_options();",
+          "new": "    options = read_options();\n    resource_run.reset(); reuse::source_policy.reset();\n    resource_controls_ran = resource_controls_ok = false;"
+        },
+        {
+          "old": "uint32_t phase_count() { if (options.heap_fault)",
+          "new": "uint32_t phase_count() { if (options.resource_reuse) return 6; if (options.heap_fault)"
+        },
+        {
+          "old": "const char *phase_name(uint32_t phase) {",
+          "new": "const char *phase_name(uint32_t phase) {\n    if (options.resource_reuse) return reuse::Run::name(phase);"
+        },
+        {
+          "old": "    const std::lock_guard<std::mutex> lock(status_mutex);\n    published_status = out;",
+          "new": "    if (options.resource_reuse) resource_run.view(out, tick);\n    const std::lock_guard<std::mutex> lock(status_mutex);\n    published_status = out;"
+        },
+        {
+          "old": "bool strict_hash() {",
+          "new": "bool strict_hash() {\n    if (enabled() && options.resource_reuse) return resource_run.active && reuse::Run::mode(resource_run.phase) == reuse::Mode::Audit;"
+        },
+        {
+          "old": "    content_memo.clear();\n}\n\nbool enabled()",
+          "new": "    content_memo.clear();\n    resource_run.cache.stop();\n}\n\nbool enabled()"
+        },
+        {
+          "old": "    const PublishOnReturn publish{tick};",
+          "new": "    const PublishOnReturn publish{tick};\n    if (options.resource_reuse) {\n        if (abort_requested.exchange(false) && resource_run.active) {\n            resource_run.finish(false, true); live_watch.phase(watch::no_index, false);\n        }\n        if (is_paused.load()) return;\n        if (start_requested.exchange(false)) {\n            live_watch.phase(0, false, true);\n            resource_run.begin(tick, armGetSystemTickFreq());\n        }\n        if (resource_run.active) {\n            const auto w = live_watch.snapshot();\n            if (w.failed || epoch::domain.snapshot().failed || direct_heap::state.errors.load()\n                || deferred_import::registry.summary().errors || resource_run.cache.failed()\n                || (resource_controls_ran && !resource_controls_ok)) resource_run.finish(true);\n            const auto old_phase = resource_run.phase;\n            resource_run.frame(tick);\n            if (resource_run.active && old_phase != resource_run.phase) {\n                if (resource_run.phase == 1) live_watch.phase(1, true, false, true);\n                else if (resource_run.phase < 5) live_watch.reuse_phase(resource_run.phase);\n                else live_watch.phase(5, false);\n#if defined(__aarch64__)\n                resource_run.defer(armGetSystemTick());\n#endif\n            }\n        }\n        if (resource_run.done) live_watch.phase(watch::no_index, false);\n        completed = resource_run.done; requested = resource_run.run_id != 0;\n        aborted = resource_run.interrupted; run_id = resource_run.run_id;\n        capture_active.store(resource_run.active, std::memory_order_release);\n        public_state.store(completed ? 9 : resource_run.active ? resource_run.phase+1 : 0, std::memory_order_release);\n        frame_publish_calls = frame_publish_bytes = frame_dedup_calls = frame_dedup_bytes = 0;\n        return;\n    }"
+        },
+        {
+          "old": "MappingGuard::MappingGuard() : MappingGuard(true) {}",
+          "new": "bool resource_reuse_enabled() { return enabled() && options.resource_reuse; }\nvoid resource_gpu_write(const void *host, uint64_t size) noexcept {\n    if (resource_reuse_enabled()) reuse::source_policy.veto(host, size);\n}\nvoid resource_backend(bool supported) noexcept {\n    if (resource_reuse_enabled()) reuse::source_policy.backend(supported && direct_heap::state.active.load());\n}\nvoid resource_deny(uint32_t why) noexcept {\n    if (resource_reuse_enabled()) reuse::source_policy.deny(why);\n}\nuint64_t resource_texture_hash(uint8_t **table, uint32_t address, const void *pixels,\n    uint64_t size, const void *palette, uint64_t palette_size, ResourceHash hash) {\n    if (!resource_controls_ran) {\n        resource_controls_ran = true;\n        resource_controls_ok = reuse::dynamic_controls(hash);\n        record(\"resource_reuse\", \"dynamic_core\", resource_controls_ok ? \"pass\" : \"fail\",\n            \"production hash callback; private pixels/palette, tracked mutation, same-value, lifetime, withdrawn coverage and missing-writer negative; no GPU injection\");\n    }\n    const auto full = [&]() {\n        tracelab::Scope measured(tracelab::Metric::TextureHash, tracelab::Domain::Render, size);\n        return (pixels && size ? hash(pixels,size) : 0) ^ (palette && palette_size ? hash(palette,palette_size) : 0);\n    };\n    if (!resource_run.active) return full();\n    const reuse::Input input{reinterpret_cast<uintptr_t>(pixels),reinterpret_cast<uintptr_t>(palette),size,palette_size,1};\n    const auto snapshot = [&]() noexcept {\n        const auto token = live_watch.before(table,address,pixels,size,palette,palette_size);\n        const auto admission = reuse::source_policy.admit(input);\n        reuse::WriteStamp external{};\n        external.valid = admission.supported; external.lifetime = admission.lifetime;\n        external.host = admission.generation;\n        // Coverage comes from the pinned native-producer profile plus persistent\n        // GPU/write-destination exclusion, NOT an empty asynchronous ledger.\n        return reuse::observer_evidence(live_watch,token,external,\n            admission.supported && resource_controls_ok ? reuse::CompleteCoverage : 0u);\n    };\n    return resource_run.cache.evaluate(input,snapshot,full);\n}\n\nMappingGuard::MappingGuard() : MappingGuard(true) {}"
+        },
+        {
+          "old": "    const auto audit = ordinary && last_hash_address == address && last_hash_size == size",
+          "new": "    if (options.resource_reuse) { last_hash_audit = {}; return; }\n    const auto audit = ordinary && last_hash_address == address && last_hash_size == size"
+        },
+        {
+          "old": "    const uint64_t hz = armGetSystemTickFreq();\n    if (options.heap_fault) {",
+          "new": "    const uint64_t hz = armGetSystemTickFreq();\n    if (options.resource_reuse) {\n        if (abort_requested.load() && resource_run.active) resource_run.finish(false,true);\n        StatusSnapshot view; resource_run.view(view, 0);\n        std::fputs(\"{\\\"schema_version\\\":1,\\\"capture_plan\\\":\\\"resource-reuse-1\\\",\\\"title\\\":\",file); json_string(file,title);\n        std::fprintf(file,\",\\\"timebase_hz\\\":%llu,\\\"tests_dropped\\\":%llu,\\\"controls_complete\\\":%s,\\\"capture_outcome\\\":\\\"%s\\\",\\\"tests\\\":[\",\n            (unsigned long long)hz,(unsigned long long)lost_results.load(),resource_controls_ok && control_mask==compact_controls_mask && !duplicate_control && !test_failed ? \"true\":\"false\",outcome_name(view.outcome));\n        { const std::lock_guard<std::mutex> lock(results_mutex);\n          for (size_t i=0;i<results.size();++i) { const auto&r=results[i]; std::fputs(i?\",{\\\"suite\\\":\" : \"{\\\"suite\\\":\",file); json_string(file,r.suite); std::fputs(\",\\\"name\\\":\",file);json_string(file,r.name);std::fputs(\",\\\"status\\\":\",file);json_string(file,r.status);std::fputs(\",\\\"detail\\\":\",file);json_string(file,r.detail);std::fputc('}',file); }\n        }\n        std::fputs(\"],\\\"resource_reuse\\\":\",file);resource_run.write(file);std::fputs(\"}\\n\",file);\n        if (std::ferror(file)) LOG_ERROR(\"[resource-reuse] report export failed\");\n        return;\n    }\n    if (options.heap_fault) {"
+        },
+        {
+          "old": "void publish_status(uint64_t tick) {\n    StatusSnapshot out;",
+          "new": "void publish_status(uint64_t tick) {\n    if (options.resource_reuse) {\n        StatusSnapshot integrated;\n        integrated.source_tick = tick; integrated.timebase_hz = armGetSystemTickFreq();\n        resource_run.view(integrated,tick);\n        const std::lock_guard<std::mutex> lock(status_mutex);\n        published_status = integrated;\n        return;\n    }\n    StatusSnapshot out;"
+        },
+        {
+          "old": "        tracelab::Scope measured(tracelab::Metric::TextureHash, tracelab::Domain::Render, size);\n",
+          "new": ""
+        },
+        {
+          "old": "        StatusSnapshot view; resource_run.view(view, 0);",
+          "new": "        StatusSnapshot view; resource_run.view(view, resource_run.active ? armGetSystemTickFreq() : 0);"
+        },
+        {
+          "old": "resource_run.view(view, resource_run.active ? armGetSystemTickFreq() : 0);",
+          "new": "resource_run.view(view, resource_run.last_tick());"
+        },
+        {
+          "old": "        if (std::ferror(file)) LOG_ERROR(\"[resource-reuse] report export failed\");\n        return;",
+          "new": "        const bool io_error = std::ferror(file) != 0;\n        const bool close_error = std::fclose(handle.release()) != 0;\n        if (io_error || close_error) LOG_ERROR(\"[resource-reuse] report export failed\");\n        return;"
+        },
+        {
+          "old": "            if (w.failed || epoch::domain.snapshot().failed || direct_heap::state.errors.load()\n                || deferred_import::registry.summary().errors || resource_run.cache.failed()",
+          "new": "            if (w.failed || epoch::domain.snapshot().failed || direct_heap::state.errors.load()\n                || control_mask != compact_controls_mask || duplicate_control || test_failed || lost_results.load()\n                || deferred_import::registry.summary().errors || resource_run.cache.failed()"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/modules/SceGxm/SceGxm.cpp",
+      "base_blob": "6ffd59055b844412e0e17c11b2ae1ce6f099a920",
+      "replacements": [
+        {
+          "old": "#include <modules/module_parent.h>",
+          "new": "#include <modules/module_parent.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/switch_resource_reuse.h>\n#include <util/host_output_scope.h>\n#endif"
+        },
+        {
+          "old": "    SceGxmContext *ctx = context->get(emuenv.mem);\n    new (ctx) SceGxmContext(emuenv.gxm.callback_lock);",
+          "new": "    SceGxmContext *ctx = context->get(emuenv.mem);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::resource_gpu_write(ctx, sizeof(SceGxmContext));\n#endif\n    new (ctx) SceGxmContext(emuenv.gxm.callback_lock);"
+        },
+        {
+          "old": "    SceGxmContext *ctx = deferredContext->get(emuenv.mem);\n    new (ctx) SceGxmContext(emuenv.gxm.callback_lock);",
+          "new": "    SceGxmContext *ctx = deferredContext->get(emuenv.mem);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::resource_gpu_write(ctx, sizeof(SceGxmContext));\n#endif\n    new (ctx) SceGxmContext(emuenv.gxm.callback_lock);"
+        },
+        {
+          "old": "    ctx->make_new_alloc_space(emuenv.kernel, emuenv.mem, thread_id);",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::resource_gpu_write(params->vdmRingBufferMem.get(emuenv.mem), params->vdmRingBufferSize);\n#endif\n    ctx->make_new_alloc_space(emuenv.kernel, emuenv.mem, thread_id);"
+        },
+        {
+          "old": "    renderer::create(syncObject->get(emuenv.mem), *emuenv.renderer);",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::resource_gpu_write(syncObject->get(emuenv.mem), sizeof(SceGxmSyncObject));\n#endif\n    renderer::create(syncObject->get(emuenv.mem), *emuenv.renderer);"
+        },
+        {
+          "old": "params->vdmRingBufferSize);",
+          "new": "params->vdmRingBufferMemSize);"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/cheat/src/cheat.cpp",
+      "base_blob": "86504ffb5ef5ae825ba93eb9dc8ba032a4a844e5",
+      "replacements": [
+        {
+          "old": "#include <cheat/functions.h>",
+          "new": "#include <cheat/functions.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/switch_resource_reuse.h>\n#include <util/host_output_scope.h>\n#endif"
+        },
+        {
+          "old": "        *byte = source[i];",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        switch_validation::epoch::HostOutputLease output(byte, {1, true});\n#endif\n        *byte = source[i];"
+        },
+        {
+          "old": "bool write_bytes(MemState &mem, uint32_t address, const uint8_t *source, uint32_t size) {",
+          "new": "bool write_bytes(MemState &mem, uint32_t address, const uint8_t *source, uint32_t size) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::HostLease native_cheat;\n#endif"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/kernel/src/thread.cpp",
+      "base_blob": "ab13d4416624de724bf3a5f4a1b944517cb4c31c",
+      "replacements": [
+        {
+          "old": "#include <util/log.h>",
+          "new": "#include <util/log.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/switch_resource_reuse.h>\n#include <util/host_output_scope.h>\n#endif"
+        },
+        {
+          "old": "        memcpy(Ptr<uint8_t>(data_addr).get(mem), argp.get(mem), arglen);",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        switch_validation::epoch::HostOutputLease output(Ptr<uint8_t>(data_addr).get(mem), {arglen, true});\n#endif\n        memcpy(Ptr<uint8_t>(data_addr).get(mem), argp.get(mem), arglen);"
+        },
+        {
+          "old": "        memcpy(Ptr<uint32_t>(sp).get(mem), &args[4], remain_size * 4);",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        switch_validation::epoch::HostOutputLease output(Ptr<uint32_t>(sp).get(mem), {remain_size * 4, true});\n#endif\n        memcpy(Ptr<uint32_t>(sp).get(mem), &args[4], remain_size * 4);"
+        },
+        {
+          "old": "    auto *ctx = Ptr<uint32_t>(sp_aligned).get(*cpu.mem);",
+          "new": "    auto *ctx = Ptr<uint32_t>(sp_aligned).get(*cpu.mem);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::HostOutputLease output(ctx, {ctx_size, true});\n#endif\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/renderer/src/sync.cpp",
+      "base_blob": "d3f85fab53a6014333f0fe0b453e98723df9162d",
+      "replacements": [
+        {
+          "old": "#include <renderer/functions.h>",
+          "new": "#include <renderer/functions.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/switch_resource_reuse.h>\n#include <util/host_output_scope.h>\n#endif"
+        },
+        {
+          "old": "        *val = notif.value;",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        switch_validation::epoch::HostOutputLease output(val, {sizeof(*val), true});\n#endif\n        *val = notif.value;"
+        },
+        {
+          "old": "void subject_done(SceGxmSyncObject *sync_object, const uint32_t timestamp) {",
+          "new": "void subject_done(SceGxmSyncObject *sync_object, const uint32_t timestamp) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::resource_gpu_write(sync_object, sizeof(SceGxmSyncObject));\n#endif\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/renderer/src/scene.cpp",
+      "base_blob": "ddd5940db164be2b9832ab2352e9ced5d25398f2",
+      "replacements": [
+        {
+          "old": "#include <util/log.h>",
+          "new": "#include <util/log.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/switch_resource_reuse.h>\n#include <util/host_output_scope.h>\n#endif"
+        },
+        {
+          "old": "    auto signal_notifications = [&]() {",
+          "new": "    auto signal_notifications = [&]() {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        switch_validation::epoch::HostOutputLease vertex_output(vertex_notification.address.get(mem), {vertex_notification.address ? 4u : 0u, true});\n        switch_validation::epoch::HostOutputLease fragment_output(fragment_notification.address.get(mem), {fragment_notification.address ? 4u : 0u, true});\n#endif\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/renderer/include/renderer/commands.h",
+      "base_blob": "2c5393d6b1250217846d197aeb81c0c55aa71068",
+      "replacements": [
+        {
+          "old": "#include <cassert>",
+          "new": "#include <cassert>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/switch_resource_reuse.h>\n#include <util/host_output_scope.h>\n#endif"
+        },
+        {
+          "old": "    void complete(const int code) {\n        *cmd->status = code;",
+          "new": "    void complete(const int code) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        switch_validation::epoch::HostOutputLease output(cmd->status, {sizeof(*cmd->status), true});\n#endif\n        *cmd->status = code;"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/renderer/src/transfer.cpp",
+      "base_blob": "1cf963bf21c110e64be391fcd3b2793640b51659",
+      "replacements": [
+        {
+          "old": "#include <util/log.h>",
+          "new": "#include <util/log.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/switch_resource_reuse.h>\n#include <util/host_output_scope.h>\n#endif"
+        },
+        {
+          "old": "COMMAND(handle_transfer_copy) {",
+          "new": "COMMAND(handle_transfer_copy) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::HostLease native_transfer;\n#endif\n"
+        },
+        {
+          "old": "COMMAND(handle_transfer_downscale) {",
+          "new": "COMMAND(handle_transfer_downscale) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::HostLease native_transfer;\n#endif\n"
+        },
+        {
+          "old": "COMMAND(handle_transfer_fill) {",
+          "new": "COMMAND(handle_transfer_fill) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::epoch::HostLease native_transfer;\n#endif\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/renderer/src/vulkan/context.cpp",
+      "base_blob": "fb80c669ca47e0095ae1b66b01722fd038d6ffcc",
+      "replacements": [
+        {
+          "old": "#include <util/log.h>",
+          "new": "#include <util/log.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/switch_resource_reuse.h>\n#include <util/host_output_scope.h>\n#endif"
+        },
+        {
+          "old": "            memcpy(Ptr<uint8_t>(destination).get(mem), source + row_offset + copied, bytes);",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n            switch_validation::epoch::HostOutputLease output(Ptr<uint8_t>(destination).get(mem), {bytes, true});\n#endif\n            memcpy(Ptr<uint8_t>(destination).get(mem), source + row_offset + copied, bytes);"
+        },
+        {
+          "old": "                               // same as in handle_sync_surface_data",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n                               switch_validation::epoch::HostOutputLease first_output(request.notifications[0].address.get(mem), {request.notifications[0].address ? 4u : 0u, true});\n                               switch_validation::epoch::HostOutputLease second_output(request.notifications[1].address.get(mem), {request.notifications[1].address ? 4u : 0u, true});\n#endif\n                               // same as in handle_sync_surface_data"
+        },
+        {
+          "old": "                           if (request.callback) {\n                               (*request.callback)();",
+          "new": "                           if (request.callback) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n                               switch_validation::epoch::HostLease native_callback;\n#endif\n                               (*request.callback)();"
+        },
+        {
+          "old": "            render_cmd.copyQueryPoolResults(current_visibility_buffer->query_pool, range.offset, range.size,",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n            const uint64_t bytes = uint64_t(range.size) * sizeof(uint32_t);\n            const uint64_t base = uint64_t(current_visibility_buffer->address) + uint64_t(range.offset) * sizeof(uint32_t);\n            if (base + bytes > (1ull << 32)) switch_validation::resource_deny(8);\n            else for (uint64_t off = 0; off < bytes;) {\n                const auto address = static_cast<Address>(base + off);\n                const auto n = std::min<uint64_t>(bytes-off, 4096-(address&4095));\n                switch_validation::resource_gpu_write(Ptr<uint8_t>(address).get(mem), n); off += n;\n            }\n#endif\n            render_cmd.copyQueryPoolResults(current_visibility_buffer->query_pool, range.offset, range.size,"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/gdbstub/src/gdb.cpp",
+      "base_blob": "7ce6868dd3336141905868d3162446fc996758fa",
+      "replacements": [
+        {
+          "old": "#include <memory>",
+          "new": "#include <memory>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/switch_resource_reuse.h>\n#include <util/host_output_scope.h>\n#endif"
+        },
+        {
+          "old": "static std::string cmd_write_memory(EmuEnvState &state, PacketCommand &command) {",
+          "new": "static std::string cmd_write_memory(EmuEnvState &state, PacketCommand &command) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::resource_deny(2);\n#endif\n"
+        },
+        {
+          "old": "static std::string cmd_write_binary(EmuEnvState &state, PacketCommand &command) {",
+          "new": "static std::string cmd_write_binary(EmuEnvState &state, PacketCommand &command) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::resource_deny(2);\n#endif\n"
+        },
+        {
+          "old": "                        state.gdb.last_reply = function.function(state, command);",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n                        switch_validation::resource_deny(2);\n#endif\n                        state.gdb.last_reply = function.function(state, command);"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/modules/SceNetCtl/SceNetCtl.cpp",
+      "base_blob": "51a6c781dad6ddfa82d75d87ce29c235e587bc23",
+      "replacements": [
+        {
+          "old": "#include <module/module.h>",
+          "new": "#include <module/module.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/switch_resource_reuse.h>\n#include <util/host_output_scope.h>\n#endif"
+        },
+        {
+          "old": "static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {",
+          "new": "static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::resource_deny(32);\n#endif\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/renderer/src/vulkan/creation.cpp",
+      "base_blob": "c44b512e81e6079c0a4a92a08806ee9c1328e3fc",
+      "replacements": [
+        {
+          "old": "#include <renderer/vulkan/state.h>",
+          "new": "#include <renderer/vulkan/state.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/switch_resource_reuse.h>\n#include <util/host_output_scope.h>\n#endif"
+        },
+        {
+          "old": "bool create(std::unique_ptr<VertexProgram> &vp, VKState &state, const SceGxmProgram &program) {",
+          "new": "bool create(std::unique_ptr<VertexProgram> &vp, VKState &state, const SceGxmProgram &program) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (program.program_flags & SCE_GXM_PROGRAM_FLAG_BUFFER_STORE)\n        switch_validation::resource_deny(1);\n#endif\n"
+        },
+        {
+          "old": "bool create(std::unique_ptr<FragmentProgram> &fp, VKState &state, const SceGxmProgram &program, const SceGxmBlendInfo *blend) {",
+          "new": "bool create(std::unique_ptr<FragmentProgram> &fp, VKState &state, const SceGxmProgram &program, const SceGxmBlendInfo *blend) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    if (program.program_flags & SCE_GXM_PROGRAM_FLAG_BUFFER_STORE)\n        switch_validation::resource_deny(1);\n#endif\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/renderer/src/vulkan/surface_cache.cpp",
+      "base_blob": "96e0f76d1c46138432a8610105c7ea285e6ebf9c",
+      "replacements": [
+        {
+          "old": "#include <util/log.h>",
+          "new": "#include <util/log.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/switch_resource_reuse.h>\n#include <util/host_output_scope.h>\n#endif"
+        },
+        {
+          "old": "    cmd_buffer.copyImageToBuffer(image_to_copy, image_layout, buffer, copy);",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    // Walk software pages: a Guest span is not necessarily physically linear.\n    for (uint64_t off = 0; off < *readback_size;) {\n        const auto address = last_written_surface->data.address() + static_cast<uint32_t>(off);\n        const uint64_t n = std::min<uint64_t>(*readback_size - off, 4096 - (address & 4095));\n        switch_validation::resource_gpu_write(Ptr<uint8_t>(address).get(context->mem), n);\n        off += n;\n    }\n#endif\n    cmd_buffer.copyImageToBuffer(image_to_copy, image_layout, buffer, copy);"
+        },
+        {
+          "old": "    uint8_t *pixels = surface->data.cast<uint8_t>().get(mem);",
+          "new": "    uint8_t *pixels = surface->data.cast<uint8_t>().get(mem);\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::resource_gpu_write(pixels, uint64_t(surface->stride_bytes) * surface->original_height);\n#endif\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/renderer/src/vulkan/renderer.cpp",
+      "base_blob": "4f62037e80751c16c2aedeaee34e9903fa4fe154",
+      "replacements": [
+        {
+          "old": "#include <util/log.h>",
+          "new": "#include <util/log.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/switch_resource_reuse.h>\n#include <util/host_output_scope.h>\n#endif"
+        },
+        {
+          "old": "void VKState::render_frame(DisplayState &display, const GxmState &gxm, MemState &mem) {",
+          "new": "void VKState::render_frame(DisplayState &display, const GxmState &gxm, MemState &mem) {\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n    switch_validation::resource_backend(mapping_method == MappingMethod::ExernalHost);\n    if (has_shader_store) switch_validation::resource_deny(1);\n#endif\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/CMakeLists.txt",
+      "base_blob": "702757a15ab45560944359c8fc752b914bb63701",
+      "replacements": [
+        {
+          "old": "VITA3K_SWITCH_EPOCH_AUDIT_DEFAULT=1)",
+          "new": "VITA3K_SWITCH_EPOCH_AUDIT_DEFAULT=1 VITA3K_SWITCH_RESOURCE_REUSE_DEFAULT=1)"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/util/include/util/switch_validation_status.h",
+      "base_blob": "d8f950aa3a9d4d563284584063a0fc373ac7953a",
+      "replacements": [
+        {
+          "old": "struct StatusSnapshot {",
+          "new": "struct StatusSnapshot {\n    bool resource_reuse = false;\n    uint32_t reuse_mode = 0;\n    uint64_t reuse_calls = 0, reuse_bytes = 0, reuse_audits = 0, reuse_diffs = 0;"
+        },
+        {
+          "old": "    const auto phase_left = ceil_seconds(s.stage_remaining_ms);",
+          "new": "    if (s.resource_reuse) {\n        const bool done = s.stage == Stage::Complete || s.stage == Stage::Interrupted;\n        const bool waiting = s.stage == Stage::Waiting || s.stage == Stage::Startup;\n        const bool bad = s.outcome == CaptureOutcome::Invalid || s.failed || s.watch_failed;\n        const char *mode = s.reuse_mode == 1 ? \"AUDIT / FULL\" : s.reuse_mode == 2 ? \"REUSE / FALLBACK\" : \"STOCK\";\n        text.tone = bad ? HudText::Tone::Error : done ? (s.outcome == CaptureOutcome::Ready ? HudText::Tone::Ready : HudText::Tone::Warning) : HudText::Tone::Running;\n        std::snprintf(text.title.data(), text.title.size(), \"RESOURCE REUSE | %s\", done ? bad ? \"DONE - CHECK REPORT\" : s.outcome == CaptureOutcome::Ready ? \"DONE - REPORT READY\" : \"DONE - INCONCLUSIVE\" : waiting ? \"WAITING FOR SCENE\" : mode);\n        std::snprintf(text.timing.data(), text.timing.size(), \"Stage %u/6 | %u%% | Samples:%llu/32 %s | Budget:%llus\", s.phase,s.progress_per_mille/10,(unsigned long long)s.phase_samples,s.sample_extending?\"EXTENDING\":\"\",(unsigned long long)ceil_seconds(s.remaining_ms));\n        std::snprintf(text.samples.data(), text.samples.size(), \"Skipped:%llu / %llu MiB | Full audits:%llu | Diff:%llu\",(unsigned long long)s.reuse_calls,(unsigned long long)(s.reuse_bytes>>20),(unsigned long long)s.reuse_audits,(unsigned long long)s.reuse_diffs);\n        std::snprintf(text.tests.data(), text.tests.size(), \"Self-tests:%u PASS / %u FAIL / %u SKIP\",s.passed,s.failed,s.skipped);\n        std::snprintf(text.action.data(), text.action.size(), \"%s\",done ? \"EXIT NORMALLY TO SAVE | Submit this run; no repeat required\" : waiting ? \"Enter target scene; L+R+Y once | Automatic 6 stages\" : \"One run: stock, audit, reuse, reuse, audit, stock\");\n        return text;\n    }\n    const auto phase_left = ceil_seconds(s.stage_remaining_ms);"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/renderer/src/texture/cache.cpp",
+      "base_blob": "42971a44b2d22f2663f29561d4aba2b43b2535d5",
+      "replacements": [
+        {
+          "old": "#include <util/switch_protected_cache_probe.h>",
+          "new": "#include <util/switch_protected_cache_probe.h>\n#include <util/switch_resource_reuse.h>"
+        },
+        {
+          "old": "    tracelab::Scope hash_profile(tracelab::Metric::TextureHash, tracelab::Domain::Render, texture_size);",
+          "new": "    switch_validation::MappingGuard lifetime_pin(switch_validation::resource_reuse_enabled());"
+        },
+        {
+          "old": "    switch_validation::run_protected_cache_probe(&hash_data);",
+          "new": "    if (switch_validation::resource_reuse_enabled())\n        return switch_validation::resource_texture_hash(mem.page_table.get(), data.address(),\n            data.address() ? data.get(mem) : nullptr, data.address() ? texture_size : 0,\n            palette_count ? get_texture_palette(texture, mem) : nullptr, palette_count * sizeof(uint32_t), &hash_data);\n    tracelab::Scope hash_profile(tracelab::Metric::TextureHash, tracelab::Domain::Render, texture_size);\n    switch_validation::run_protected_cache_probe(&hash_data);"
+        },
+        {
+          "old": "palette_count ? get_texture_palette(texture, mem) : nullptr, palette_count * sizeof(uint32_t), &hash_data);",
+          "new": "palette_count ? get_texture_palette(texture, mem) : nullptr, palette_count * sizeof(uint32_t),\n            +[](const void *p, size_t n) -> uint64_t {\n                tracelab::Scope full_scan(tracelab::Metric::TextureHash, tracelab::Domain::Render, n);\n                return hash_data(p, n);\n            });"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/test_content_source_wiring.py",
+      "base_blob": "b9f7e7f6338c2230ca8cc56ba856afcaafe68e1e",
+      "replacements": [
+        {
+          "old": "#include <util/content_hash_memo.h>",
+          "new": "#include <util/content_hash_memo.h>\n#include <util/switch_resource_reuse.h>\n#include <util/switch_write_watch_api.h>"
+        },
+        {
+          "old": "#include <util/switch_write_watch_api.h>\n",
+          "new": ""
+        },
+        {
+          "old": "namespace switch_validation{",
+          "new": "namespace switch_validation{\nstruct MappingGuard { explicit MappingGuard(bool) {} }; // function-body adapter; lifetime tested with real Table separately"
+        }
+      ]
+    },
+    {
+      "path": "scripts/analyze-switch-capture.py",
+      "base_blob": "9cfa77fd4be7b2a7fd8ea6f58c9bfaf638844bef",
+      "replacements": [
+        {
+          "old": "def analyze(data, changed_total=None):",
+          "new": "def analyze(data, changed_total=None):\n    if data.get('capture_plan') == 'resource-reuse-1':\n        import importlib.util\n        spec = importlib.util.spec_from_file_location('resource_analysis', Path(__file__).with_name('analyze-switch-resource-reuse.py'))\n        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)\n        return module.analyze(data)\n"
+        }
+      ]
+    },
+    {
+      "path": "vita3k/kernel/src/debugger.cpp",
+      "base_blob": "2b83fe6c4cd6f42668203a1f6410d0cdd8c4a8ed",
+      "replacements": [
+        {
+          "old": "#include <kernel/debugger.h>",
+          "new": "#include <kernel/debugger.h>\n#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n#include <util/switch_resource_reuse.h>\n#include <util/host_output_scope.h>\n#endif"
+        },
+        {
+          "old": "        std::memcpy(Ptr<uint8_t>(addr).get(mem), THUMB_BREAKPOINT, sizeof(THUMB_BREAKPOINT));",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        switch_validation::resource_deny(2);\n#endif\n        std::memcpy(Ptr<uint8_t>(addr).get(mem), THUMB_BREAKPOINT, sizeof(THUMB_BREAKPOINT));"
+        },
+        {
+          "old": "        std::memcpy(Ptr<uint8_t>(addr).get(mem), ARM_BREAKPOINT, sizeof(ARM_BREAKPOINT));",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        switch_validation::resource_deny(2);\n#endif\n        std::memcpy(Ptr<uint8_t>(addr).get(mem), ARM_BREAKPOINT, sizeof(ARM_BREAKPOINT));"
+        },
+        {
+          "old": "        std::memcpy(Ptr<uint8_t>(addr).get(mem), &last.data, last.thumb_mode ? sizeof(THUMB_BREAKPOINT) : sizeof(ARM_BREAKPOINT));",
+          "new": "#if defined(__SWITCH__) && defined(VITA3K_SWITCH_TRACELAB)\n        switch_validation::resource_deny(2);\n#endif\n        std::memcpy(Ptr<uint8_t>(addr).get(mem), &last.data, last.thumb_mode ? sizeof(THUMB_BREAKPOINT) : sizeof(ARM_BREAKPOINT));"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/test_switch_declaration_resolution.py",
+      "base_blob": "d13173db7d8fb02ce016ddb974c3487d56a34878",
+      "replacements": [
+        {
+          "old": "            assert own == final, item['path']",
+          "new": "            # Verify the final checkout INCLUDING later integration stages,\n            # then invert only this stage below; later stages may extend it.\n            tail = own\n            following = False\n            for rp in engine.RECIPES:\n                if rp.name == 'switch-declaration-resolution.json':\n                    following = True; continue\n                if following:\n                    for spec in json.loads(rp.read_text())['files']:\n                        if spec['path'] == item['path']: tail = engine.transform(tail, spec['replacements'])\n            assert tail == final, item['path']"
+        }
+      ]
+    }
+  ]
+}

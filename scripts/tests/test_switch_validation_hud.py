@@ -182,7 +182,7 @@ int main(int argc, char **argv) {
                               ('no_uploads', 'inconclusive'), ('failed', 'invalid'), ('sparse', 'invalid'), ('stall', 'invalid')]:
             report = json.loads((tmp / name / 'memory-validation.json').read_text())
             assert report['capture_outcome'] == outcome, (name, report)
-            assert report['validation_revision'] == 3
+            assert report['validation_revision'] == 4
             assert report['overlay_completion_is_not_graphics_validation']
         assert not (tmp / 'off/memory-validation.json').exists()
         # This must be attached independently of the user-controlled FPS widget.

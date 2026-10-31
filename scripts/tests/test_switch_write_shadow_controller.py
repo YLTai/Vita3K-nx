@@ -28,8 +28,11 @@ namespace sv=switch_validation;
 uint64_t tick=10000;
 uint32_t h1=1,h2=2;
 void hash(uint8_t **pt,uint8_t *bytes){
+    static uint32_t old1=h1, old2=h2;
     auto a=sv::live_hash_begin(pt,0x20000,bytes,64,nullptr,0);sv::live_hash_end(a,h1);
+    sv::live_cache_decision(0,0x20000,64,old1^1,h1^1,true); old1=h1;
     auto b=sv::live_hash_begin(pt,0x21000,bytes+4096,64,nullptr,0);sv::live_hash_end(b,h2);
+    sv::live_cache_decision(1,0x21000,64,old2^1,h2^1,true); old2=h2;
 }
 int main(int argc,char**argv){
  assert(argc==2);std::filesystem::current_path(argv[1]);
@@ -39,6 +42,11 @@ int main(int argc,char**argv){
  std::unique_ptr<uint8_t,decltype(&std::free)> bytes(static_cast<uint8_t*>(std::aligned_alloc(4096,8192)),&std::free);
  assert(bytes);std::memset(bytes.get(),0,8192);
  sv::begin_session("LIVE");
+ // Synthetic startup transcript for ANALYZER contract tests, NOT native execution.
+ for (const char *name : {"native_exact_store", "native_repeat_alias_store", "raw_after_cpu_negative_control",
+     "page_neighbor_negative_control", "host_notice_positive_control", "observer_CAS_contract",
+     "cache_first_baseline_ledger", "remap_discards_inflight_hash", "canary_cleanup"})
+     sv::record("write_watch_canary",name,"pass","synthetic analyzer fixture only");
  sv::live_publish_page(pt.get(),0x20,reinterpret_cast<uint8_t*>(uintptr_t(bytes.get())-0x20000));
  sv::live_publish_page(pt.get(),0x21,reinterpret_cast<uint8_t*>(uintptr_t(bytes.get()+4096)-0x21000));
  sv::live_publish_page(pt.get(),0x40,reinterpret_cast<uint8_t*>(uintptr_t(bytes.get())-0x40000));
@@ -75,15 +83,23 @@ int main(int argc,char**argv){
                         str(ROOT/'vita3k/util/src/switch_memory_validation.cpp'),str(tmp/'main.cpp'),'-o',str(exe)],check=True)
         subprocess.run([str(exe),str(tmp)],check=True,timeout=20)
         data=json.loads((tmp/'report/memory-validation.json').read_text())
-        assert data['validation_revision']==3 and data['strict_hash'] and not data['hash_skipping']
+        assert data['validation_revision']==4 and data['strict_hash'] and not data['hash_skipping']
         assert len(data['benchmark']['phases'])==4
         assert data['write_shadow']['phases'][1]['changed_cpu_seen']==1
         assert data['write_shadow']['phases'][2]['changed_unobserved']==1
         assert all(p['dedup_calls']==0 for p in data['benchmark']['phases'])
         spec=importlib.util.spec_from_file_location('analyzer',ROOT/'scripts/analyze-switch-memory-v3.py')
         m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
-        report=m.analyze(data);assert report['comparison_eligible'] and len(report['pairs'])==2
+        report=m.analyze(data,2);assert report['comparison_eligible'] and len(report['pairs'])==2
         assert report['warnings'] and report['changed_without_observed_cpu']==1
+        assert report['cache_ledger_check']['matched_to_telemetry'] is True
+        assert report['cache_ledger_check']['reasons']['cpu_interval']==1
+        assert report['cache_ledger_check']['reasons']['unobserved']==1
+        bad=copy.deepcopy(data);bad['write_shadow']['cache_ledger']['changes']+=1
+        assert not m.analyze(bad,2)['comparison_eligible']
+        assert not m.analyze(data,3)['comparison_eligible']
+        bad=copy.deepcopy(data);bad['tests']=[t for t in bad['tests'] if t['name']!='native_exact_store']
+        assert not m.analyze(bad,2)['comparison_eligible']
         for mutate in ('phase','coverage','invalid','failed','duration','schema','no_full_hash'):
             x=copy.deepcopy(data)
             if mutate=='phase':x['benchmark']['phases'].pop()

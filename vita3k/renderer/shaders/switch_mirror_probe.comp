@@ -1,0 +1,27 @@
+// Private validation shader. Not a translation of a Guest program.
+// SPDX-License-Identifier: GPL-2.0-or-later
+#version 450
+#extension GL_EXT_buffer_reference : require
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer Words {
+    uint data[];
+};
+layout(push_constant, std430) uniform Params {
+    layout(offset = 0) Words source;
+    layout(offset = 8) Words destination;
+    layout(offset = 16) uint count;
+    layout(offset = 20) uint value;
+    layout(offset = 24) uint operation; // 0 = fill, 1 = copy
+    layout(offset = 28) uint reserved;
+} p;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    // The host deliberately dispatches one extra workgroup. All physical
+    // accesses must remain inside this explicitly supplied range.
+    if (i >= p.count)
+        return;
+    uint value = p.value;
+    if (p.operation == 1)
+        value = p.source.data[i];
+    p.destination.data[i] = value;
+}

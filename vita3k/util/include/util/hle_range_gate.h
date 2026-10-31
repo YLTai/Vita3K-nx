@@ -1,0 +1,365 @@
+// Range-scoped synchronous HLE evidence. Caller holds the execution-domain mutex.
+// Unknown imports always remain conservative. This is NOT Hash-reuse authority.
+// SPDX-License-Identifier: GPL-2.0-or-later
+#pragma once
+#include <util/callback_prefix_gate.h>
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <initializer_list>
+#include <limits>
+#include <unordered_map>
+#include <vector>
+
+namespace switch_validation::epoch {
+struct HostSpan {
+    uintptr_t begin = 0;
+    uint64_t size = 0;
+    HostSpan() = default;
+    HostSpan(const void *p, uint64_t n) : begin(reinterpret_cast<uintptr_t>(p)), size(p ? n : 0) {}
+    bool operator==(const HostSpan &) const = default;
+    bool valid() const { return !size || (begin && size <= UINTPTR_MAX - begin); }
+    bool overlaps(const HostSpan &s) const {
+        return size && s.size && (begin <= s.begin ? s.begin - begin < size : begin - s.begin < s.size);
+    }
+};
+struct RangeStamp {
+    uint64_t version = 0, unknown = 0, gpu = 0, busy = 0, unknown_busy = 0;
+    bool valid = false;
+};
+// Bounded active imports and texture interests. Small output spans use a page
+// index; no scan of all textures on every mutex/unlock or tiny libc output.
+class HleRanges {
+public:
+    static constexpr unsigned no_slot = ~0u, max_imports = 128, max_resources = 1024;
+    struct OutputStats {
+        uint64_t begins = 0, ends = 0, active = 0, capacity_bytes = 0;
+        uint64_t overlap_touches = 0;
+        std::array<uint64_t, 5> sources{}; // generic, ATRAC9, AAC, MP3, GXM uniform
+    };
+    struct Row {
+        uint32_t nid = 0;
+        const char *name = nullptr; // make_bridge supplies immutable static names
+        uint64_t calls = 0, scoped = 0, unknown_samples = 0, overlap_samples = 0;
+        uint64_t parks = 0, resumes = 0, parked_samples = 0;
+        uint64_t unknown_finishes = 0, unknown_prefixes = 0;
+    };
+private:
+    struct PhaseEvents {
+        uint64_t enters = 0, declarations = 0, exits = 0;
+        uint64_t unknown_finishes = 0, unknown_prefixes = 0;
+        uint64_t unknown_samples = 0, overlap_samples = 0;
+    };
+    struct PhaseRows {
+        PhaseEvents total, unattributed;
+        std::array<PhaseEvents, 256> rows{};
+    };
+    std::array<PhaseRows, 4> phase_rows_{};
+    unsigned active_phase_ = 4;
+    uint64_t capture_serial_ = 0;
+    void phase_event(unsigned row, uint64_t PhaseEvents::*field) {
+        if (active_phase_ >= phase_rows_.size()) return;
+        auto &p = phase_rows_[active_phase_];
+        advance(p.total.*field);
+        auto &entry = row < p.rows.size() ? p.rows[row] : p.unattributed;
+        advance(entry.*field);
+    }
+    static void write_phase_counts(FILE *f, const PhaseEvents &c) {
+        using U = unsigned long long;
+        std::fprintf(f, "{\"enters\":%llu,\"declarations\":%llu,\"exits\":%llu,"
+            "\"unknown_finishes\":%llu,\"unknown_prefixes\":%llu,"
+            "\"unknown_samples\":%llu,\"overlap_samples\":%llu}",
+            U(c.enters), U(c.declarations), U(c.exits), U(c.unknown_finishes),
+            U(c.unknown_prefixes), U(c.unknown_samples), U(c.overlap_samples));
+    }
+    struct Import { bool used = false, scoped = false, parked = false, output = false; uint32_t row = no_slot;
+        const char *name = nullptr; std::array<HostSpan, 3> spans{}; };
+    struct Interest { bool used = false; std::array<HostSpan, 2> spans{};
+        uint64_t version = 0, busy = 0, visited = 0; };
+    std::array<Import, max_imports> imports_{};
+    std::array<Interest, max_resources> resources_{};
+    std::array<Row, 256> rows_{};
+    // Attribution acceleration only. Every hit verifies the full NID; a direct
+    // cache collision falls back to the original bounded table.
+    std::array<unsigned, 1024> row_cache_{};
+    struct NoOverlap {
+        uint64_t revision = 0;
+        std::array<HostSpan, 3> spans{};
+    };
+    std::array<NoOverlap, 256> no_overlap_{};
+    uint64_t interests_revision_ = 1;
+    uint64_t row_hits_ = 0, row_probes_ = 0, range_hits_ = 0, range_scans_ = 0;
+    std::unordered_map<uintptr_t, std::vector<unsigned>> pages_;
+    uint64_t serial_ = 0, unknown_ = 0, gpu_ = 0, unknown_busy_ = 0;
+    uint64_t calls_ = 0, exits_ = 0, scoped_ = 0, samples_ = 0, missing_names_ = 0;
+    size_t edges_ = 0;
+    uint64_t parks_ = 0, resumes_ = 0, parked_ = 0;
+    bool failed_ = false;
+    OutputStats outputs_;
+    uint64_t advance(uint64_t &v) {
+        if (v == UINT64_MAX) { failed_ = true; return v; }
+        return ++v;
+    }
+    static bool overlaps(const Interest &r, const Import &i) {
+        for (const auto &a : r.spans) for (const auto &b : i.spans) if (a.overlaps(b)) return true;
+        return false;
+    }
+    void touch(Import &i, bool begin) {
+        // Cache ONLY a proved empty intersection, never content or validity.
+        // watch()/clear_interests() invalidate it even while a lease is live.
+        auto *cached = i.row < no_overlap_.size() ? &no_overlap_[i.row] : nullptr;
+        if (cached && cached->revision == interests_revision_ && cached->spans == i.spans) {
+            ++range_hits_; return;
+        }
+        ++range_scans_;
+        bool hit = false;
+        const auto serial = advance(serial_);
+        const auto visit = [&](unsigned id) {
+            auto &r = resources_[id];
+            if (!r.used || r.visited == serial || !overlaps(r, i)) return;
+            hit = true;
+            if (i.output) ++outputs_.overlap_touches;
+            r.visited = serial; r.version = serial;
+            if (begin) ++r.busy;
+            else if (r.busy) --r.busy;
+            else failed_ = true;
+        };
+        for (const auto &s : i.spans) if (s.size && !pages_.empty()) {
+            const auto first = s.begin >> 12, last = (s.begin + s.size - 1) >> 12;
+            if (last - first > pages_.size()) {
+                for (unsigned id = 0; id < max_resources; ++id) visit(id);
+            } else for (auto p = first;; ++p) {
+                if (auto it = pages_.find(p); it != pages_.end()) for (auto id : it->second) visit(id);
+                if (p == last) break;
+            }
+        }
+        if (cached && !hit && !failed_) *cached = {interests_revision_, i.spans};
+    }
+public:
+    HleRanges() { row_cache_.fill(no_slot); }
+    bool reset() {
+        for (const auto &i : imports_) if (i.used) { failed_ = true; return false; }
+        imports_ = {}; resources_ = {}; rows_ = {}; pages_.clear(); edges_ = 0;
+        row_cache_.fill(no_slot); no_overlap_ = {}; interests_revision_ = 1;
+        row_hits_ = row_probes_ = range_hits_ = range_scans_ = 0;
+        serial_ = unknown_ = gpu_ = unknown_busy_ = calls_ = exits_ = scoped_ = samples_ = missing_names_ = 0;
+        parks_ = resumes_ = parked_ = 0; outputs_ = {};
+        phase_rows_ = {}; active_phase_ = 4; capture_serial_ = 0;
+        failed_ = false; return true;
+    }
+    void clear_interests() { resources_ = {}; pages_.clear(); edges_ = 0; advance(serial_); advance(interests_revision_); }
+    bool failed() const { return failed_; }
+    // Per-event attribution; scopes may begin before or end after this phase.
+    // A restart clears only capture rows, never live imports or writer history.
+    void phase(unsigned p, bool restart) {
+        if (restart) { phase_rows_ = {}; advance(capture_serial_); }
+        active_phase_ = p < phase_rows_.size() ? p : 4;
+    }
+    unsigned enter(uint32_t nid) {
+        const unsigned bucket = (uint32_t(nid * 2654435761u) >> 22);
+        unsigned row = row_cache_[bucket];
+        if (row < rows_.size() && rows_[row].calls && rows_[row].nid == nid) {
+            ++row_hits_; ++rows_[row].calls;
+        } else {
+            row = no_slot;
+            for (unsigned n = 0; n < rows_.size(); ++n) {
+                ++row_probes_;
+                auto &r = rows_[(nid + n) % rows_.size()];
+                if (!r.calls || r.nid == nid) { row = unsigned(&r - rows_.data()); r.nid = nid; ++r.calls; break; }
+            }
+            row_cache_[bucket] = row;
+        }
+        if (row == no_slot) ++missing_names_; // attribution capacity is not correctness capacity
+        ++calls_; phase_event(row, &PhaseEvents::enters);
+        for (unsigned n = 0; n < imports_.size(); ++n) if (!imports_[n].used) {
+            imports_[n] = {}; imports_[n].used = true; imports_[n].row = row; ++unknown_busy_; return n;
+        }
+        failed_ = true; return no_slot;
+    }
+    void name(unsigned slot, const char *name) {
+        if (slot >= imports_.size() || !imports_[slot].used || !name) return;
+        auto &i = imports_[slot];
+        // A nested bridge must not silently change the enclosing contract.
+        if (i.name && std::strcmp(i.name, name)) return;
+        i.name = name;
+        if (i.row < rows_.size()) rows_[i.row].name = name;
+    }
+    bool can_declare(unsigned slot, std::initializer_list<const char *> names,
+        std::initializer_list<HostSpan> spans) const {
+        if (failed_ || slot >= imports_.size()) return false;
+        const auto &i = imports_[slot];
+        if (!i.used || i.output || i.scoped || i.parked || !i.name || spans.size() > i.spans.size()) return false;
+        bool allowed = false;
+        for (auto n : names) if (n && !std::strcmp(n, i.name)) allowed = true;
+        if (!allowed) return false;
+        for (const auto &s : spans) if (!s.valid()) return false;
+        return true;
+    }
+    bool declare(unsigned slot, std::initializer_list<const char *> names,
+        std::initializer_list<HostSpan> spans, bool prior_unknown = false) {
+        if (!can_declare(slot, names, spans)) return false;
+        auto &i = imports_[slot];
+        std::copy(spans.begin(), spans.end(), i.spans.begin());
+        // Callback-capable wrappers may have executed arbitrary code BEFORE
+        // the reviewed wait tail. Do not erase that unknown prefix's effects.
+        if (prior_unknown) {
+            advance(unknown_);
+            if (i.row < rows_.size()) ++rows_[i.row].unknown_prefixes;
+            phase_event(i.row, &PhaseEvents::unknown_prefixes);
+        }
+        --unknown_busy_; i.scoped = true; ++scoped_;
+        if (i.row < rows_.size()) ++rows_[i.row].scoped;
+        phase_event(i.row, &PhaseEvents::declarations);
+        touch(i, true); return true;
+    }
+    // Only an audited native wait may use this. This is not a read-only HLE
+    // declaration: arbitrary prefix/suffix writes remain unknown. Scoped output
+    // spans stay busy, including writes performed by a signalling thread.
+    bool park(unsigned slot, const char *root_name) {
+        if (failed_ || slot >= imports_.size()) return false;
+        auto &i = imports_[slot];
+        if (!i.used) { failed_ = true; return false; }
+        if (i.scoped || i.parked) return false;
+        name(slot, root_name);
+        if (!unknown_busy_) { failed_ = true; return false; }
+        --unknown_busy_; i.parked = true; ++parked_; ++parks_;
+        advance(unknown_); // Do not erase unknown writes before entering the wait.
+        if (i.row < rows_.size()) ++rows_[i.row].parks;
+        return true;
+    }
+    void resume(unsigned slot) {
+        if (slot >= imports_.size() || !imports_[slot].used || !imports_[slot].parked || !parked_) {
+            failed_ = true; return;
+        }
+        auto &i = imports_[slot]; i.parked = false;
+        --parked_; ++unknown_busy_; ++resumes_; advance(unknown_);
+        if (i.row < rows_.size()) ++rows_[i.row].resumes;
+    }
+    void leave(unsigned slot) {
+        if (slot >= imports_.size() || !imports_[slot].used) { failed_ = true; return; }
+        auto &i = imports_[slot];
+        if (i.output) { failed_ = true; return; }
+        if (i.parked) { // A wait guard must unwind BEFORE its import.
+            failed_ = true; --parked_; ++resumes_; advance(unknown_);
+            if (i.row < rows_.size()) ++rows_[i.row].resumes;
+        } else if (i.scoped) touch(i, false);
+        else if (unknown_busy_) {
+            --unknown_busy_; advance(unknown_);
+            if (i.row < rows_.size()) ++rows_[i.row].unknown_finishes;
+            phase_event(i.row, &PhaseEvents::unknown_finishes);
+        }
+        else failed_ = true;
+        phase_event(i.row, &PhaseEvents::exits);
+        i = {}; ++exits_;
+    }
+    unsigned begin_output(HostSpan span, unsigned source, bool bounds_valid = true) {
+        if (failed_ || !bounds_valid || source >= outputs_.sources.size() || !span.valid()) {
+            failed_ = true; return no_slot;
+        }
+        if (!span.size) return no_slot;
+        if (span.size > UINT64_MAX - outputs_.capacity_bytes) { failed_ = true; return no_slot; }
+        for (unsigned n = 0; n < imports_.size(); ++n) if (!imports_[n].used) {
+            auto &i = imports_[n]; i = {}; i.used = i.scoped = i.output = true;
+            i.spans[0] = span;
+            ++outputs_.begins; ++outputs_.active; ++outputs_.sources[source];
+            outputs_.capacity_bytes += span.size;
+            touch(i, true); return n;
+        }
+        failed_ = true; return no_slot;
+    }
+    void end_output(unsigned slot) {
+        if (slot >= imports_.size() || !imports_[slot].used || !imports_[slot].output || !outputs_.active) {
+            failed_ = true; return;
+        }
+        touch(imports_[slot], false); imports_[slot] = {};
+        ++outputs_.ends; --outputs_.active;
+    }
+    OutputStats output_stats() const { return outputs_; }
+    void watch(unsigned id, HostSpan pixels, HostSpan palette) noexcept {
+        if (failed_ || id >= resources_.size() || !pixels.valid() || !palette.valid()) { failed_ = true; return; }
+        try {
+            auto &r = resources_[id];
+            if (r.used) { failed_ = true; return; } // clear_interests precedes ID reuse
+            advance(interests_revision_);
+            r.used = true; r.spans = {pixels, palette}; r.version = advance(serial_);
+            for (const auto &i : imports_) if (i.used && i.scoped && overlaps(r, i)) ++r.busy;
+            for (const auto &s : r.spans) if (s.size) {
+                const auto first = s.begin >> 12, last = (s.begin + s.size - 1) >> 12;
+                if (last - first >= 131072 || edges_ + last - first + 1 > 131072) { failed_ = true; return; }
+                for (auto p = first;; ++p) {
+                    auto &v = pages_[p]; if (std::find(v.begin(), v.end(), id) == v.end()) { v.push_back(id); ++edges_; }
+                    if (p == last) break;
+                }
+            }
+        } catch (...) { failed_ = true; }
+    }
+    void gpu_boundary() { advance(gpu_); }
+    RangeStamp stamp(unsigned id) const {
+        if (id >= resources_.size() || !resources_[id].used) return {};
+        const auto &r = resources_[id]; return {r.version, unknown_, gpu_, r.busy, unknown_busy_, !failed_};
+    }
+    // Called only for actual texture candidate checks, not sampled HLE calls.
+    void explain(unsigned id) {
+        if (id >= resources_.size() || !resources_[id].used) return;
+        ++samples_;
+        // Attribution only is sampled; every eligibility stamp remains exact.
+        if ((samples_ & 63u) != 1u) return;
+        for (const auto &i : imports_) if (i.used && i.row < rows_.size()) {
+            if (i.parked) ++rows_[i.row].parked_samples;
+            else if (!i.scoped) { ++rows_[i.row].unknown_samples; phase_event(i.row, &PhaseEvents::unknown_samples); }
+            else if (overlaps(resources_[id], i)) { ++rows_[i.row].overlap_samples; phase_event(i.row, &PhaseEvents::overlap_samples); }
+        }
+    }
+    void write_json(FILE *f, const CallbackPollAudit *callbacks = nullptr) const {
+        using U = unsigned long long;
+        std::fprintf(f,"{\"version\":1,\"failed\":%s,\"calls\":%llu,\"exits\":%llu,\"scoped_calls\":%llu,"
+            "\"candidate_explanations\":%llu,\"unattributed_calls\":%llu,\"attribution_period\":64,\"authority\":false,\"imports\":[",
+            failed_?"true":"false",U(calls_),U(exits_),U(scoped_),U(samples_),U(missing_names_));
+        // Version 1 remains readable; wait segmentation is an explicit extension.
+        // parks = resumes + active_parked, also after an interrupted capture.
+        bool first = true;
+        for (const auto &r : rows_) if (r.calls) {
+            // Names originate in compiled export identifiers; never Guest input.
+            std::fprintf(f,"%s{\"nid\":%u,\"name\":\"%s\",\"calls\":%llu,\"scoped\":%llu,"
+                "\"unknown_candidate_checks\":%llu,\"overlap_candidate_checks\":%llu,\"parks\":%llu,\"resumes\":%llu,\"parked_candidate_checks\":%llu,\"unknown_finishes\":%llu,\"unknown_prefixes\":%llu}",first?"":",",
+                r.nid,r.name?r.name:"unresolved",U(r.calls),U(r.scoped),U(r.unknown_samples),U(r.overlap_samples),U(r.parks),U(r.resumes),U(r.parked_samples),U(r.unknown_finishes),U(r.unknown_prefixes)); first = false;
+        }
+        std::fprintf(f, "],\"metadata_cache\":{\"version\":1,\"nid_hits\":%llu,\"nid_probes\":%llu,"
+            "\"no_overlap_hits\":%llu,\"range_scans\":%llu,\"interests_revision\":%llu,\"content_reuse_authority\":false}",
+            U(row_hits_),U(row_probes_),U(range_hits_),U(range_scans_),U(interests_revision_));
+        std::fprintf(f,",\"output_leases\":{\"version\":2,\"begins\":%llu,\"ends\":%llu,"
+            "\"active\":%llu,\"capacity_bytes\":%llu,\"overlap_touches\":%llu,"
+            "\"sources\":[%llu,%llu,%llu,%llu,%llu],\"authority\":false}",
+            U(outputs_.begins),U(outputs_.ends),U(outputs_.active),U(outputs_.capacity_bytes),
+            U(outputs_.overlap_touches),U(outputs_.sources[0]),U(outputs_.sources[1]),U(outputs_.sources[2]),U(outputs_.sources[3]),U(outputs_.sources[4]));
+        std::fprintf(f, ",\"phase_attribution\":{\"version\":1,\"authority\":false,"
+            "\"event_phase_model\":\"event_time_including_settling\","
+            "\"callback_use_policy\":\"accepted_declaration_only\","
+            "\"capture_serial\":%llu,\"active_phase\":%u,\"phases\":[", U(capture_serial_), active_phase_);
+        for (unsigned n = 0; n < phase_rows_.size(); ++n) {
+            if (n) std::fputc(',', f);
+            const auto &p = phase_rows_[n];
+            std::fprintf(f, "{\"index\":%u,\"total\":", n); write_phase_counts(f, p.total);
+            std::fputs(",\"unattributed\":", f); write_phase_counts(f, p.unattributed);
+            std::fputs(",\"imports\":[", f); bool first_row = true;
+            for (unsigned i = 0; i < rows_.size(); ++i) {
+                const auto &c = p.rows[i];
+                if (!(c.enters || c.declarations || c.exits || c.unknown_finishes || c.unknown_prefixes || c.unknown_samples || c.overlap_samples)) continue;
+                std::fprintf(f, "%s{\"nid\":%u,\"counts\":", first_row ? "" : ",", rows_[i].nid);
+                write_phase_counts(f, c); std::fputc('}', f); first_row = false;
+            }
+            std::fputs("]}", f);
+        }
+        std::fputs("]}", f);
+        if (callbacks) { std::fputs(",\"callback_polls\":", f); callbacks->write_json(f); }
+        std::fprintf(f,",\"native_waits\":{\"version\":1,\"parks\":%llu,\"resumes\":%llu,"
+            "\"active\":%llu,\"async_outputs_covered\":false}}",U(parks_),U(resumes_),U(parked_));
+    }
+};
+inline bool stable_host(const RangeStamp &a, const RangeStamp &b) {
+    return a.valid && b.valid && !a.busy && !b.busy && !a.unknown_busy && !b.unknown_busy
+        && a.version == b.version && a.unknown == b.unknown;
+}
+} // namespace switch_validation::epoch

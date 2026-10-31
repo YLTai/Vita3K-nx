@@ -6,7 +6,7 @@ on:
     paths-ignore:
       - '**.md'
   pull_request:
-    branches: [ci/switch-build]
+    branches: [ci/switch-build, baseline/switch-capture-1793256692]
     paths-ignore:
       - '**.md'
   # GitHub only exposes this button once the workflow is on the default branch.
@@ -56,7 +56,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build ccache pkg-config git curl \
-            ca-certificates perl python3 nodejs
+            ca-certificates perl python3 nodejs glslang-tools spirv-tools
           # The official image already includes switch-dev and switch-portlibs.
           # devkitPro blocks package downloads from GitHub-hosted runners.
           dkp-pacman -Q devkitA64 libnx switch-pkg-config switch-mesa
@@ -195,10 +195,9 @@ jobs:
           cp switch-launcher/Vita3K.nro build-switch/artifacts/Vita3K.nro
           cp build-switch/Vita3K.nro build-switch/artifacts/core/Vita3K.nro
           cp docs/SWITCH_MEMORY_VALIDATION.md build-switch/artifacts/READ-MEMORY-VALIDATION.md
-          cp scripts/analyze-switch-tracelab.mjs build-switch/artifacts/
-          cp scripts/analyze-switch-memory-v2.py build-switch/artifacts/
-          cp scripts/analyze-switch-memory-v3.py build-switch/artifacts/
+          cp scripts/analyze-switch-capture.py scripts/analyze-switch-epoch.py scripts/analyze-switch-resource-reuse.py build-switch/artifacts/
           cp build-switch-preflight/write-watch-hooks.json build-switch/artifacts/
+          cp -r build-switch-preflight/gpu-mirror build-switch/artifacts/gpu-mirror-shader
           cp scripts/tracelab-memory-validation.cfg build-switch/artifacts/tracelab-memory-validation.cfg
           {
             printf 'Vita3K commit: %s\n' "$(git rev-parse HEAD)"
